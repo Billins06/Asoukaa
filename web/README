@@ -1,0 +1,12 @@
+# Asoukaa — E-commerce
+
+## Structure
+- `backend/` → API NestJS
+- `mobile/` → App React Native (Expo)
+- `web/` → Interface Web (à venir)
+
+## Lancer le backend
+cd backend && npm run start:dev
+
+## Lancer le mobile
+cd mobile && npx expo start

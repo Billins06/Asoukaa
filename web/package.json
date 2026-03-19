@@ -1,0 +1,9 @@
+{
+  "name": "asoukaa",
+  "private": true,
+  "workspaces": ["backend", "mobile"],
+  "scripts": {
+    "backend": "npm run start:dev --workspace=backend",
+    "mobile": "npm start --workspace=mobile"
+  }
+}

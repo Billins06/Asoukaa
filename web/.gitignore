@@ -1,0 +1,18 @@
+# Node
+node_modules/
+
+# NestJS
+backend/dist/
+backend/.env
+
+# Expo / React Native
+mobile/.expo/
+mobile/node_modules/
+
+# Web
+web/node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+

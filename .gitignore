@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+
+# Backend
+backend/dist/
+backend/.env
+
+# Mobile
+mobile/.expo/
+mobile/node_modules/
+
+# Web
+web/node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
