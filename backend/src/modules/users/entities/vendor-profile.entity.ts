@@ -88,7 +88,7 @@ export class VendorProfile {
 
   // Rempli quand l'admin refuse la demande
   @Column({ nullable: true, type: 'text' })
-  MotifRefus: string;
+    motifRefus: string | null;
 
   // true = a lu et accepté les conditions
   @Column({ default: false })

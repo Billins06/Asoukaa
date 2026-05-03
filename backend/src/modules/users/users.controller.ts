@@ -8,7 +8,7 @@ import {
   ApiOperation,
   ApiQuery,
 } from '@nestjs/swagger';
-import { Request } from 'express';
+import type { Request } from 'express';
 
 import { UsersService }       from './users.service';
 import { UpdateProfileDto }   from './dto/update-profile.dto';

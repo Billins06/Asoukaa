@@ -52,6 +52,9 @@ export enum LogAction {
   PRODUCT_DELETED         = 'Produit supprimé',
   PRODUCT_STATUS_CHANGED  = 'Statut du produit modifié',
 
+  // Boutiques Vendeurs
+  VENDOR_SHOP_UPDATED     = 'Boutique vendeur mise à jour',
+
   // Commandes
   ORDER_CREATED           = 'Commande créée',
   ORDER_STATUS_CHANGED    = 'Statut de la commande modifié',

@@ -18,6 +18,7 @@ import { PaymentsModule } from './modules/payments/payments.module';
 import { ProductsModule } from './modules/products/products.module';
 import { ReviewsModule } from './modules/reviews/reviews.module';
 import { UsersModule } from './modules/users/users.module';
+import { VendorsModule } from './modules/vendors/vendors.module';
 import { WishlistModule } from './modules/wishlist/wishlist.module';
 
 @Module({
@@ -61,6 +62,7 @@ import { WishlistModule } from './modules/wishlist/wishlist.module';
     DeliveryAgentsModule,
     PartnersModule,
     FournisseursModule,
+    VendorsModule,
     WishlistModule,
     ChatModule,
   ],

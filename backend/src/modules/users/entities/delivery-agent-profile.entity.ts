@@ -108,7 +108,7 @@ export class DeliveryAgentProfile {
   status: AgentStatus;
 
   @Column({ nullable: true, type: 'text' })
-  motifRefus: string;
+  motifRefus: string | null;
 
   @Column({ nullable: true })
   reviewedById: string;
