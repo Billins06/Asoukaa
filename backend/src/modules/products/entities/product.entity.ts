@@ -59,11 +59,11 @@ export class Product {
   basePrice: number;
 
   @Column({ nullable: true, type: 'decimal', precision: 8, scale: 2 })
-  weight: number;
+  weight: number | null;
 
   // Ex: "30x20x10 cm"
-  @Column({ nullable: true, length: 100 })
-  dimensions: string;
+  @Column({ type: 'varchar', nullable: true, length: 100 })
+  dimensions: string | null;
 
   @Column({
     type: 'enum',

@@ -19,7 +19,7 @@ export class Category {
   // Auto-référence — pointe vers la même table
   // null = catégorie racine (niveau 1)
   @Column({ nullable: true })
-  parentId: string;
+  parentId: string | null;
 
   @ManyToOne(() => Category, (category) => category.children, {
     nullable: true,
@@ -44,8 +44,8 @@ export class Category {
   @Column({ unique: true, length: 255 })
   slug: string;
 
-  @Column({ nullable: true, length: 500 })
-  imageUrl: string;
+  @Column({ type: 'varchar', nullable: true, length: 500 })
+  imageUrl: string | null;
 
   // Niveau de profondeur : 1, 2 ou 3
   // Calculé automatiquement dans le service avant insertion

@@ -27,8 +27,8 @@ export class ProductTierPrice {
   minQuantity: number;
 
   // Quantité maximale — null = illimité (dernier palier)
-  @Column({ nullable: true })
-  maxQuantity: number;
+  @Column({ type: 'varchar',nullable: true })
+  maxQuantity: number   | null;
 
   // Prix appliqué pour ce palier
   @Column({ type: 'decimal', precision: 12, scale: 2 })

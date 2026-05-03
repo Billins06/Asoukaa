@@ -29,14 +29,14 @@ export class ProductVariant {
   @Column({ unique: true, length: 100 })
   sku: string;
 
-  @Column({ nullable: true, length: 100 })
-  color: string;
+  @Column({ type: 'varchar', nullable: true, length: 100 })
+  color: string  | null;
 
-  @Column({ nullable: true, length: 50 })
-  size: string;
+  @Column({ type: 'varchar', nullable: true, length: 50 })
+  size: string | null;
 
-  @Column({ nullable: true, length: 100 })
-  model: string;
+  @Column({ type: 'varchar', nullable: true, length: 100 })
+  model: string | null;
 
   // Prix propre à cette variante
   // Peut différer du basePrice du produit
@@ -54,8 +54,8 @@ export class ProductVariant {
 
   // Image propre à cette variante
   // Ex: photo du modèle rouge, photo du modèle bleu
-  @Column({ nullable: true, length: 500 })
-  imageUrl: string;
+  @Column({ type: 'varchar', nullable: true, length: 500 })
+  imageUrl: string  | null;
 
   @Column({ default: true })
   isActive: boolean;
