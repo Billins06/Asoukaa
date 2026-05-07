@@ -20,6 +20,7 @@ import { ReviewsModule } from './modules/reviews/reviews.module';
 import { UsersModule } from './modules/users/users.module';
 import { VendorsModule } from './modules/vendors/vendors.module';
 import { WishlistModule } from './modules/wishlist/wishlist.module';
+import { MailModule } from './modules/mail/mail.module';
 
 @Module({
   imports: [
@@ -65,6 +66,7 @@ import { WishlistModule } from './modules/wishlist/wishlist.module';
     VendorsModule,
     WishlistModule,
     ChatModule,
+    MailModule,
   ],
 })
 export class AppModule {}

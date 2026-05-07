@@ -25,9 +25,12 @@ async function bootstrap() {
 
   // CORS
   app.enableCors({
-    origin: [
-      config.get<string>('FRONTEND_WEB_URL') ?? 'http://localhost:3001',
-    ],
+    // origin: [
+    //   config.get<string>('FRONTEND_WEB_URL') ?? 'http://localhost:3001',
+    // ],
+    origin: config.get<string>('NODE_ENV') === 'production'
+  ? [config.get<string>('FRONTEND_WEB_URL') ?? 'http://localhost:3001']
+  : true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     credentials: true,
   });
