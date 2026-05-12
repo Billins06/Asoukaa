@@ -22,7 +22,7 @@ export const otpTemplate = (prenom: string, code: string): string => `
           <!-- BODY -->
           <tr>
             <td style="padding:40px 32px;">
-              <h2 style="color:#1a1a1a;margin:0 0 16px;">Bonjour ${prenom} 👋</h2>
+              <h2 style="color:#1a1a1a;margin:0 0 16px;">Bonjour ${prenom},</h2>
               <p style="color:#555;font-size:15px;line-height:1.6;margin:0 0 24px;">
                 Voici votre code de vérification pour activer votre compte Asoukaa.
                 Ce code est valable <strong> 03 minutes</strong>.

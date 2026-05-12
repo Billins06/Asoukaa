@@ -21,6 +21,7 @@ import { UsersModule } from './modules/users/users.module';
 import { VendorsModule } from './modules/vendors/vendors.module';
 import { WishlistModule } from './modules/wishlist/wishlist.module';
 import { MailModule } from './modules/mail/mail.module';
+import { UploadModule } from './modules/upload/upload.module';
 
 @Module({
   imports: [
@@ -67,6 +68,7 @@ import { MailModule } from './modules/mail/mail.module';
     WishlistModule,
     ChatModule,
     MailModule,
+    UploadModule,
   ],
 })
 export class AppModule {}

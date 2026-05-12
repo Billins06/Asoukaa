@@ -11,9 +11,9 @@ import { User } from './user.entity';
 
 // Les 3 rôles possibles pour un utilisateur
 export enum UserRoleEnum {
-  CLIENT          = 'client',
-  VENDOR          = 'vendeur',
-  DELIVERY_AGENT  = 'livreur',
+  CLIENT         = 'client',
+  VENDOR         = 'vendor',         
+  DELIVERY_AGENT = 'delivery_agent',  
 }
 
 // ⚠️ Contrainte unique : un utilisateur ne peut pas avoir
