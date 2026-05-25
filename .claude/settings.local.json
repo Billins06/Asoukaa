@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "WebSearch",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(New-Item -ItemType Directory -Force -Path \"c:\\\\PROJET\\\\asoukaa_front_donne\\\\asoukaa\\\\lib\\\\presentation\\\\otp_verification_screen\")",
+      "Bash(Out-Null)"
+    ]
+  }
+}
