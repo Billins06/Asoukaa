@@ -31,7 +31,7 @@ export class Notification {
   // Les deux sont nullable car c'est soit l'un soit l'autre
   @Index()
   @Column({ nullable: true })
-  userId: string;
+  userId: string | null;
 
   @ManyToOne(() => User, {
     nullable: true,
@@ -44,7 +44,7 @@ export class Notification {
 
   @Index()
   @Column({ nullable: true })
-  adminId: string;
+  adminId: string | null;
 
   @ManyToOne(() => AdminAccount, {
     nullable: true,
@@ -67,14 +67,14 @@ export class Notification {
 
   // ID de l'élément concerné
   // Ex: id de la commande, id de la livraison
-  @Column({ nullable: true })
-  referenceId: string;
+  @Column({ nullable: true, type: 'varchar' })
+  referenceId: string | null;
 
   // Type de l'élément concerné
   // Ex: 'order', 'delivery', 'payment'
   // Permet de construire le lien de redirection dans l'app
-  @Column({ nullable: true, length: 50 })
-  referenceType: string;
+  @Column({ nullable: true, type:'varchar', length: 50 })
+  referenceType: string | null;
 
   @Column({ default: false })
   isRead: boolean;

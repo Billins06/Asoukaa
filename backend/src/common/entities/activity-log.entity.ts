@@ -79,6 +79,11 @@ export enum LogAction {
   COUPON_CREATED          = 'Coupon créé',
   COUPON_DEACTIVATED      = 'Coupon désactivé',
 
+  // Partenaires
+  PARTNER_CREATED         = 'Partenaire ajouté',
+  PARTNER_UPDATED         = 'Partenaire modifié',
+  PARTNER_DELETED         = 'Partenaire supprimé',
+
   // Avis
   REVIEW_APPROVED         = 'Avis approuvé',
   REVIEW_REJECTED         = 'Avis rejeté',

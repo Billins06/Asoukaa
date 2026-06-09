@@ -32,7 +32,7 @@ export class Coupon {
   // Qui a créé ce coupon — admin ou vendeur
   // Les deux sont nullable car c'est soit l'un soit l'autre
   @Column({ nullable: true })
-  createdByAdminId: string;
+  createdByAdminId: string | null;
 
   @ManyToOne(() => AdminAccount, {
     nullable: true,
@@ -42,7 +42,7 @@ export class Coupon {
   createdByAdmin: AdminAccount;
 
   @Column({ nullable: true })
-  createdByVendorId: string;
+  createdByVendorId: string | null;
 
   @ManyToOne(() => VendorProfile, {
     nullable: true,
@@ -54,7 +54,7 @@ export class Coupon {
   // Si coupon limité à une boutique spécifique
   // Null = valable sur toute la plateforme
   @Column({ nullable: true })
-  vendorId: string;
+  vendorId: string | null;
 
   @ManyToOne(() => VendorProfile, {
     nullable: true,
@@ -77,12 +77,12 @@ export class Coupon {
   // Montant minimum de commande pour utiliser ce coupon
   // Nullable = pas de minimum
   @Column({ nullable: true, type: 'decimal', precision: 12, scale: 2 })
-  minOrderAmount: number;
+  minOrderAmount: number | null;
 
   // Nombre maximum d'utilisations au total
   // Nullable = illimité
-  @Column({ nullable: true })
-  maxUses: number;
+  @Column({ nullable: true, type: 'decimal' })
+  maxUses: number | null;
 
   // Compteur d'utilisations actuelles
   @Column({ default: 0 })
@@ -91,7 +91,7 @@ export class Coupon {
   // Date d'expiration
   // Nullable = pas d'expiration
   @Column({ nullable: true, type: 'timestamp' })
-  expiresAt: Date;
+  expiresAt: Date | null ;
 
   @Column({ default: true })
   isActive: boolean;

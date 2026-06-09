@@ -65,7 +65,7 @@ export class Review {
   notation: number;
 
   @Column({ nullable: true, type: 'text' })
-  comment: string;
+  comment: string | null;
 
   @Column({
     type: 'enum',

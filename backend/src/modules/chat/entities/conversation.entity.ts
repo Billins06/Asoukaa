@@ -43,7 +43,7 @@ export class Conversation {
 
   // Contexte optionnel — sur quel produit porte la discussion
   @Column({ nullable: true })
-  productId: string;
+  productId: string | null;
 
   @ManyToOne(() => Product, {
     nullable: true,

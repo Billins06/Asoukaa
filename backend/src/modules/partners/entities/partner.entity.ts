@@ -20,14 +20,14 @@ export class Partner {
 
   // ⚠️ PRODUCTION : valider que l'URL est bien une image
   // avant de l'enregistrer (type MIME, taille max)
-  @Column({ nullable: true, length: 500 })
-  part_logoUrl: string;
+  @Column({ nullable: true, type:'varchar', length: 500 })
+  part_logoUrl: string | null;
 
-  @Column({ nullable: true, length: 500 })
-  part_websiteUrl: string;
+  @Column({ nullable: true, type:'varchar', length: 500 })
+  part_websiteUrl: string | null;
 
   @Column({ nullable: true, type: 'text' })
-  description: string;
+  description: string | null;
 
   @Column({ default: true })
   isActive: boolean;

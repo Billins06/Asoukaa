@@ -46,7 +46,7 @@ export class MailService {
   async sendOtp(to: string, prenom: string, code: string): Promise<void> {
     await this.send(
       to,
-      '🔐 Votre code de vérification Asoukaa',
+      'Votre code de vérification Asoukaa',
       otpTemplate(prenom, code),
     );
   }
@@ -55,7 +55,7 @@ export class MailService {
   async sendPasswordReset(to: string, prenom: string, code: string): Promise<void> {
     await this.send(
       to,
-      '🔑 Réinitialisation de votre mot de passe',
+      'Réinitialisation de votre mot de passe',
       passwordResetTemplate(prenom, code),
     );
   }
@@ -64,7 +64,7 @@ export class MailService {
   async sendOrderConfirmation(to: string, data: OrderConfirmationData): Promise<void> {
     await this.send(
       to,
-      `✅ Commande #${data.orderNumber} confirmée`,
+      `Commande #${data.orderNumber} confirmée`,
       orderConfirmationTemplate(data),
     );
   }
@@ -73,7 +73,7 @@ export class MailService {
   async sendVendorApproved(to: string, prenom: string, shopName: string): Promise<void> {
     await this.send(
       to,
-      '🎉 Votre boutique Asoukaa est approuvée !',
+      'Votre boutique Asoukaa est approuvée !',
       vendorApprovedTemplate(prenom, shopName),
     );
   }

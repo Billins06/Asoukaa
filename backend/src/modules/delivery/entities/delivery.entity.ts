@@ -41,7 +41,7 @@ export class Delivery {
   // Nullable car le livreur est affecté après création
   // La livraison existe dès que la commande est créée
   @Column({ nullable: true })
-  agentId: string;
+  agentId: string | null;
 
   @ManyToOne(() => DeliveryAgentProfile, {
     nullable: true,

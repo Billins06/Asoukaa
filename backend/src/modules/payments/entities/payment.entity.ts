@@ -60,7 +60,7 @@ export class Payment {
     enum: PaymentOperator,
     nullable: true,
   })
-  operator: PaymentOperator;
+  operator: PaymentOperator | null;
 
   @Column({
     type: 'enum',

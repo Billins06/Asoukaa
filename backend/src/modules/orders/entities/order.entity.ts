@@ -18,7 +18,7 @@ import { OrderItem } from './order-item.entity';
 
 export enum OrderStatus {
   PENDING    = 'en attente',
-  IN_PROGRESS  = 'en cours',
+  PREPARING  = 'en cours',
   SHIPPED    = 'expedié',
   DELIVERED  = 'livré',
   CANCELLED  = 'annulé',
@@ -72,7 +72,7 @@ export class Order {
 
   // Coupon appliqué — nullable car optionnel
   @Column({ nullable: true })
-  couponId: string;
+  couponId: string | null;
 
   @ManyToOne(() => Coupon, {
     nullable: true,
@@ -91,7 +91,7 @@ export class Order {
   // Instructions laissées par le client
   // Ex: "Sonner deux fois", "Laisser chez le gardien"
   @Column({ nullable: true, type: 'text' })
-  instructions: string;
+  instructions: string | null;
 
   // ─── Calculs financiers ────────────────────────────────
 
@@ -116,7 +116,7 @@ export class Order {
 
   // Raison de l'annulation si applicable
   @Column({ nullable: true, type: 'text' })
-  motifAnnulation: string;
+  motifAnnulation: string | null;
 
   // ─── Relations ─────────────────────────────────────────
 

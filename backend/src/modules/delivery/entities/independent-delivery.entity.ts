@@ -36,7 +36,7 @@ export class IndependentDelivery {
 
   // Nullable — sera rempli quand un livreur accepte
   @Column({ nullable: true })
-  agentId: string;
+  agentId: string | null;
 
   @ManyToOne(() => DeliveryAgentProfile, {
     nullable: true,
@@ -51,12 +51,12 @@ export class IndependentDelivery {
 
   // Adresse de destination
   @Column({ type: 'text' })
-  deliveryAddress: string;
+  adresseLivraison: string;
 
   // Description du colis
   // Ex: "Carton de 5kg contenant des vêtements"
   @Column({ nullable: true, type: 'text' })
-  packageDescription: string;
+  packageDescription: string | null;
 
   @Column({
     type: 'enum',
@@ -68,7 +68,7 @@ export class IndependentDelivery {
   // ⏳ Tarif à confirmer avec l'équipe
   // Nullable pour l'instant
   @Column({ nullable: true, type: 'decimal', precision: 12, scale: 2 })
-  tarifConvenu: number;
+  tarifConvenu: number | null;
 
   @CreateDateColumn()
   createdAt: Date;

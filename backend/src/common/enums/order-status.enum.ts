@@ -1,8 +1,8 @@
 export enum OrderStatus {
-  ATTENTE    = 'en attente',
-  EN_COURS  = 'en cours',
-  EXPÉDIÉ    = 'expedié',
-  LIVRÉ  = 'livré',
-  ANNULÉ  = 'annulé',
+  PENDING    = 'en attente',
+  PREPARING  = 'en cours',
+  SHIPPED    = 'expedié',
+  DELIVERED  = 'livré',
+  CANCELLED  = 'annulé',
 }
 

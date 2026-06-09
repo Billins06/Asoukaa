@@ -35,11 +35,11 @@ export class Message {
 
   // Nullable car le message peut être une image uniquement
   @Column({ nullable: true, type: 'text' })
-  content: string;
+  content: string | null;
 
   // Nullable car le message peut être du texte uniquement
-  @Column({ nullable: true, length: 500 })
-  imageUrl: string;
+  @Column({ nullable: true, type: 'varchar', length: 500 })
+  imageUrl: string | null;
 
   // true = bloqué automatiquement par le filtre
   // Ex: numéro de téléphone détecté
@@ -48,8 +48,8 @@ export class Message {
 
   // Raison du blocage automatique
   // Ex: 'phone_number_detected', 'external_link_detected'
-  @Column({ nullable: true, length: 255 })
-  blockReason: string;
+  @Column({ nullable: true, type: 'varchar', length: 255 })
+  blockReason: string | null;
 
   // true = signalé par l'un des participants
   @Column({ default: false })

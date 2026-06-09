@@ -1,12 +1,14 @@
 import {
   Controller,
   Post,
+  Get,
   Body,
   Req,
   HttpCode,
   HttpStatus,
   UseGuards,
   Query,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import type { Request } from 'express';
@@ -115,4 +117,20 @@ export class AuthController {
   ) {
     return this.authService.setAdminPassword(dto, email);
   }
+
+  @ApiOperation({ summary: 'Récupérer le profil admin/superadmin connecté' })
+  @ApiBearerAuth()
+  @Get('admin/me')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  async getCurrentAdmin(@Req() req: Request) {
+    const admin = (req as any).user;
+    if (!admin || !admin.email) {
+      throw new UnauthorizedException('Admin non authentifié');
+    }
+    // Retirer les champs sensibles
+    const { passwordHash, invitationToken, ...adminSafe } = admin;
+    return adminSafe;
+  }
 }
+
