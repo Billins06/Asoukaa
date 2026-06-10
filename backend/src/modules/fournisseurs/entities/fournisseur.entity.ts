@@ -31,8 +31,8 @@ export class Fournisseur {
   @Column({ length: 200 })
   contactPerson: string;
 
-  @Column({ nullable: true, length: 255 })
-  four_email: string;
+  @Column({ nullable: true, type: 'varchar', length: 255 })
+  four_email: string | null;
 
   @Column({ length: 20 })
   four_phone: string;
@@ -52,15 +52,15 @@ export class Fournisseur {
   currency: Currency;
 
   // Délai moyen de livraison en jours
-  @Column({ default: 1 })
-  delaiLivraison: number;
+  @Column({ type: 'integer', nullable: true, default: 1 })
+  delaiLivraison: number | null;
 
   @Column({ default: true })
   isActive: boolean;
 
   // Notes internes visibles uniquement par l'admin
-  @Column({ nullable: true, type: 'text' })
-  notes: string;
+  @Column({ type: 'text', nullable: true })
+  notes: string | null;
 
   // Traçabilité — quel admin a créé ce fournisseur
   @Column({ nullable: true })

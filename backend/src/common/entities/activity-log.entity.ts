@@ -84,6 +84,11 @@ export enum LogAction {
   PARTNER_UPDATED         = 'Partenaire modifié',
   PARTNER_DELETED         = 'Partenaire supprimé',
 
+  // Fournisseurs
+  FOURNISSEUR_CREATED     = 'Fournisseur créé',
+  FOURNISSEUR_UPDATED     = 'Fournisseur modifié',
+  FOURNISSEUR_DELETED     = 'Fournisseur supprimé',
+
   // Avis
   REVIEW_APPROVED         = 'Avis approuvé',
   REVIEW_REJECTED         = 'Avis rejeté',
