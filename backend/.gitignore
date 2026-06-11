@@ -1,3 +1,14 @@
 # Uploads locaux (fichiers utilisateurs)
 uploads/
 !uploads/.gitkeep
+
+# Env & secrets
+.env*
+!.env.example
+*.pem
+*.key
+
+# Build & deps
+dist/
+node_modules/
+*.log

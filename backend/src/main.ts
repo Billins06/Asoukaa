@@ -26,16 +26,17 @@ async function bootstrap() {
     }),
   );
 
-  // CORS
+  // CORS - Stricte en prod, permissif en dev
   app.enableCors({
-    // origin: [
-    //   config.get<string>('FRONTEND_WEB_URL') ?? 'http://localhost:3001',
-    // ],
     origin: config.get<string>('NODE_ENV') === 'production'
-  ? [config.get<string>('FRONTEND_WEB_URL') ?? 'http://localhost:3001']
-  : true,
+      ? [
+          config.get<string>('FRONTEND_WEB_URL') ?? 'http://localhost:3002',
+          'http://localhost:3001', // API
+        ]
+      : true, // Accepte toutes les origines en développement
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     credentials: true,
+    allowedHeaders: ['Content-Type', 'Authorization'],
   });
 
   app.useStaticAssets(join(process.cwd(), 'uploads'), {
@@ -46,15 +47,17 @@ async function bootstrap() {
 // Dans bootstrap(), après useGlobalPipes :
 app.useGlobalFilters(new AllExceptionsFilter());
 
-  // Swagger — doc auto sur /api/docs
-  const swaggerConfig = new DocumentBuilder()
-    .setTitle('Asoukaa API')
-    .setDescription('Documentation de l\'API e-commerce Asoukaa')
-    .setVersion('1.0')
-    .addBearerAuth()
-    .build();
-  const document = SwaggerModule.createDocument(app, swaggerConfig);
-  SwaggerModule.setup('api/docs', app, document);
+  // Swagger — doc auto sur /api/docs (désactivé en production)
+  if (process.env.NODE_ENV !== 'production') {
+    const swaggerConfig = new DocumentBuilder()
+      .setTitle('Asoukaa API')
+      .setDescription('Documentation de l\'API e-commerce Asoukaa')
+      .setVersion('1.0')
+      .addBearerAuth()
+      .build();
+    const document = SwaggerModule.createDocument(app, swaggerConfig);
+    SwaggerModule.setup('api/docs', app, document);
+  }
 
   const port = config.get<number>('APP_PORT') ?? 3000;
   await app.listen(port);

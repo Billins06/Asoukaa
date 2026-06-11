@@ -26,6 +26,7 @@ import { JwtAuthGuard }          from './guards/jwt-auth.guard';
 import { RolesGuard }            from './guards/roles.guard';
 import { Roles }                 from './decorators/roles.decorator';
 import { AdminRole }             from './entities/admin-account.entity';
+import { Role }                  from '../../common/enums/role.enum';
 
 // Helper pour récupérer l'IP de la requête
 const getIp = (req: Request): string =>
@@ -94,17 +95,17 @@ export class AuthController {
   @ApiOperation({ summary: 'Créer un admin (SuperAdmin uniquement)' })
   @ApiBearerAuth()
   @Post('admin/create')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.SUPERADMIN) // ✅ SEULEMENT les superadmins
   @HttpCode(HttpStatus.CREATED)
-  // ⚠️ PRODUCTION : cette route doit être protégée
-  // Seul un superadmin connecté peut y accéder
-  // On ajoutera le guard admin JWT quand le module sera complet
   createAdmin(
     @Body() dto: CreateAdminDto,
     @Req() req: Request,
   ) {
-    // TODO: récupérer l'id du superadmin depuis le token
-    // Pour l'instant on passe un placeholder
-    const createdById = (req as any).admin?.id ?? 'system';
+    const createdById = (req as any).user?.id;
+    if (!createdById) {
+      throw new UnauthorizedException('SuperAdmin non identifié');
+    }
     return this.authService.createAdmin(dto, createdById, getIp(req));
   }
 

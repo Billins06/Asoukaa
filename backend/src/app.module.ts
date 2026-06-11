@@ -22,6 +22,8 @@ import { VendorsModule } from './modules/vendors/vendors.module';
 import { WishlistModule } from './modules/wishlist/wishlist.module';
 import { MailModule } from './modules/mail/mail.module';
 import { UploadModule } from './modules/upload/upload.module';
+import { ScheduleModule } from '@nestjs/schedule';
+import { ActivityLogsModule } from './modules/activity-logs/activity-logs.module';
 
 @Module({
   imports: [
@@ -69,6 +71,8 @@ import { UploadModule } from './modules/upload/upload.module';
     ChatModule,
     MailModule,
     UploadModule,
+    ScheduleModule.forRoot(),     // ⚠️ activer le système de cron
+    ActivityLogsModule,
   ],
 })
 export class AppModule {}
