@@ -2,6 +2,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { ThrottlerModule } from '@nestjs/throttler';
 import { AuthModule } from './modules/auth/auth.module';
 import { CartModule } from './modules/cart/cart.module';
 import { CategoriesModule } from './modules/categories/categories.module';
@@ -31,6 +32,13 @@ import { ActivityLogsModule } from './modules/activity-logs/activity-logs.module
       isGlobal: true,
       envFilePath: '.env',
     }),
+    // 🛡️ Rate limiting (5 requêtes par 60 secondes par IP)
+    ThrottlerModule.forRoot([
+      {
+        ttl: 60000,
+        limit: 5,
+      },
+    ]),
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
       useFactory: (config: ConfigService) => {

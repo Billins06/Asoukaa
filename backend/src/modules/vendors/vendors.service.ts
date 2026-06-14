@@ -19,6 +19,7 @@ import { UpdatePaymentSettingsDto }  from './dto/update-payment-settings.dto';
 import { ReviewVendorDto, VendorReviewAction } from './dto/review-vendor.dto';
 
 import { ActivityLogService } from '../../common/services/activity-log.service';
+import { EncryptionService } from '../../common/services/encryption.service';
 import {
   ActorType,
   LogAction,
@@ -39,6 +40,7 @@ export class VendorsService {
 
     private readonly mailerService:   MailerService,
     private readonly logService:      ActivityLogService,
+    private readonly encryptionService: EncryptionService,
   ) {}
 
   // ─────────────────────────────────────────────────────
@@ -311,7 +313,8 @@ export class VendorsService {
     }
 
     vendor.paymentMethod  = dto.paymentMethod;
-    vendor.paymentDetails = paymentDetails;
+    // 🔒 Chiffrer les données bancaires sensibles
+    vendor.paymentDetails = this.encryptionService.encrypt(paymentDetails);
     await this.vendorRepo.save(vendor);
 
     return { message: 'Paramètres de paiement mis à jour avec succès' };

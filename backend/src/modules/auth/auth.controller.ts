@@ -25,8 +25,9 @@ import { SetAdminPasswordDto }   from './dto/set-admin-password.dto';
 import { JwtAuthGuard }          from './guards/jwt-auth.guard';
 import { RolesGuard }            from './guards/roles.guard';
 import { Roles }                 from './decorators/roles.decorator';
-import { AdminRole }             from './entities/admin-account.entity';
+import { AdminRole, AdminAccount } from './entities/admin-account.entity';
 import { Role }                  from '../../common/enums/role.enum';
+import { TokenBlacklistService } from '../../common/services/token-blacklist.service';
 
 // Helper pour récupérer l'IP de la requête
 const getIp = (req: Request): string =>
@@ -37,7 +38,10 @@ const getIp = (req: Request): string =>
 @ApiTags('Auth')
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(
+    private readonly authService: AuthService,
+    private readonly tokenBlacklist: TokenBlacklistService,
+  ) {}
 
   // ─── Routes utilisateurs ─────────────────────────────────
 
@@ -102,7 +106,7 @@ export class AuthController {
     @Body() dto: CreateAdminDto,
     @Req() req: Request,
   ) {
-    const createdById = (req as any).user?.id;
+    const createdById = ((req as any).user as AdminAccount)?.id;
     if (!createdById) {
       throw new UnauthorizedException('SuperAdmin non identifié');
     }
@@ -125,13 +129,27 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.OK)
   async getCurrentAdmin(@Req() req: Request) {
-    const admin = (req as any).user;
+    const admin = (req as any).user as AdminAccount;
     if (!admin || !admin.email) {
       throw new UnauthorizedException('Admin non authentifié');
     }
     // Retirer les champs sensibles
     const { passwordHash, invitationToken, ...adminSafe } = admin;
     return adminSafe;
+  }
+
+  @ApiOperation({ summary: 'Logout (révoque le token)' })
+  @ApiBearerAuth()
+  @Post('logout')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  logout(@Req() req: Request) {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.substring(7);
+      this.tokenBlacklist.revokeToken(token);
+    }
+    return { message: 'Déconnecté avec succès' };
   }
 }
 

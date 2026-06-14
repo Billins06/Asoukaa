@@ -128,11 +128,10 @@ export class VendorProfile {
   })
   paymentMethod: PaymentMethod;
 
-  // ⚠️ PRODUCTION : les données bancaires sont sensibles
-  // En production réelle, chiffrer ce champ avec une clé
-  // ou utiliser un service tiers (Stripe Connect, etc.)
-  @Column({ type: 'jsonb', nullable: true })
-  paymentDetails: Record<string, any>;
+  // ⚠️ PRODUCTION : les données bancaires sont chiffrées en AES-256-GCM
+  // Contient la chaîne chiffrée, déchiffrer via EncryptionService
+  @Column({ type: 'text', nullable: true })
+  paymentDetails: string;
 
   @CreateDateColumn()
   createdAt: Date;

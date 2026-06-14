@@ -5,6 +5,7 @@ import { ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
 import { AllExceptionsFilter } from './common/filters/http-exception.filter';
+import { SanitizeLogsInterceptor } from './common/interceptors/sanitize-logs.interceptor';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { join } from 'path';
 
@@ -25,6 +26,12 @@ async function bootstrap() {
       transform: true,          // transforme les types automatiquement
     }),
   );
+
+  // 🛡️ Rate Limiting global (anti-brute force)
+  // ThrottlerGuard est automatiquement appliqué via la configuration du module
+
+  // 🔒 Log Sanitization (remove sensitive data from responses)
+  app.useGlobalInterceptors(new SanitizeLogsInterceptor());
 
   // CORS - Stricte en prod, permissif en dev
   app.enableCors({

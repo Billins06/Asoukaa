@@ -4,6 +4,8 @@ import { MailerModule } from '@nestjs-modules/mailer';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ActivityLog } from './entities/activity-log.entity';
 import { ActivityLogService } from './services/activity-log.service';
+import { EncryptionService } from './services/encryption.service';
+import { TokenBlacklistService } from './services/token-blacklist.service';
 
 @Module({
   imports: [
@@ -27,7 +29,7 @@ import { ActivityLogService } from './services/activity-log.service';
       inject: [ConfigService],
     }),
   ],
-  providers: [ActivityLogService],
-  exports: [ActivityLogService, MailerModule],
+  providers: [ActivityLogService, EncryptionService, TokenBlacklistService],
+  exports: [ActivityLogService, EncryptionService, TokenBlacklistService, MailerModule],
 })
 export class CommonModule {}
