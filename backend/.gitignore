@@ -12,3 +12,13 @@ uploads/
 dist/
 node_modules/
 *.log
+
+# Autres fchiers à ne pas commiter
+backend/BACKUP_STRATEGY
+backend/COMPLETION_REPORT
+backend/FILES_MODIFIED
+backend/FIXES_SUMMARY
+backend/ISSUES_RESOLVED
+backend/QUICK_START_SEEDING
+backend/SECURITY_IMPROVEMENTS_PLAN_C
+backend/SEEDERS_SUMMARY

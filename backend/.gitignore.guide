@@ -1,0 +1,241 @@
+# 📋 Guide .gitignore - Asoukaa Project
+
+## Qu'est-ce que .gitignore ?
+
+Fichier qui dit à Git quels fichiers/dossiers **NE PAS** inclure dans le repository.
+
+**Raisons principales**:
+- 🔐 **Sécurité** : Éviter de commit les secrets (.env, credentials, keys)
+- 📦 **Taille** : Éviter les dossiers volumineux (node_modules, dist)
+- 🗑️ **Nettoyage** : Ignorer les fichiers temporaires (logs, cache, uploads)
+
+---
+
+## 📂 Fichiers Actuellement Ignorés
+
+```
+# Backend
+node_modules/           ← Dépendances npm (énorme, recréable)
+backend/dist/           ← Compilation JS (recréable)
+backend/.env            ← Secrets production (NE JAMAIS COMMIT)
+backend/.env.local      ← Secrets locaux
+backend/.env.*.local    ← Secrets par environnement
+backend/uploads/        ← Fichiers uploadés par users
+backend/logs/           ← Logs d'exécution
+backend/*.log           ← Fichiers .log individuels
+
+# Mobile & Web
+mobile/.expo/
+mobile/node_modules/
+web/node_modules/
+
+# OS
+.DS_Store              ← Fichiers macOS
+Thumbs.db              ← Fichiers Windows
+```
+
+---
+
+## ✅ Fichiers QUI DOIVENT Être Inclus
+
+Quelques clarifications :
+
+```
+✅ INCLURE:
+- src/                 ← Code source
+- package.json         ← Dépendances (installables)
+- tsconfig.json        ← Configuration TypeScript
+- .env.example         ← Template (sans vrais secrets!)
+- README.md            ← Documentation
+- Seeders (src/database/seeders/)
+- data-source.ts       ← Configuration TypeORM
+- seed-runner.ts       ← Seeder CLI
+
+❌ NE PAS INCLURE:
+- .env                 ← Vrais secrets
+- node_modules/        ← Trop gros
+- dist/                ← Compilé
+- uploads/             ← Données utilisateur
+- logs/                ← Logs d'exécution
+```
+
+---
+
+## 🔧 Comment Ajouter un Fichier au .gitignore
+
+### Option 1: Éditer directement le fichier
+
+```bash
+# Ouvrir le .gitignore
+code .gitignore
+
+# Ajouter une nouvelle ligne
+backend/new-folder/
+
+# Sauvegarder (Ctrl+S)
+```
+
+### Option 2: Via Terminal
+
+```bash
+# Ajouter une ligne au .gitignore
+echo "backend/new-folder/" >> .gitignore
+
+# Ou ajouter plusieurs patterns
+cat >> .gitignore << EOF
+backend/secrets/
+backend/temp/
+*.backup
+EOF
+```
+
+### Option 3: Utiliser Git directement
+
+```bash
+# Si tu as accidentellement commité un fichier à ignorer
+# 1. Ajoute-le au .gitignore
+echo "backend/.env" >> .gitignore
+
+# 2. Retire-le du repository (pas du disque)
+git rm --cached backend/.env
+
+# 3. Commit le changement
+git add .gitignore
+git commit -m "Add .env to gitignore"
+```
+
+---
+
+## 🔍 Exemples de Patterns .gitignore
+
+### Fichiers spécifiques
+```gitignore
+backend/.env              # Un fichier exact
+backend/secret.key        # Un autre fichier
+```
+
+### Dossiers complets
+```gitignore
+backend/uploads/          # Tout le dossier
+node_modules/             # À tous les niveaux
+```
+
+### Patterns avec wildcards
+```gitignore
+*.log                     # Tous les fichiers .log
+.env.*                    # .env.local, .env.prod, etc.
+backend/tmp*              # Fichiers commençant par "tmp"
+**/*.bak                  # Tous les .bak partout
+```
+
+### Exceptions (NE PAS ignorer)
+```gitignore
+# Ignorer tous les .log
+*.log
+
+# SAUF production.log
+!production.log
+```
+
+---
+
+## ⚠️ Erreurs Courantes
+
+### ❌ Erreur 1: Oublier de spécifier le chemin
+```gitignore
+# MAUVAIS (ignore uploads PARTOUT)
+uploads/
+
+# BON (ignore que dans backend)
+backend/uploads/
+```
+
+### ❌ Erreur 2: Oublier la trailing slash
+```gitignore
+# Si c'est un dossier, ajoute la slash
+backend/logs/    ← BON (dossier)
+backend/logs     ← OK aussi, mais slash préféré
+```
+
+### ❌ Erreur 3: Ne pas ignorer les secrets
+```gitignore
+# OUPS! Cela laisse les secrets dans git
+# backend/.env    ← Commenté = pas ignoré!
+
+# CORRECT
+backend/.env     ← Actif = ignoré ✅
+```
+
+---
+
+## 🔐 Checklist Sécurité
+
+Avant chaque commit:
+
+```bash
+# Vérifier quels fichiers vont être commitées
+git status
+
+# JAMAIS commit:
+❌ .env
+❌ *.key
+❌ credentials.json
+❌ passwords.txt
+❌ API keys
+❌ Private tokens
+
+# OK à commit:
+✅ src/
+✅ .env.example (sans vrais secrets!)
+✅ Configuration (tsconfig, eslint)
+✅ Documentation
+```
+
+---
+
+## 📝 Notre .gitignore Actuel
+
+```
+# Dependencies
+node_modules/
+
+# Backend
+backend/dist/
+backend/.env
+backend/.env.local
+backend/.env.*.local
+backend/uploads/
+backend/logs/
+backend/*.log
+
+# Mobile
+mobile/.expo/
+mobile/node_modules/
+
+# Web
+web/node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+```
+
+---
+
+## 🎯 Résumé
+
+| Action | Comment | Exemple |
+|--------|---------|---------|
+| **Ignorer un fichier** | `echo "path/file.ext" >> .gitignore` | `echo "backend/.env" >> .gitignore` |
+| **Ignorer un dossier** | `echo "path/folder/" >> .gitignore` | `echo "backend/uploads/" >> .gitignore` |
+| **Pattern wildcard** | `echo "*.log" >> .gitignore` | `echo "backend/*.log" >> .gitignore` |
+| **Vérifier avant commit** | `git status` | - |
+| **Retirer fichier commité** | `git rm --cached file` | - |
+
+---
+
+**Règle d'Or**:
+> 🔐 Quand en doute, ignorer. Mieux vaut trop ignorer que pas assez.
+
+Les fichiers source (code) doivent être dans Git.
+Les secrets, logs, uploads doivent être ignorés.

@@ -151,5 +151,23 @@ export class AuthController {
     }
     return { message: 'Déconnecté avec succès' };
   }
+
+  @Get('debug-token')
+  @HttpCode(HttpStatus.OK)
+  debugToken(@Req() req: Request) {
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.replace('Bearer ', '');
+    const parts = token?.split('.') || [];
+
+    return {
+      headerFound: !!authHeader,
+      tokenFound: !!token,
+      tokenLength: token?.length ?? 0,
+      parts: parts.length,
+      isValid: parts.length === 3,
+      tokenPreview: token?.substring(0, 50),
+      parts_lengths: parts.map((p: string) => p.length),
+    };
+  }
 }
 
