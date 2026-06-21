@@ -11,6 +11,7 @@ import { ProductVariant }     from '../products/entities/product-variant.entity'
 import { VendorProfile }      from '../users/entities/vendor-profile.entity';
 import { User }               from '../users/entities/user.entity';
 import { CommonModule }       from '../../common/common.module';
+import { CommissionsModule }  from './commissions/commissions.module';
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { CommonModule }       from '../../common/common.module';
       User,
     ]),
     CommonModule,
+    CommissionsModule,
   ],
   controllers: [PaymentsController],
   providers:   [PaymentsService],
