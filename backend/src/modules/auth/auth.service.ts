@@ -482,4 +482,57 @@ export class AuthService {
       await this.mailService.sendPasswordReset(user.email, user.prenom, rawCode);
     }
   }
+
+  async getAllAdmins(page: number = 1, limit: number = 20) {
+    const skip = (page - 1) * limit;
+    const [admins, total] = await this.adminRepo.findAndCount({
+      skip,
+      take: limit,
+      order: { createdAt: 'DESC' },
+    });
+
+    return {
+      data: admins.map(admin => {
+        const { passwordHash, invitationToken, ...safe } = admin;
+        return safe;
+      }),
+      pagination: {
+        total,
+        page,
+        limit,
+        pages: Math.ceil(total / limit),
+      },
+    };
+  }
+
+  async getAdminById(id: string) {
+    const admin = await this.adminRepo.findOne({ where: { id } });
+    if (!admin) {
+      throw new NotFoundException('Admin not found');
+    }
+    const { passwordHash, invitationToken, ...safe } = admin;
+    return safe;
+  }
+
+  async deactivateAdmin(id: string, deactivatedById: string, ip: string) {
+    const admin = await this.getAdminById(id);
+
+    if (admin.role === AdminRole.SUPERADMIN) {
+      throw new BadRequestException('Cannot deactivate a SUPERADMIN');
+    }
+
+    admin.isActive = false;
+    await this.adminRepo.update(id, { isActive: false });
+
+    await this.logService.log({
+      actorId: deactivatedById,
+      actorType: ActorType.SUPERADMIN,
+      action: LogAction.ADMIN_DEACTIVATED,
+      entityType: 'admin',
+      entityId: id,
+      ipAddress: ip,
+    });
+
+    return { message: 'Admin deactivated successfully' };
+  }
 }

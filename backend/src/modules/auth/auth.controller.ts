@@ -8,6 +8,7 @@ import {
   HttpStatus,
   UseGuards,
   Query,
+  Param,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
@@ -150,6 +151,38 @@ export class AuthController {
       this.tokenBlacklist.revokeToken(token);
     }
     return { message: 'Déconnecté avec succès' };
+  }
+
+  @ApiOperation({ summary: 'Lister tous les admins (SUPERADMIN uniquement)' })
+  @ApiBearerAuth()
+  @Get('admin/list')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.SUPERADMIN)
+  @HttpCode(HttpStatus.OK)
+  getAllAdmins(@Query('page') page?: number, @Query('limit') limit?: number) {
+    return this.authService.getAllAdmins(page, limit);
+  }
+
+  @ApiOperation({ summary: 'Récupérer un admin par ID (SUPERADMIN uniquement)' })
+  @ApiBearerAuth()
+  @Get('admin/:id')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.SUPERADMIN)
+  @HttpCode(HttpStatus.OK)
+  getAdminById(@Param('id') id: string) {
+    return this.authService.getAdminById(id);
+  }
+
+  @ApiOperation({ summary: 'Désactiver un admin (SUPERADMIN uniquement)' })
+  @ApiBearerAuth()
+  @Post('admin/:id/deactivate')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.SUPERADMIN)
+  @HttpCode(HttpStatus.OK)
+  deactivateAdmin(@Param('id') id: string, @Req() req: Request) {
+    const superAdminId = ((req as any).user as AdminAccount)?.id;
+    const ip = getIp(req);
+    return this.authService.deactivateAdmin(id, superAdminId, ip);
   }
 
   @Get('debug-token')
