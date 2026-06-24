@@ -8,11 +8,10 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:pretty_qr_code/pretty_qr_code.dart';
 import 'package:sizer/sizer.dart';
 
+import 'package:dio/dio.dart';
+
 import '../../theme/app_theme.dart';
-import '../../services/storage_service.dart';
-import '../../services/database_service.dart';
-import '../../services/gps_tracking_service.dart';
-import '../../services/auth_service.dart';
+import '../../services/api_service.dart';
 
 class DeliveryProofScreen extends StatefulWidget {
   final Map<String, dynamic>? deliveryData;
@@ -104,7 +103,6 @@ class _DeliveryProofScreenState extends State<DeliveryProofScreen>
     _scannerController?.dispose();
     _successController.dispose();
     _notesController.dispose();
-    GpsTrackingService.instance.stopTracking();
     super.dispose();
   }
 
@@ -202,34 +200,46 @@ class _DeliveryProofScreenState extends State<DeliveryProofScreen>
   Future<void> _captureDeliveryPhoto({
     ImageSource source = ImageSource.camera,
   }) async {
-    final image = await StorageService.instance.pickImage(source: source);
-    if (image == null) return;
+    final picker = ImagePicker();
+    final picked = await picker.pickImage(source: source, maxWidth: 1200, imageQuality: 80);
+    if (picked == null) return;
     setState(() => _isUploadingPhoto = true);
-    final orderId = _delivery['id'] ?? 'unknown';
-    final url = await StorageService.instance.uploadDeliveryProof(
-      image,
-      orderId,
-    );
-    if (!mounted) return;
-    setState(() {
-      _isUploadingPhoto = false;
-      if (url != null) {
-        _photoTaken = true;
-        _photoUrl = url;
-        HapticFeedback.lightImpact();
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'Échec de l\'upload. Réessayez.',
-              style: GoogleFonts.outfit(),
+    try {
+      final bytes = await picked.readAsBytes();
+      final fileName = 'delivery_${DateTime.now().millisecondsSinceEpoch}.jpg';
+      final formData = FormData.fromMap({
+        'file': MultipartFile.fromBytes(bytes, filename: fileName),
+      });
+      final res = await ApiService.instance.client.post('/api/v1/uploads/image', data: formData);
+      final url = res.data['url'] as String?;
+      if (!mounted) return;
+      setState(() {
+        _isUploadingPhoto = false;
+        if (url != null) {
+          _photoTaken = true;
+          _photoUrl = url;
+          HapticFeedback.lightImpact();
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Échec de l\'upload. Réessayez.', style: GoogleFonts.outfit()),
+              backgroundColor: AppTheme.error,
+              behavior: SnackBarBehavior.floating,
             ),
-            backgroundColor: AppTheme.error,
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
-    });
+          );
+        }
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _isUploadingPhoto = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Échec de l\'upload. Réessayez.', style: GoogleFonts.outfit()),
+          backgroundColor: AppTheme.error,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
   }
 
   void _showPhotoSourceDialog() {
@@ -283,8 +293,20 @@ class _DeliveryProofScreenState extends State<DeliveryProofScreen>
       _gpsStatusText = 'Obtention de la position...';
     });
 
-    final hasPermission = await GpsTrackingService.instance.checkPermission();
-    if (!hasPermission) {
+    final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      if (!mounted) return;
+      setState(() {
+        _isLoadingGps = false;
+        _gpsStatusText = 'Service GPS désactivé. Activez la localisation.';
+      });
+      return;
+    }
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+    if (permission == LocationPermission.denied || permission == LocationPermission.deniedForever) {
       if (!mounted) return;
       setState(() {
         _isLoadingGps = false;
@@ -293,24 +315,23 @@ class _DeliveryProofScreenState extends State<DeliveryProofScreen>
       return;
     }
 
-    final position = await GpsTrackingService.instance.getCurrentPosition();
+    Position? position;
+    try {
+      position = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+      );
+    } catch (_) {
+      position = null;
+    }
     if (!mounted) return;
 
     if (position != null) {
-      final delivererId = AuthService.instance.currentUser?.id;
-      final missionId = _delivery['missionId'] as String?;
-      if (delivererId != null) {
-        await GpsTrackingService.instance.startTracking(
-          delivererId: delivererId,
-          missionId: missionId ?? 'unknown',
-        );
-      }
       setState(() {
         _gpsStarted = true;
         _currentPosition = position;
         _isLoadingGps = false;
         _gpsStatusText =
-            'Suivi actif — ${position.latitude.toStringAsFixed(5)}, ${position.longitude.toStringAsFixed(5)}';
+            'Suivi actif — ${position!.latitude.toStringAsFixed(5)}, ${position.longitude.toStringAsFixed(5)}';
       });
       HapticFeedback.mediumImpact();
     } else {
@@ -382,17 +403,19 @@ class _DeliveryProofScreenState extends State<DeliveryProofScreen>
     try {
       final orderId = _delivery['id'] ?? '';
       if (orderId.isNotEmpty) {
-        await DatabaseService.instance.updateDeliveryProof(orderId, {
-          'proof_photo_url': _photoUrl,
-          'delivery_condition': _selectedCondition,
-          'delivery_notes': _notesController.text.trim(),
-          'qr_code_scanned': _scannedQrCode,
-          'signature_confirmed': _signatureConfirmed,
-          'gps_lat': _currentPosition?.latitude,
-          'gps_lng': _currentPosition?.longitude,
-        });
+        await ApiService.instance.client.patch(
+          '/api/v1/orders/$orderId/delivery-proof',
+          data: {
+            'proofPhotoUrl': _photoUrl,
+            'deliveryCondition': _selectedCondition,
+            'deliveryNotes': _notesController.text.trim(),
+            'qrCodeScanned': _scannedQrCode,
+            'signatureConfirmed': _signatureConfirmed,
+            'gpsLat': _currentPosition?.latitude,
+            'gpsLng': _currentPosition?.longitude,
+          },
+        );
       }
-      await GpsTrackingService.instance.stopTracking();
     } catch (_) {}
     if (!mounted) return;
     setState(() {
@@ -1620,15 +1643,18 @@ class _DeliveryProofScreenState extends State<DeliveryProofScreen>
                     width: double.infinity,
                     child: OutlinedButton.icon(
                       onPressed: () async {
-                        final pos = await GpsTrackingService.instance
-                            .getCurrentPosition();
-                        if (pos != null && mounted) {
-                          setState(() {
-                            _currentPosition = pos;
-                            _gpsStatusText =
-                                '${pos.latitude.toStringAsFixed(5)}, ${pos.longitude.toStringAsFixed(5)}';
-                          });
-                        }
+                        try {
+                          final pos = await Geolocator.getCurrentPosition(
+                            locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+                          );
+                          if (mounted) {
+                            setState(() {
+                              _currentPosition = pos;
+                              _gpsStatusText =
+                                  '${pos.latitude.toStringAsFixed(5)}, ${pos.longitude.toStringAsFixed(5)}';
+                            });
+                          }
+                        } catch (_) {}
                       },
                       icon: const Icon(Icons.refresh_rounded, size: 16),
                       label: Text(

@@ -2,13 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
-
 import '../../theme/app_theme.dart';
 import '../../routes/app_routes.dart';
 import '../../widgets/app_toast.dart';
-import '../../services/auth_service.dart';
-import '../../services/supabase_service.dart';
+import '../../services/api_service.dart';
+import '../../services/nest_auth_service.dart';
 
 class SupportHelpScreen extends StatefulWidget {
   const SupportHelpScreen({super.key});
@@ -23,8 +21,6 @@ class _SupportHelpScreenState extends State<SupportHelpScreen>
   bool _isLoading = false;
   List<Map<String, dynamic>> _myTickets = [];
   bool _loadingTickets = true;
-
-  SupabaseClient get _client => SupabaseService.instance.client;
 
   @override
   void initState() {
@@ -49,20 +45,22 @@ class _SupportHelpScreenState extends State<SupportHelpScreen>
 
   Future<void> _loadMyTickets() async {
     setState(() => _loadingTickets = true);
+    final isLoggedIn = await NestAuthService.instance
+        .isLoggedIn()
+        .timeout(const Duration(seconds: 5), onTimeout: () => false);
+    if (!isLoggedIn) {
+      if (mounted) setState(() => _loadingTickets = false);
+      return;
+    }
     try {
-      final user = AuthService.instance.currentUser;
-      if (user == null) {
-        setState(() => _loadingTickets = false);
-        return;
-      }
-      final res = await _client
-          .from('support_tickets')
-          .select()
-          .eq('user_id', user.id)
-          .order('created_at', ascending: false);
+      final r = await ApiService.instance.client.get('/api/v1/support-tickets');
+      final raw = r.data;
+      final list = raw is List
+          ? raw
+          : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) as List : []);
       if (mounted) {
         setState(() {
-          _myTickets = List<Map<String, dynamic>>.from(res as List);
+          _myTickets = list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
           _loadingTickets = false;
         });
       }
@@ -77,20 +75,21 @@ class _SupportHelpScreenState extends State<SupportHelpScreen>
     String category,
   ) async {
     setState(() => _isLoading = true);
-    try {
-      final user = AuthService.instance.currentUser;
-      if (user == null) {
+    final isLoggedIn = await NestAuthService.instance
+        .isLoggedIn()
+        .timeout(const Duration(seconds: 5), onTimeout: () => false);
+    if (!isLoggedIn) {
+      if (mounted) {
+        setState(() => _isLoading = false);
         Navigator.pushNamed(context, AppRoutes.signUpLogin);
-        return;
       }
-      await _client.from('support_tickets').insert({
-        'user_id': user.id,
-        'subject': subject,
-        'message': message,
-        'category': category,
-        'status': 'open',
-        'created_at': DateTime.now().toIso8601String(),
-      });
+      return;
+    }
+    try {
+      await ApiService.instance.client.post(
+        '/api/v1/support-tickets',
+        data: {'subject': subject, 'message': message, 'category': category},
+      );
       if (mounted) {
         AppToast.show(
           context,

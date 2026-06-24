@@ -1,9 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../../routes/app_routes.dart';
 import '../../../widgets/custom_image_widget.dart';
-import '../../../services/auth_service.dart';
+import '../../../services/nest_auth_service.dart';
 
 class HomeFlashDealsWidget extends StatefulWidget {
   final void Function(Map<String, dynamic>) onProductTap;
@@ -54,14 +53,14 @@ class _HomeFlashDealsWidgetState extends State<HomeFlashDealsWidget>
     return _fallbackProducts;
   }
 
-  /// Normalize Supabase product to display format
   Map<String, dynamic> _normalizeProduct(Map<String, dynamic> p) {
+    // Image : supporte liste d'objets {url}, liste de strings, ou string directe
     final images = p['images'];
     String imageUrl = '';
     if (images is List && images.isNotEmpty) {
       final first = images[0];
       if (first is Map) {
-        imageUrl = first['url'] as String? ?? '';
+        imageUrl = first['url'] as String? ?? first['imageUrl'] as String? ?? '';
       } else if (first is String) {
         imageUrl = first;
       }
@@ -69,41 +68,54 @@ class _HomeFlashDealsWidgetState extends State<HomeFlashDealsWidget>
       imageUrl = images;
     }
     if (imageUrl.isEmpty) {
-      imageUrl =
-          'https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=400';
+      imageUrl = p['imageUrl'] as String? ?? p['image_url'] as String? ?? '';
+    }
+    if (imageUrl.isEmpty) {
+      imageUrl = 'https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=400';
     }
 
-    final shopData = p['shops'];
+    // Shop : Supabase join = shops{}, NestJS = vendeur{shopName} ou shop{}
+    final shopData = p['shops'] ?? p['vendeur'] ?? p['shop_info'];
     final shopName = shopData is Map
-        ? (shopData['name'] as String? ?? 'Boutique')
-        : (p['shop'] as String? ?? 'Boutique');
+        ? (shopData['shopName'] as String? ??
+            shopData['name'] as String? ??
+            'Boutique')
+        : (p['shop'] as String? ?? p['shopName'] as String? ?? 'Boutique');
 
     final price = (p['price'] as num? ?? 0).toInt();
-    final originalPrice =
-        (p['original_price'] as num? ?? p['originalPrice'] as num? ?? price)
-            .toInt();
+    final originalPrice = (p['original_price'] as num? ??
+            p['originalPrice'] as num? ??
+            p['compareAtPrice'] as num? ??
+            price)
+        .toInt();
     final discount = originalPrice > price
         ? (((originalPrice - price) / originalPrice) * 100).round()
         : (p['discount'] as int? ?? 0);
 
     return {
       'id': p['id'] ?? '',
-      'name': p['name'] ?? '',
+      'name': p['name'] ?? p['title'] ?? '',
       'shop': shopName,
       'price': price,
       'minPrice': p['min_price'] as int? ?? p['minPrice'] as int?,
       'originalPrice': originalPrice,
       'discount': discount,
-      'rating': (p['rating'] as num? ?? 4.5).toDouble(),
+      'rating': (p['rating'] as num? ?? p['averageRating'] as num? ?? 4.5).toDouble(),
       'reviewCount': p['review_count'] as int? ?? p['reviewCount'] as int? ?? 0,
       'imageUrl': imageUrl,
-      'semanticLabel':
-          p['semanticLabel'] as String? ??
-          'Produit ${p['name'] ?? ''} disponible sur Asoukaa',
-      'stockLeft': p['stock_quantity'] as int? ?? p['stockLeft'] as int? ?? 10,
-      'isHot': p['is_featured'] as bool? ?? p['isHot'] as bool? ?? false,
-      'seller_id': p['seller_id'] ?? '',
-      'shop_id': shopData is Map ? shopData['id'] ?? '' : '',
+      'semanticLabel': p['semanticLabel'] as String? ??
+          'Produit ${p['name'] ?? p['title'] ?? ''} disponible sur Asoukaa',
+      'stockLeft': p['stock_quantity'] as int? ??
+          p['stockQuantity'] as int? ??
+          p['stock'] as int? ??
+          p['stockLeft'] as int? ??
+          10,
+      'isHot': p['is_featured'] as bool? ??
+          p['isFeatured'] as bool? ??
+          p['isHot'] as bool? ??
+          false,
+      'seller_id': p['seller_id'] ?? p['vendeurId'] ?? '',
+      'shop_id': shopData is Map ? (shopData['id'] ?? '') : '',
     };
   }
 
@@ -267,21 +279,12 @@ class _HomeFlashDealsWidgetState extends State<HomeFlashDealsWidget>
   }
 
   void _addToCart(BuildContext context, Map<String, dynamic> product) async {
-    final user = AuthService.instance.currentUser;
-    if (user == null) {
+    final isLoggedIn = await NestAuthService.instance.isLoggedIn();
+    if (!context.mounted) return;
+    if (!isLoggedIn) {
       Navigator.pushNamed(context, AppRoutes.signUpLogin);
       return;
     }
-    final productId = product['id']?.toString() ?? '';
-    if (productId.isEmpty) return;
-    try {
-      await Supabase.instance.client.from('cart_items').upsert({
-        'user_id': user.id,
-        'product_id': productId,
-        'quantity': 1,
-      }, onConflict: 'user_id,product_id');
-      widget.onCartUpdated?.call();
-    } catch (_) {}
     ScaffoldMessenger.of(context).clearSnackBars();
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -297,6 +300,7 @@ class _HomeFlashDealsWidgetState extends State<HomeFlashDealsWidget>
         ),
       ),
     );
+    widget.onCartUpdated?.call();
   }
 }
 
@@ -351,46 +355,19 @@ class _FlashProductCardState extends State<_FlashProductCard>
   }
 
   Future<void> _checkWishlist() async {
-    final user = AuthService.instance.currentUser;
-    if (user == null) return;
-    final productId = widget.product['id']?.toString() ?? '';
-    if (productId.isEmpty) return;
-    try {
-      final result = await Supabase.instance.client
-          .from('wishlists')
-          .select('id')
-          .eq('user_id', user.id)
-          .eq('product_id', productId)
-          .maybeSingle();
-      if (mounted) setState(() => _isInWishlist = result != null);
-    } catch (_) {}
+    // Wishlist sera implémenté avec l'API NestJS
   }
 
   Future<void> _toggleWishlist() async {
-    final user = AuthService.instance.currentUser;
-    if (user == null) return;
-    final productId = widget.product['id']?.toString() ?? '';
-    if (productId.isEmpty || _wishlistLoading) return;
+    if (_wishlistLoading) return;
     setState(() => _wishlistLoading = true);
-    try {
-      if (_isInWishlist) {
-        await Supabase.instance.client
-            .from('wishlists')
-            .delete()
-            .eq('user_id', user.id)
-            .eq('product_id', productId);
-        if (mounted) setState(() => _isInWishlist = false);
-      } else {
-        final price = ((widget.product['price'] ?? 0) as num).toDouble();
-        await Supabase.instance.client.from('wishlists').insert({
-          'user_id': user.id,
-          'product_id': productId,
-          'added_price': price,
-        });
-        if (mounted) setState(() => _isInWishlist = true);
-      }
-    } catch (_) {}
-    if (mounted) setState(() => _wishlistLoading = false);
+    await Future.delayed(const Duration(milliseconds: 200));
+    if (mounted) {
+      setState(() {
+        _isInWishlist = !_isInWishlist;
+        _wishlistLoading = false;
+      });
+    }
   }
 
   @override

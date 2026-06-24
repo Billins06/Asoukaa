@@ -2,13 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter/foundation.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../theme/app_theme.dart';
-import '../../services/database_service.dart';
-import '../../services/auth_service.dart';
-import '../../services/chat_service.dart';
-import '../../services/error_handler.dart';
+import '../../services/nest_auth_service.dart';
+import '../../services/api_service.dart';
 import '../../widgets/empty_state_widget.dart';
 
 class NotificationsScreen extends StatefulWidget {
@@ -23,7 +20,6 @@ class _NotificationsScreenState extends State<NotificationsScreen>
   late TabController _tabController;
   bool _isLoading = true;
   List<Map<String, dynamic>> _notifications = [];
-  RealtimeChannel? _notifSubscription;
 
   @override
   void initState() {
@@ -39,55 +35,41 @@ class _NotificationsScreenState extends State<NotificationsScreen>
     _tabController = TabController(length: 4, vsync: this);
     _tabController.addListener(() => setState(() {}));
     _loadNotifications();
-    _subscribeToNotifications();
   }
 
   @override
   void dispose() {
     _tabController.dispose();
-    _notifSubscription?.unsubscribe();
     super.dispose();
   }
 
   Future<void> _loadNotifications() async {
     setState(() => _isLoading = true);
-    final user = AuthService.instance.currentUser;
-    if (user != null) {
-      final result = await DatabaseService.instance.getNotifications(user.id);
+    final isLoggedIn = await NestAuthService.instance.isLoggedIn()
+        .timeout(const Duration(seconds: 5), onTimeout: () => false);
+    if (!isLoggedIn) {
+      if (mounted) setState(() => _isLoading = false);
+      return;
+    }
+    try {
+      final response =
+          await ApiService.instance.client.get('/api/v1/notifications');
+      final rawData = response.data;
+      final rawList = rawData is List
+          ? rawData
+          : (rawData is Map ? (rawData['data'] ?? rawData['items'] ?? []) as List : []);
       if (mounted) {
         setState(() {
-          _notifications = result;
+          _notifications = rawList
+              .whereType<Map>()
+              .map((e) => Map<String, dynamic>.from(e))
+              .toList();
           _isLoading = false;
         });
       }
-    } else {
+    } catch (_) {
       if (mounted) setState(() => _isLoading = false);
     }
-  }
-
-  void _subscribeToNotifications() {
-    final user = AuthService.instance.currentUser;
-    if (user == null) return;
-    _notifSubscription = ChatService.instance.subscribeToNotifications(
-      userId: user.id,
-      onNotification: (notif) {
-        if (mounted) {
-          setState(() => _notifications.insert(0, notif));
-        }
-      },
-      onError: (error) {
-        if (mounted) {
-          ErrorHandler.showErrorDialog(
-            context,
-            message: ErrorHandler.friendlyMessage(error),
-            onRetry: () {
-              _notifSubscription?.unsubscribe();
-              _subscribeToNotifications();
-            },
-          );
-        }
-      },
-    );
   }
 
   List<Map<String, dynamic>> get _filteredNotifs {
@@ -120,9 +102,9 @@ class _NotificationsScreenState extends State<NotificationsScreen>
       _notifications.where((n) => n['is_read'] == false).length;
 
   Future<void> _markAllRead() async {
-    final user = AuthService.instance.currentUser;
-    if (user == null) return;
-    await DatabaseService.instance.markAllNotificationsRead(user.id);
+    try {
+      await ApiService.instance.client.patch('/api/v1/notifications/read-all');
+    } catch (_) {}
     if (mounted) {
       setState(() {
         for (final n in _notifications) {
@@ -133,7 +115,9 @@ class _NotificationsScreenState extends State<NotificationsScreen>
   }
 
   Future<void> _markRead(String id) async {
-    await DatabaseService.instance.markNotificationRead(id);
+    try {
+      await ApiService.instance.client.patch('/api/v1/notifications/$id/read');
+    } catch (_) {}
     if (mounted) {
       setState(() {
         final idx = _notifications.indexWhere((n) => n['id'] == id);

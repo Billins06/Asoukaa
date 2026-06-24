@@ -1,17 +1,12 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:dio/dio.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/empty_state_widget.dart';
 import '../../widgets/loading_skeleton_widget.dart';
-import '../../services/chat_service.dart';
-import '../../services/auth_service.dart';
-import '../../services/error_handler.dart';
-import '../../services/analytics_service.dart';
-import '../../services/storage_service.dart';
+import '../../services/api_service.dart';
 
 // ─── Data Models ────────────────────────────────────────────────────────────
 
@@ -143,7 +138,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   bool _isSending = false;
   bool _isUploadingImage = false;
   Timer? _typingTimer;
-  RealtimeChannel? _messageSubscription;
+  Timer? _pollingTimer;
 
   // Conversation data
   String? _conversationId;
@@ -156,20 +151,13 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   Map<String, dynamic>? _productAttachment;
 
   // Current user
-  User? _currentUser;
+  String? _currentUserId;
 
   @override
   void initState() {
     super.initState();
-    _currentUser = AuthService.instance.currentUser;
     _lastSeen = DateTime.now().subtract(const Duration(minutes: 2));
-    _initChat();
     final args = widget.chatArgs;
-    AnalyticsService.instance.trackChatOpen(
-      productId: args?['product_id'] as String?,
-      shopId: args?['shop_id'] as String?,
-    );
-    // Check if started from product page
     if (args != null && args['product_name'] != null) {
       _productAttachment = {
         'name': args['product_name'],
@@ -177,10 +165,17 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
         'image_url': args['product_image'] ?? '',
       };
     }
+    _initChat();
   }
 
   Future<void> _initChat() async {
     setState(() => _isLoading = true);
+
+    // Fetch current user ID
+    try {
+      final meRes = await ApiService.instance.client.get('/api/v1/users/me');
+      _currentUserId = meRes.data['id'] as String?;
+    } catch (_) {}
 
     final args = widget.chatArgs;
     if (args != null) {
@@ -197,55 +192,40 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       _conversationId = args['conversation_id'] as String?;
     }
 
-    if (_conversationId == null &&
-        _currentUser != null &&
-        _otherUserId != null) {
-      final result = await ChatService.instance.getOrCreateConversation(
-        buyerId: _currentUser!.id,
-        sellerId: _otherUserId!,
-        productId: args?['product_id'] as String?,
-      );
-      if (result.isSuccess) {
-        _conversationId = result.data?['id'] as String?;
-      } else if (mounted) {
-        ErrorHandler.showErrorDialog(
-          context,
-          message:
-              result.errorMessage ?? 'Impossible d\'ouvrir la conversation.',
-          onRetry: _initChat,
+    if (_conversationId == null && _otherUserId != null) {
+      try {
+        final res = await ApiService.instance.client.post(
+          '/api/v1/conversations',
+          data: {
+            'sellerId': _otherUserId,
+            if (args?['product_id'] != null) 'productId': args!['product_id'],
+          },
         );
-      }
+        _conversationId = res.data['id'] as String?;
+      } catch (_) {}
     }
 
     if (_conversationId != null) {
       await _loadMessages();
-      _subscribeToMessages();
+      _startPolling();
     } else {
-      if (_currentUser != null) {
-        final convsResult = await ChatService.instance.getConversations(
-          _currentUser!.id,
-        );
-        if (convsResult.isSuccess && convsResult.data!.isNotEmpty) {
-          final conv = convsResult.data!.first;
+      try {
+        final res = await ApiService.instance.client.get('/api/v1/conversations');
+        final raw = res.data;
+        final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) : []);
+        if ((list as List).isNotEmpty) {
+          final conv = list.first as Map<String, dynamic>;
           _conversationId = conv['id'] as String?;
-          final isbuyer = conv['buyer_id'] == _currentUser!.id;
-          final other = isbuyer ? conv['seller'] : conv['buyer'];
+          final isBuyer = conv['buyer_id'] == _currentUserId;
+          final other = isBuyer ? conv['seller'] : conv['buyer'];
           if (other is Map) {
             _otherUserName = other['full_name'] as String? ?? 'Vendeur';
             _otherUserAvatar = other['avatar_url'] as String? ?? '';
           }
           await _loadMessages();
-          _subscribeToMessages();
-        } else if (convsResult.isFailure && mounted) {
-          ErrorHandler.showErrorDialog(
-            context,
-            message:
-                convsResult.errorMessage ??
-                'Impossible de charger les conversations.',
-            onRetry: _initChat,
-          );
+          _startPolling();
         }
-      }
+      } catch (_) {}
     }
 
     if (mounted) setState(() => _isLoading = false);
@@ -253,40 +233,37 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
 
   Future<void> _loadMessages() async {
     if (_conversationId == null) return;
-    final result = await ChatService.instance.getMessages(_conversationId!);
-    if (mounted) {
-      if (result.isSuccess) {
+    try {
+      final res = await ApiService.instance.client
+          .get('/api/v1/conversations/$_conversationId/messages');
+      final raw = res.data;
+      final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) : []);
+      if (mounted) {
         setState(() {
-          _messages = result.data!
-              .map((m) => _ChatMessage.fromSupabase(m, _currentUser?.id ?? ''))
+          _messages = (list as List)
+              .map((m) => _ChatMessage.fromSupabase(
+                    Map<String, dynamic>.from(m as Map),
+                    _currentUserId ?? '',
+                  ))
               .toList();
         });
         _scrollToBottom(animated: false);
-        // If started from product page and no messages yet, send product attachment
         if (_messages.isEmpty && _productAttachment != null) {
           _sendProductAttachment();
         }
-      } else {
-        ErrorHandler.showErrorDialog(
-          context,
-          message: result.errorMessage ?? 'Impossible de charger les messages.',
-          onRetry: _loadMessages,
-        );
       }
-    }
-    if (_currentUser != null) {
-      ChatService.instance.markMessagesRead(_conversationId!, _currentUser!.id);
-    }
+      // Mark as read
+      try {
+        await ApiService.instance.client
+            .patch('/api/v1/conversations/$_conversationId/read');
+      } catch (_) {}
+    } catch (_) {}
   }
 
   Future<void> _sendProductAttachment() async {
-    if (_productAttachment == null ||
-        _conversationId == null ||
-        _currentUser == null) {
-      return;
-    }
+    if (_productAttachment == null || _conversationId == null) return;
     final product = _productAttachment!;
-    _productAttachment = null; // Only send once
+    _productAttachment = null;
 
     final tempMsg = _ChatMessage(
       id: 'temp_product_${DateTime.now().millisecondsSinceEpoch}',
@@ -308,45 +285,27 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     }
 
     try {
-      await ChatService.instance.sendMessage(
-        conversationId: _conversationId!,
-        senderId: _currentUser!.id,
-        content: product['name'] as String? ?? 'Produit',
-        messageType: 'product_attachment',
-        productData: {
-          'name': product['name'],
-          'price': product['price'],
-          'image_url': product['image_url'],
-          'is_purchased': false,
+      await ApiService.instance.client.post(
+        '/api/v1/conversations/$_conversationId/messages',
+        data: {
+          'content': product['name'] as String? ?? 'Produit',
+          'messageType': 'product_attachment',
+          'productData': {
+            'name': product['name'],
+            'price': product['price'],
+            'image_url': product['image_url'],
+            'is_purchased': false,
+          },
         },
       );
     } catch (_) {}
   }
 
-  void _subscribeToMessages() {
-    if (_conversationId == null) return;
-    _messageSubscription = ChatService.instance.subscribeToMessages(
-      conversationId: _conversationId!,
-      onMessage: (data) {
-        final msg = _ChatMessage.fromSupabase(data, _currentUser?.id ?? '');
-        if (mounted) {
-          setState(() => _messages.add(msg));
-          _scrollToBottom();
-        }
-      },
-      onError: (error) {
-        if (mounted) {
-          ErrorHandler.showErrorDialog(
-            context,
-            message: ErrorHandler.friendlyMessage(error),
-            onRetry: () {
-              _messageSubscription?.unsubscribe();
-              _subscribeToMessages();
-            },
-          );
-        }
-      },
-    );
+  void _startPolling() {
+    _pollingTimer?.cancel();
+    _pollingTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (mounted) _loadMessages();
+    });
   }
 
   @override
@@ -355,7 +314,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     _scrollController.dispose();
     _focusNode.dispose();
     _typingTimer?.cancel();
-    _messageSubscription?.unsubscribe();
+    _pollingTimer?.cancel();
     super.dispose();
   }
 
@@ -411,34 +370,37 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     setState(() => _messages.add(tempMsg));
     _scrollToBottom();
 
-    if (_conversationId != null && _currentUser != null) {
-      final result = await ChatService.instance.sendMessage(
-        conversationId: _conversationId!,
-        senderId: _currentUser!.id,
-        content: text,
-      );
-      if (result.isFailure && mounted) {
-        setState(() => _messages.removeWhere((m) => m.id == tempMsg.id));
-        ErrorHandler.showErrorDialog(
-          context,
-          message: result.errorMessage ?? 'Message non envoyé. Réessayez.',
-          onRetry: () {
-            _inputController.text = text;
-          },
+    if (_conversationId != null) {
+      try {
+        await ApiService.instance.client.post(
+          '/api/v1/conversations/$_conversationId/messages',
+          data: {'content': text},
         );
-      } else if (result.isSuccess && mounted) {
-        setState(() {
-          final idx = _messages.indexWhere((m) => m.id == tempMsg.id);
-          if (idx != -1) {
-            _messages[idx] = _ChatMessage(
-              id: tempMsg.id,
-              text: tempMsg.text,
-              isMe: true,
-              timestamp: tempMsg.timestamp,
-              status: MessageStatus.sent,
-            );
-          }
-        });
+        if (mounted) {
+          setState(() {
+            final idx = _messages.indexWhere((m) => m.id == tempMsg.id);
+            if (idx != -1) {
+              _messages[idx] = _ChatMessage(
+                id: tempMsg.id,
+                text: tempMsg.text,
+                isMe: true,
+                timestamp: tempMsg.timestamp,
+                status: MessageStatus.sent,
+              );
+            }
+          });
+        }
+      } catch (_) {
+        if (mounted) {
+          setState(() => _messages.removeWhere((m) => m.id == tempMsg.id));
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Message non envoyé. Réessayez.', style: GoogleFonts.outfit()),
+              backgroundColor: AppTheme.error,
+            ),
+          );
+          _inputController.text = text;
+        }
       }
     }
 
@@ -461,21 +423,15 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     setState(() => _isUploadingImage = true);
 
     try {
-      String? uploadedUrl;
-      if (kIsWeb) {
-        final bytes = await picked.readAsBytes();
-        uploadedUrl = await StorageService.instance.uploadBytes(
-          bytes,
-          'chat_${DateTime.now().millisecondsSinceEpoch}.jpg',
-          'chat-images',
-        );
-      } else {
-        uploadedUrl = await StorageService.instance.uploadProductImage(picked);
-      }
+      final bytes = await picked.readAsBytes();
+      final fileName = 'chat_${DateTime.now().millisecondsSinceEpoch}.jpg';
+      final formData = FormData.fromMap({
+        'file': MultipartFile.fromBytes(bytes, filename: fileName),
+      });
+      final res = await ApiService.instance.client.post('/api/v1/uploads/image', data: formData);
+      final uploadedUrl = res.data['url'] as String?;
 
-      if (uploadedUrl != null &&
-          _conversationId != null &&
-          _currentUser != null) {
+      if (uploadedUrl != null && _conversationId != null) {
         final tempMsg = _ChatMessage(
           id: 'temp_img_${DateTime.now().millisecondsSinceEpoch}',
           text: '📷 Image',
@@ -490,12 +446,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
           _scrollToBottom();
         }
 
-        await ChatService.instance.sendMessage(
-          conversationId: _conversationId!,
-          senderId: _currentUser!.id,
-          content: '📷 Image',
-          messageType: 'image',
-          imageUrl: uploadedUrl,
+        await ApiService.instance.client.post(
+          '/api/v1/conversations/$_conversationId/messages',
+          data: {'content': '📷 Image', 'messageType': 'image', 'imageUrl': uploadedUrl},
         );
       }
     } catch (e) {

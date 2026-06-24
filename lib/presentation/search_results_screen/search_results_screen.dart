@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../routes/app_routes.dart';
 import '../../theme/app_theme.dart';
@@ -9,6 +8,7 @@ import '../../widgets/custom_image_widget.dart';
 import '../../widgets/empty_state_widget.dart';
 import '../../widgets/connection_error_widget.dart';
 import '../../widgets/loading_skeleton_widget.dart';
+import '../../services/product_service.dart';
 
 class SearchResultsScreen extends StatefulWidget {
   final String? initialQuery;
@@ -142,25 +142,13 @@ class _SearchResultsScreenState extends State<SearchResultsScreen>
   Future<void> _searchProducts() async {
     try {
       final query = _searchController.text.trim();
-      var dbQuery = Supabase.instance.client
-          .from('products')
-          .select('*, shops(id, name, logo_url)')
-          .eq('is_active', true);
+      final result = await ProductService.instance.getProducts(
+        search: query.isNotEmpty ? query : null,
+        limit: 100,
+      );
+      if (!result.success) throw Exception(result.error);
 
-      if (query.isNotEmpty) {
-        dbQuery = dbQuery.ilike('name', '%$query%');
-      }
-      if (_selectedCategory != 'Tout') {
-        dbQuery = dbQuery.eq('category', _selectedCategory);
-      }
-
-      final result = await dbQuery
-          .order('created_at', ascending: false)
-          .limit(100);
-
-      final products = List<Map<String, dynamic>>.from(
-        result as List,
-      ).map(_normalizeProduct).toList();
+      final products = (result.data ?? []).map(_normalizeProduct).toList();
 
       if (mounted) {
         setState(() {
@@ -182,50 +170,72 @@ class _SearchResultsScreenState extends State<SearchResultsScreen>
   }
 
   Map<String, dynamic> _normalizeProduct(Map<String, dynamic> p) {
-    final shopData = p['shops'] as Map<String, dynamic>?;
+    // Image : supporte liste d'objets {url}, liste de strings, ou string directe
     final images = p['images'];
     String imageUrl = '';
     if (images is List && images.isNotEmpty) {
       final first = images[0];
       if (first is Map) {
-        imageUrl = first['url'] as String? ?? '';
-      } else if (first is String)
+        imageUrl = first['url'] as String? ?? first['imageUrl'] as String? ?? '';
+      } else if (first is String) {
         imageUrl = first;
+      }
     }
     if (imageUrl.isEmpty) {
-      imageUrl =
-          'https://images.pexels.com/photos/5632399/pexels-photo-5632399.jpeg';
+      imageUrl = p['imageUrl'] as String? ?? p['image_url'] as String? ?? '';
+    }
+    if (imageUrl.isEmpty) {
+      imageUrl = 'https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=400';
     }
 
+    // Shop : Supabase = shops{}, NestJS = vendeur{shopName}
+    final shopData = p['shops'] ?? p['vendeur'] ?? p['shop_info'];
+    final shopName = shopData is Map
+        ? (shopData['shopName'] as String? ?? shopData['name'] as String? ?? '')
+        : (p['shop'] as String? ?? p['shopName'] as String? ?? '');
+    final shopId = shopData is Map ? (shopData['id'] ?? '') : (p['shop_id'] ?? '');
+
     final price = (p['price'] as num? ?? 0).toInt();
-    final originalPrice = (p['original_price'] as num? ?? price).toInt();
+    final originalPrice = (p['original_price'] as num? ??
+            p['originalPrice'] as num? ??
+            p['compareAtPrice'] as num? ??
+            price)
+        .toInt();
     final discount = originalPrice > price
         ? (((originalPrice - price) / originalPrice) * 100).round()
         : 0;
 
-    final createdAt = p['created_at'] as String?;
+    final createdAt = p['createdAt'] as String? ?? p['created_at'] as String?;
     final isNew = createdAt != null
-        ? DateTime.now().difference(DateTime.parse(createdAt)).inDays < 14
+        ? DateTime.now()
+                .difference(DateTime.tryParse(createdAt) ?? DateTime.now())
+                .inDays <
+            14
         : false;
+
+    // category peut être string ou objet {name}
+    final catRaw = p['category'];
+    final category = catRaw is Map
+        ? (catRaw['name'] as String? ?? '')
+        : (catRaw as String? ?? '');
 
     return {
       'id': p['id'] ?? '',
       'name': p['name'] ?? '',
-      'shop': shopData?['name'] ?? '',
-      'shop_id': shopData?['id'] ?? p['shop_id'] ?? '',
-      'seller_id': p['seller_id'] ?? '',
+      'shop': shopName,
+      'shop_id': shopId,
+      'seller_id': p['seller_id'] ?? p['vendeurId'] ?? '',
       'price': price,
       'originalPrice': originalPrice,
       'discount': discount,
-      'rating': (p['rating'] as num? ?? 4.5).toDouble(),
-      'reviewCount': p['review_count'] as int? ?? 0,
-      'category': p['category'] ?? '',
+      'rating': (p['rating'] as num? ?? p['averageRating'] as num? ?? 4.5).toDouble(),
+      'reviewCount': p['review_count'] as int? ?? p['reviewCount'] as int? ?? 0,
+      'category': category,
       'brand': p['brand'] ?? 'Autre',
       'size': p['size'] ?? 'Unique',
       'color': p['color'] ?? '',
       'imageUrl': imageUrl,
-      'semanticLabel':
-          'Produit ${p['name'] ?? ''} de la boutique ${shopData?['name'] ?? ''}',
+      'semanticLabel': 'Produit ${p['name'] ?? ''} disponible sur Asoukaa',
       'isNew': isNew,
     };
   }

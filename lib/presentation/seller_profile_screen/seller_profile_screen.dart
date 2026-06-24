@@ -2,13 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
-
 import '../../theme/app_theme.dart';
 import '../../routes/app_routes.dart';
 import '../../widgets/app_toast.dart';
 import '../../widgets/loading_skeleton_widget.dart';
-import '../../services/auth_service.dart';
+import '../../services/api_service.dart';
+import '../../services/nest_auth_service.dart';
 
 class SellerProfileScreen extends StatefulWidget {
   const SellerProfileScreen({super.key});
@@ -62,37 +61,38 @@ class _SellerProfileScreenState extends State<SellerProfileScreen>
   }
 
   Future<void> _loadData() async {
+    final isLoggedIn = await NestAuthService.instance
+        .isLoggedIn()
+        .timeout(const Duration(seconds: 5), onTimeout: () => false);
+    if (!isLoggedIn) {
+      if (mounted) setState(() => _isLoading = false);
+      return;
+    }
     try {
-      final user = AuthService.instance.currentUser;
-      if (user == null) {
-        if (mounted) setState(() => _isLoading = false);
-        return;
-      }
-
-      // Load profile
-      final profile = await Supabase.instance.client
-          .from('user_profiles')
-          .select()
-          .eq('id', user.id)
-          .maybeSingle();
-
-      // Load shop
-      final shop = await Supabase.instance.client
-          .from('shops')
-          .select()
-          .eq('owner_id', user.id)
-          .maybeSingle();
-
-      // Load payment history (withdrawals)
+      Map<String, dynamic>? profile;
+      Map<String, dynamic>? shop;
       List<Map<String, dynamic>> payments = [];
+
       try {
-        final paymentsResult = await Supabase.instance.client
-            .from('withdrawals')
-            .select()
-            .eq('seller_id', user.id)
-            .order('created_at', ascending: false)
-            .limit(20);
-        payments = List<Map<String, dynamic>>.from(paymentsResult as List);
+        final r = await ApiService.instance.client.get('/api/v1/users/me');
+        profile = r.data is Map ? Map<String, dynamic>.from(r.data as Map) : null;
+      } catch (_) {}
+
+      try {
+        final r = await ApiService.instance.client.get('/api/v1/shops/mine');
+        shop = r.data is Map ? Map<String, dynamic>.from(r.data as Map) : null;
+      } catch (_) {}
+
+      try {
+        final r = await ApiService.instance.client.get(
+          '/api/v1/withdrawals',
+          queryParameters: {'limit': '20'},
+        );
+        final raw = r.data;
+        final list = raw is List
+            ? raw
+            : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) as List : []);
+        payments = list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
       } catch (_) {}
 
       if (mounted) {
@@ -101,12 +101,11 @@ class _SellerProfileScreenState extends State<SellerProfileScreen>
           _shopData = shop;
           _paymentHistory = payments.map((p) {
             final status = p['status'] as String? ?? 'pending';
+            final id = (p['id'] as String? ?? '');
             return {
-              'id':
-                  '#PAY-${(p['id'] as String? ?? '').substring(0, 8).toUpperCase()}',
-              'date': _formatDate(p['created_at'] as String?),
-              'amount':
-                  '${_formatPrice((p['amount'] as num? ?? 0).toInt())} FCFA',
+              'id': '#PAY-${id.length >= 8 ? id.substring(0, 8).toUpperCase() : id.toUpperCase()}',
+              'date': _formatDate(p['createdAt'] as String? ?? p['created_at'] as String?),
+              'amount': '${_formatPrice((p['amount'] as num? ?? 0).toInt())} FCFA',
               'status': status == 'completed'
                   ? 'Versé'
                   : status == 'pending'
@@ -1706,18 +1705,13 @@ class _SellerProfileScreenState extends State<SellerProfileScreen>
                   onPressed: () async {
                     Navigator.pop(ctx);
                     try {
-                      final user = AuthService.instance.currentUser;
-                      if (user != null) {
-                        await Supabase.instance.client
-                            .from('support_tickets')
-                            .insert({
-                              'user_id': user.id,
-                              'subject': subjectCtrl.text.trim(),
-                              'message': msgCtrl.text.trim(),
-                              'status': 'open',
-                              'created_at': DateTime.now().toIso8601String(),
-                            });
-                      }
+                      await ApiService.instance.client.post(
+                        '/api/v1/support-tickets',
+                        data: {
+                          'subject': subjectCtrl.text.trim(),
+                          'message': msgCtrl.text.trim(),
+                        },
+                      );
                     } catch (_) {}
                     if (mounted) {
                       ScaffoldMessenger.of(context).showSnackBar(
@@ -1833,7 +1827,7 @@ class _SellerProfileScreenState extends State<SellerProfileScreen>
           ElevatedButton(
             onPressed: () async {
               Navigator.pop(ctx);
-              await AuthService.instance.signOut();
+              await NestAuthService.instance.logout();
               if (mounted) {
                 Navigator.pushNamedAndRemoveUntil(
                   context,

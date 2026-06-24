@@ -1,10 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../theme/app_theme.dart';
-import '../../services/supabase_service.dart';
-import '../../services/auth_service.dart';
+import '../../services/api_service.dart';
+import '../../services/nest_auth_service.dart';
 import '../../routes/app_routes.dart';
 
 class AdminDashboardScreen extends StatefulWidget {
@@ -32,8 +31,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
   List<Map<String, dynamic>> _deliverers = [];
   final List<Map<String, dynamic>> _supportTickets = [];
 
-  SupabaseClient get _client => SupabaseService.instance.client;
-
   @override
   void initState() {
     super.initState();
@@ -44,38 +41,43 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
   Future<void> _loadData() async {
     setState(() => _isLoading = true);
     try {
-      final usersRes = await _client.from('user_profiles').select().limit(200);
-      final ordersRes = await _client
-          .from('orders')
-          .select('*, buyer:user_profiles!buyer_id(full_name)')
-          .order('created_at', ascending: false)
-          .limit(200);
-      final productsRes = await _client
-          .from('products')
-          .select('*, shop:shops(name)')
-          .order('created_at', ascending: false)
-          .limit(200);
-      final shopsRes = await _client
-          .from('shops')
-          .select('*, owner:user_profiles!owner_id(full_name)')
-          .limit(100);
+      final api = ApiService.instance.client;
+      final results = await Future.wait([
+        api.get('/api/v1/admin/users?limit=200'),
+        api.get('/api/v1/admin/orders?limit=200'),
+        api.get('/api/v1/admin/products?limit=200'),
+        api.get('/api/v1/admin/shops?limit=100'),
+      ]);
 
-      double revenue = 0;
-      for (final o in (ordersRes as List)) {
-        if (o['status'] == 'delivered') {
-          revenue += (o['total_amount'] as num? ?? 0).toDouble();
+      List<Map<String, dynamic>> normalize(dynamic raw) {
+        if (raw is List) return List<Map<String, dynamic>>.from(raw);
+        if (raw is Map) {
+          final data = raw['data'] ?? raw['items'] ?? raw['users'] ??
+              raw['orders'] ?? raw['products'] ?? raw['shops'] ?? [];
+          return List<Map<String, dynamic>>.from(data as List);
         }
+        return [];
       }
 
-      final allUsers = List<Map<String, dynamic>>.from(usersRes as List);
+      final allUsers = normalize(results[0].data);
+      final orders = normalize(results[1].data);
+      final products = normalize(results[2].data);
+      final shops = normalize(results[3].data);
       final deliverers = allUsers.where((u) => u['role'] == 'livreur').toList();
+
+      double revenue = 0;
+      for (final o in orders) {
+        if (o['status'] == 'delivered') {
+          revenue += (o['totalAmount'] as num? ?? o['total_amount'] as num? ?? 0).toDouble();
+        }
+      }
 
       if (mounted) {
         setState(() {
           _users = allUsers;
-          _orders = List<Map<String, dynamic>>.from(ordersRes);
-          _products = List<Map<String, dynamic>>.from(productsRes as List);
-          _shops = List<Map<String, dynamic>>.from(shopsRes as List);
+          _orders = orders;
+          _products = products;
+          _shops = shops;
           _deliverers = deliverers;
           _totalUsers = _users.length;
           _totalOrders = _orders.length;
@@ -142,7 +144,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
           IconButton(
             icon: const Icon(Icons.logout_rounded, color: Color(0xFF9E9E9E)),
             onPressed: () async {
-              await AuthService.instance.signOut();
+              await NestAuthService.instance.logout();
               if (mounted) {
                 Navigator.pushReplacementNamed(context, AppRoutes.signUpLogin);
               }
@@ -204,39 +206,35 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
                   onSendNotification: _showSendNotificationDialog,
                   onSendMessage: _showSendMessageDialog,
                 ),
-                _UsersTab(users: _users, onRefresh: _loadData, client: _client),
-                _AccountApprovalsTab(client: _client, onRefresh: _loadData),
-                _IdentityVerificationTab(client: _client, onRefresh: _loadData),
+                _UsersTab(users: _users, onRefresh: _loadData),
+                _AccountApprovalsTab(onRefresh: _loadData),
+                _IdentityVerificationTab(onRefresh: _loadData),
                 _OrdersTab(
                   orders: _orders,
                   onRefresh: _loadData,
-                  client: _client,
                 ),
                 _ProductsTab(
                   products: _products,
                   onRefresh: _loadData,
-                  client: _client,
                   shops: _shops,
                 ),
                 _ShopsTab(shops: _shops, onRefresh: _loadData),
-                _CommissionsTab(client: _client),
+                const _CommissionsTab(),
                 _DeliverersTab(
                   deliverers: _deliverers,
                   orders: _orders,
-                  client: _client,
                   onRefresh: _loadData,
                 ),
-                _BannersTab(client: _client),
-                _PaymentModulesTab(client: _client),
+                const _BannersTab(),
+                const _PaymentModulesTab(),
                 _RefundsTab(
                   orders: _orders,
-                  client: _client,
                   onRefresh: _loadData,
                 ),
-                _WithdrawalsTab(client: _client, onRefresh: _loadData),
-                _ReviewModerationTab(client: _client),
-                _ActivityLogsTab(client: _client),
-                _SupportTicketsAdminTab(client: _client),
+                _WithdrawalsTab(onRefresh: _loadData),
+                const _ReviewModerationTab(),
+                const _ActivityLogsTab(),
+                const _SupportTicketsAdminTab(),
               ],
             ),
     );
@@ -291,16 +289,14 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
             onPressed: () async {
               if (titleCtrl.text.isEmpty || bodyCtrl.text.isEmpty) return;
               try {
-                // Insert notification for all users
-                for (final user in _users) {
-                  await _client.from('notifications').insert({
-                    'user_id': user['id'],
+                await ApiService.instance.client.post(
+                  '/api/v1/admin/notifications/broadcast',
+                  data: {
                     'title': titleCtrl.text,
                     'body': bodyCtrl.text,
                     'type': 'admin_broadcast',
-                    'is_read': false,
-                  });
-                }
+                  },
+                );
                 if (ctx.mounted) Navigator.pop(ctx);
                 if (mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
@@ -371,9 +367,8 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
 // ─── Account Approvals Tab ─────────────────────────────────────────────────────
 
 class _AccountApprovalsTab extends StatefulWidget {
-  final SupabaseClient client;
   final VoidCallback onRefresh;
-  const _AccountApprovalsTab({required this.client, required this.onRefresh});
+  const _AccountApprovalsTab({required this.onRefresh});
 
   @override
   State<_AccountApprovalsTab> createState() => _AccountApprovalsTabState();
@@ -393,35 +388,19 @@ class _AccountApprovalsTabState extends State<_AccountApprovalsTab> {
   Future<void> _loadPendingAccounts() async {
     setState(() => _isLoading = true);
     try {
-      final res = await widget.client
-          .from('user_profiles')
-          .select()
-          .inFilter('role', ['vendeur', 'livreur'])
-          .or('account_status.is.null,account_status.eq.pending')
-          .order('created_at', ascending: false);
+      final res = await ApiService.instance.client.get(
+        '/api/v1/admin/users?roles=vendeur,livreur&limit=200',
+      );
+      final raw = res.data;
+      final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? raw['users'] ?? []) : []);
       if (mounted) {
         setState(() {
-          _pendingAccounts = List<Map<String, dynamic>>.from(res as List);
+          _pendingAccounts = List<Map<String, dynamic>>.from(list as List);
           _isLoading = false;
         });
       }
     } catch (_) {
-      // Fallback: load all sellers and deliverers
-      try {
-        final res = await widget.client
-            .from('user_profiles')
-            .select()
-            .inFilter('role', ['vendeur', 'livreur'])
-            .order('created_at', ascending: false);
-        if (mounted) {
-          setState(() {
-            _pendingAccounts = List<Map<String, dynamic>>.from(res as List);
-            _isLoading = false;
-          });
-        }
-      } catch (_) {
-        if (mounted) setState(() => _isLoading = false);
-      }
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -445,19 +424,10 @@ class _AccountApprovalsTabState extends State<_AccountApprovalsTab> {
 
   Future<void> _approveAccount(Map<String, dynamic> user) async {
     try {
-      await widget.client
-          .from('user_profiles')
-          .update({'account_status': 'approved'})
-          .eq('id', user['id']);
-      // Send notification
-      await widget.client.from('notifications').insert({
-        'user_id': user['id'],
-        'title': 'Compte approuvé ✅',
-        'body':
-            'Félicitations ! Votre compte ${user['role']} a été approuvé. Vous pouvez maintenant utiliser toutes les fonctionnalités.',
-        'type': 'account_approved',
-        'is_read': false,
-      });
+      await ApiService.instance.client.patch(
+        '/api/v1/admin/users/${user['id']}',
+        data: {'accountStatus': 'approved'},
+      );
       _loadPendingAccounts();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -480,18 +450,10 @@ class _AccountApprovalsTabState extends State<_AccountApprovalsTab> {
 
   Future<void> _rejectAccount(Map<String, dynamic> user, String reason) async {
     try {
-      await widget.client
-          .from('user_profiles')
-          .update({'account_status': 'rejected', 'rejection_reason': reason})
-          .eq('id', user['id']);
-      await widget.client.from('notifications').insert({
-        'user_id': user['id'],
-        'title': 'Compte rejeté ❌',
-        'body':
-            'Votre demande de compte ${user['role']} a été rejetée. Raison: $reason',
-        'type': 'account_rejected',
-        'is_read': false,
-      });
+      await ApiService.instance.client.patch(
+        '/api/v1/admin/users/${user['id']}',
+        data: {'accountStatus': 'rejected', 'rejectionReason': reason},
+      );
       _loadPendingAccounts();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -879,12 +841,8 @@ class _AccountApprovalsTabState extends State<_AccountApprovalsTab> {
 // ─── Identity Verification Tab ─────────────────────────────────────────────────
 
 class _IdentityVerificationTab extends StatefulWidget {
-  final SupabaseClient client;
   final VoidCallback onRefresh;
-  const _IdentityVerificationTab({
-    required this.client,
-    required this.onRefresh,
-  });
+  const _IdentityVerificationTab({required this.onRefresh});
 
   @override
   State<_IdentityVerificationTab> createState() =>
@@ -905,37 +863,19 @@ class _IdentityVerificationTabState extends State<_IdentityVerificationTab> {
   Future<void> _loadVerifications() async {
     setState(() => _isLoading = true);
     try {
-      final res = await widget.client
-          .from('user_profiles')
-          .select()
-          .inFilter('role', ['vendeur', 'livreur'])
-          .not('id_card_url', 'is', null)
-          .order('created_at', ascending: false);
+      final res = await ApiService.instance.client.get(
+        '/api/v1/admin/id-verifications?limit=200',
+      );
+      final raw = res.data;
+      final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) : []);
       if (mounted) {
         setState(() {
-          _verificationRequests = List<Map<String, dynamic>>.from(res as List);
+          _verificationRequests = List<Map<String, dynamic>>.from(list as List);
           _isLoading = false;
         });
       }
     } catch (_) {
-      // Fallback: load sellers and deliverers
-      try {
-        final res = await widget.client
-            .from('user_profiles')
-            .select()
-            .inFilter('role', ['vendeur', 'livreur'])
-            .order('created_at', ascending: false);
-        if (mounted) {
-          setState(() {
-            _verificationRequests = List<Map<String, dynamic>>.from(
-              res as List,
-            );
-            _isLoading = false;
-          });
-        }
-      } catch (_) {
-        if (mounted) setState(() => _isLoading = false);
-      }
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -955,18 +895,10 @@ class _IdentityVerificationTabState extends State<_IdentityVerificationTab> {
 
   Future<void> _verifyAccount(Map<String, dynamic> user) async {
     try {
-      await widget.client
-          .from('user_profiles')
-          .update({'verification_status': 'verified', 'is_verified': true})
-          .eq('id', user['id']);
-      await widget.client.from('notifications').insert({
-        'user_id': user['id'],
-        'title': 'Identité vérifiée ✅',
-        'body':
-            'Votre identité a été vérifiée avec succès. Votre compte est maintenant certifié.',
-        'type': 'identity_verified',
-        'is_read': false,
-      });
+      await ApiService.instance.client.patch(
+        '/api/v1/admin/users/${user['id']}',
+        data: {'verificationStatus': 'verified', 'isVerified': true},
+      );
       _loadVerifications();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -992,21 +924,10 @@ class _IdentityVerificationTabState extends State<_IdentityVerificationTab> {
     String reason,
   ) async {
     try {
-      await widget.client
-          .from('user_profiles')
-          .update({
-            'verification_status': 'rejected',
-            'verification_rejection_reason': reason,
-          })
-          .eq('id', user['id']);
-      await widget.client.from('notifications').insert({
-        'user_id': user['id'],
-        'title': 'Vérification rejetée ❌',
-        'body':
-            'Votre vérification d\'identité a été rejetée. Raison: $reason. Veuillez soumettre à nouveau vos documents.',
-        'type': 'verification_rejected',
-        'is_read': false,
-      });
+      await ApiService.instance.client.patch(
+        '/api/v1/admin/users/${user['id']}',
+        data: {'verificationStatus': 'rejected', 'verificationRejectionReason': reason},
+      );
       _loadVerifications();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -2033,12 +1954,7 @@ class _OrderRow extends StatelessWidget {
 class _UsersTab extends StatefulWidget {
   final List<Map<String, dynamic>> users;
   final VoidCallback onRefresh;
-  final SupabaseClient client;
-  const _UsersTab({
-    required this.users,
-    required this.onRefresh,
-    required this.client,
-  });
+  const _UsersTab({required this.users, required this.onRefresh});
 
   @override
   State<_UsersTab> createState() => _UsersTabState();
@@ -2066,7 +1982,6 @@ class _UsersTabState extends State<_UsersTab> {
       ),
       builder: (_) => _UserActionsSheet(
         user: user,
-        client: widget.client,
         onDone: widget.onRefresh,
       ),
     );
@@ -2262,13 +2177,8 @@ class _UsersTabState extends State<_UsersTab> {
 
 class _UserActionsSheet extends StatelessWidget {
   final Map<String, dynamic> user;
-  final SupabaseClient client;
   final VoidCallback onDone;
-  const _UserActionsSheet({
-    required this.user,
-    required this.client,
-    required this.onDone,
-  });
+  const _UserActionsSheet({required this.user, required this.onDone});
 
   @override
   Widget build(BuildContext context) {
@@ -2339,10 +2249,10 @@ class _UserActionsSheet extends StatelessWidget {
                         )
                       : null,
                   onTap: () async {
-                    await client
-                        .from('user_profiles')
-                        .update({'role': role})
-                        .eq('id', user['id']);
+                    await ApiService.instance.client.patch(
+                      '/api/v1/admin/users/${user['id']}',
+                      data: {'role': role},
+                    );
                     Navigator.pop(ctx);
                     onDone();
                   },
@@ -2366,19 +2276,19 @@ class _UserActionsSheet extends StatelessWidget {
 
   void _toggleBlock(BuildContext context, bool isBlocked) async {
     Navigator.pop(context);
-    await client
-        .from('user_profiles')
-        .update({'is_blocked': !isBlocked})
-        .eq('id', user['id']);
+    await ApiService.instance.client.patch(
+      '/api/v1/admin/users/${user['id']}',
+      data: {'isBlocked': !isBlocked},
+    );
     onDone();
   }
 
   void _blockWithdrawals(BuildContext context) async {
     Navigator.pop(context);
-    await client
-        .from('user_profiles')
-        .update({'withdrawals_blocked': true})
-        .eq('id', user['id']);
+    await ApiService.instance.client.patch(
+      '/api/v1/admin/users/${user['id']}',
+      data: {'withdrawalsBlocked': true},
+    );
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
         content: Text('Retraits bloqués pour cet utilisateur'),
@@ -2418,12 +2328,7 @@ class _ActionTile extends StatelessWidget {
 class _OrdersTab extends StatefulWidget {
   final List<Map<String, dynamic>> orders;
   final VoidCallback onRefresh;
-  final SupabaseClient client;
-  const _OrdersTab({
-    required this.orders,
-    required this.onRefresh,
-    required this.client,
-  });
+  const _OrdersTab({required this.orders, required this.onRefresh});
 
   @override
   State<_OrdersTab> createState() => _OrdersTabState();
@@ -2447,7 +2352,6 @@ class _OrdersTabState extends State<_OrdersTab> {
       ),
       builder: (_) => _OrderActionsSheet(
         order: order,
-        client: widget.client,
         onDone: widget.onRefresh,
       ),
     );
@@ -2641,16 +2545,16 @@ class _OrdersTabState extends State<_OrdersTab> {
             ),
             onPressed: () async {
               try {
-                final orderNumber =
-                    'ASK-ADMIN-${DateTime.now().millisecondsSinceEpoch.toString().substring(7)}';
-                await widget.client.from('orders').insert({
-                  'order_number': orderNumber,
-                  'status': 'pending',
-                  'total_amount': double.tryParse(amountCtrl.text) ?? 0,
-                  'delivery_address':
-                      '${clientNameCtrl.text} - ${phoneCtrl.text} - ${addressCtrl.text}',
-                  'created_by_admin': true,
-                });
+                await ApiService.instance.client.post(
+                  '/api/v1/admin/orders',
+                  data: {
+                    'status': 'pending',
+                    'totalAmount': double.tryParse(amountCtrl.text) ?? 0,
+                    'deliveryAddress':
+                        '${clientNameCtrl.text} - ${phoneCtrl.text} - ${addressCtrl.text}',
+                    'createdByAdmin': true,
+                  },
+                );
                 if (ctx.mounted) Navigator.pop(ctx);
                 widget.onRefresh();
               } catch (_) {
@@ -2667,13 +2571,8 @@ class _OrdersTabState extends State<_OrdersTab> {
 
 class _OrderActionsSheet extends StatelessWidget {
   final Map<String, dynamic> order;
-  final SupabaseClient client;
   final VoidCallback onDone;
-  const _OrderActionsSheet({
-    required this.order,
-    required this.client,
-    required this.onDone,
-  });
+  const _OrderActionsSheet({required this.order, required this.onDone});
 
   @override
   Widget build(BuildContext context) {
@@ -2721,10 +2620,10 @@ class _OrderActionsSheet extends StatelessWidget {
                 ].map((s) {
                   return GestureDetector(
                     onTap: () async {
-                      await client
-                          .from('orders')
-                          .update({'status': s})
-                          .eq('id', order['id']);
+                      await ApiService.instance.client.patch(
+                        '/api/v1/admin/orders/${order['id']}',
+                        data: {'status': s},
+                      );
                       Navigator.pop(context);
                       onDone();
                     },
@@ -2764,7 +2663,9 @@ class _OrderActionsSheet extends StatelessWidget {
             label: 'Supprimer la commande',
             color: AppTheme.error,
             onTap: () async {
-              await client.from('orders').delete().eq('id', order['id']);
+              await ApiService.instance.client.delete(
+                '/api/v1/admin/orders/${order['id']}',
+              );
               Navigator.pop(context);
               onDone();
             },
@@ -2780,12 +2681,10 @@ class _OrderActionsSheet extends StatelessWidget {
 class _ProductsTab extends StatefulWidget {
   final List<Map<String, dynamic>> products;
   final VoidCallback onRefresh;
-  final SupabaseClient client;
   final List<Map<String, dynamic>> shops;
   const _ProductsTab({
     required this.products,
     required this.onRefresh,
-    required this.client,
     required this.shops,
   });
 
@@ -2826,7 +2725,6 @@ class _ProductsTabState extends State<_ProductsTab> {
       ),
       builder: (_) => _ProductActionsSheet(
         product: product,
-        client: widget.client,
         shops: widget.shops,
         onDone: widget.onRefresh,
       ),
@@ -2835,10 +2733,10 @@ class _ProductsTabState extends State<_ProductsTab> {
 
   Future<void> _approveProduct(Map<String, dynamic> product) async {
     try {
-      await widget.client
-          .from('products')
-          .update({'approval_status': 'approved', 'is_active': true})
-          .eq('id', product['id']);
+      await ApiService.instance.client.patch(
+        '/api/v1/admin/products/${product['id']}',
+        data: {'approvalStatus': 'approved', 'isActive': true},
+      );
       widget.onRefresh();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -2856,14 +2754,10 @@ class _ProductsTabState extends State<_ProductsTab> {
     String reason,
   ) async {
     try {
-      await widget.client
-          .from('products')
-          .update({
-            'approval_status': 'rejected',
-            'is_active': false,
-            'rejection_reason': reason,
-          })
-          .eq('id', product['id']);
+      await ApiService.instance.client.patch(
+        '/api/v1/admin/products/${product['id']}',
+        data: {'approvalStatus': 'rejected', 'isActive': false, 'rejectionReason': reason},
+      );
       widget.onRefresh();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -3259,12 +3153,10 @@ class _ProductsTabState extends State<_ProductsTab> {
 
 class _ProductActionsSheet extends StatelessWidget {
   final Map<String, dynamic> product;
-  final SupabaseClient client;
   final List<Map<String, dynamic>> shops;
   final VoidCallback onDone;
   const _ProductActionsSheet({
     required this.product,
-    required this.client,
     required this.shops,
     required this.onDone,
   });
@@ -3300,10 +3192,10 @@ class _ProductActionsSheet extends StatelessWidget {
             label: isFeatured ? 'Retirer de la vedette' : 'Mettre en vedette',
             color: const Color(0xFFD97706),
             onTap: () async {
-              await client
-                  .from('products')
-                  .update({'is_featured': !isFeatured})
-                  .eq('id', product['id']);
+              await ApiService.instance.client.patch(
+                '/api/v1/admin/products/${product['id']}',
+                data: {'isFeatured': !isFeatured},
+              );
               Navigator.pop(context);
               onDone();
             },
@@ -3314,10 +3206,10 @@ class _ProductActionsSheet extends StatelessWidget {
                 : Icons.visibility_outlined,
             label: isActive ? 'Désactiver le produit' : 'Activer le produit',
             onTap: () async {
-              await client
-                  .from('products')
-                  .update({'is_active': !isActive})
-                  .eq('id', product['id']);
+              await ApiService.instance.client.patch(
+                '/api/v1/admin/products/${product['id']}',
+                data: {'isActive': !isActive},
+              );
               Navigator.pop(context);
               onDone();
             },
@@ -3342,7 +3234,9 @@ class _ProductActionsSheet extends StatelessWidget {
             label: 'Supprimer le produit',
             color: AppTheme.error,
             onTap: () async {
-              await client.from('products').delete().eq('id', product['id']);
+              await ApiService.instance.client.delete(
+                '/api/v1/admin/products/${product['id']}',
+              );
               Navigator.pop(context);
               onDone();
             },
@@ -3372,10 +3266,10 @@ class _ProductActionsSheet extends StatelessWidget {
                 style: GoogleFonts.outfit(),
               ),
               onTap: () async {
-                await client
-                    .from('products')
-                    .update({'shop_id': shops[i]['id']})
-                    .eq('id', product['id']);
+                await ApiService.instance.client.patch(
+                  '/api/v1/admin/products/${product['id']}',
+                  data: {'shopId': shops[i]['id']},
+                );
                 Navigator.pop(ctx);
                 onDone();
               },
@@ -3415,10 +3309,10 @@ class _ProductActionsSheet extends StatelessWidget {
               foregroundColor: Colors.white,
             ),
             onPressed: () async {
-              await client
-                  .from('products')
-                  .update({'sold_count': int.tryParse(ctrl.text) ?? 0})
-                  .eq('id', product['id']);
+              await ApiService.instance.client.patch(
+                '/api/v1/admin/products/${product['id']}',
+                data: {'soldCount': int.tryParse(ctrl.text) ?? 0},
+              );
               Navigator.pop(ctx);
               onDone();
             },
@@ -3458,10 +3352,10 @@ class _ProductActionsSheet extends StatelessWidget {
               foregroundColor: Colors.white,
             ),
             onPressed: () async {
-              await client
-                  .from('products')
-                  .update({'rating': double.tryParse(ctrl.text) ?? 4.5})
-                  .eq('id', product['id']);
+              await ApiService.instance.client.patch(
+                '/api/v1/admin/products/${product['id']}',
+                data: {'rating': double.tryParse(ctrl.text) ?? 4.5},
+              );
               Navigator.pop(ctx);
               onDone();
             },
@@ -3581,8 +3475,7 @@ class _ShopsTab extends StatelessWidget {
 // ─── Commissions Tab ─────────────────────────────────────────────────────────────
 
 class _CommissionsTab extends StatefulWidget {
-  final SupabaseClient client;
-  const _CommissionsTab({required this.client});
+  const _CommissionsTab();
 
   @override
   State<_CommissionsTab> createState() => _CommissionsTabState();
@@ -3609,27 +3502,19 @@ class _CommissionsTabState extends State<_CommissionsTab> {
   Future<void> _loadData() async {
     setState(() => _isLoading = true);
     try {
-      // Load current commission rate
-      final rateResult = await widget.client
-          .from('commission_settings')
-          .select('rate')
-          .eq('is_active', true)
-          .maybeSingle();
-      if (rateResult != null) {
-        _globalPctCtrl.text = '${rateResult['rate'] ?? 10}';
+      final api = ApiService.instance.client;
+      final rateRes = await api.get('/api/v1/admin/commission-settings');
+      final rateData = rateRes.data;
+      if (rateData != null) {
+        final rate = rateData is Map ? rateData['rate'] : null;
+        if (rate != null) _globalPctCtrl.text = '$rate';
       }
-
-      // Load recent commissions
-      final commissionsResult = await widget.client
-          .from('commissions')
-          .select('*, user_profiles!seller_id(full_name), orders(order_number)')
-          .order('created_at', ascending: false)
-          .limit(50);
+      final commissionsRes = await api.get('/api/v1/admin/commissions?limit=50');
+      final raw = commissionsRes.data;
+      final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) : []);
       if (mounted) {
         setState(() {
-          _commissions = List<Map<String, dynamic>>.from(
-            commissionsResult as List,
-          );
+          _commissions = List<Map<String, dynamic>>.from(list as List);
           _isLoading = false;
         });
       }
@@ -3648,11 +3533,10 @@ class _CommissionsTabState extends State<_CommissionsTab> {
     }
     setState(() => _isSaving = true);
     try {
-      await widget.client.from('commission_settings').upsert({
-        'rate': rate,
-        'is_active': true,
-        'updated_at': DateTime.now().toIso8601String(),
-      });
+      await ApiService.instance.client.post(
+        '/api/v1/admin/commission-settings',
+        data: {'rate': rate},
+      );
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -3900,12 +3784,10 @@ class _CommissionsTabState extends State<_CommissionsTab> {
 class _DeliverersTab extends StatefulWidget {
   final List<Map<String, dynamic>> deliverers;
   final List<Map<String, dynamic>> orders;
-  final SupabaseClient client;
   final VoidCallback onRefresh;
   const _DeliverersTab({
     required this.deliverers,
     required this.orders,
-    required this.client,
     required this.onRefresh,
   });
 
@@ -3968,11 +3850,14 @@ class _DeliverersTabState extends State<_DeliverersTab> {
                     ),
                   ),
                   onTap: () async {
-                    await widget.client.from('deliverer_missions').upsert({
-                      'order_id': order['id'],
-                      'deliverer_id': d['id'],
-                      'status': 'accepte',
-                    }, onConflict: 'order_id');
+                    await ApiService.instance.client.post(
+                      '/api/v1/admin/deliverer-missions',
+                      data: {
+                        'orderId': order['id'],
+                        'delivererId': d['id'],
+                        'status': 'accepte',
+                      },
+                    );
                     Navigator.pop(context);
                     widget.onRefresh();
                   },
@@ -4184,8 +4069,7 @@ class _DeliverersTabState extends State<_DeliverersTab> {
 // ─── Banners Tab ─────────────────────────────────────────────────────────────────
 
 class _BannersTab extends StatefulWidget {
-  final SupabaseClient client;
-  const _BannersTab({required this.client});
+  const _BannersTab();
 
   @override
   State<_BannersTab> createState() => _BannersTabState();
@@ -4204,13 +4088,12 @@ class _BannersTabState extends State<_BannersTab> {
   Future<void> _loadBanners() async {
     setState(() => _isLoading = true);
     try {
-      final result = await widget.client
-          .from('banners')
-          .select()
-          .order('position', ascending: true);
+      final res = await ApiService.instance.client.get('/api/v1/admin/banners');
+      final raw = res.data;
+      final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) : []);
       if (mounted) {
         setState(() {
-          _banners = List<Map<String, dynamic>>.from(result as List);
+          _banners = List<Map<String, dynamic>>.from(list as List);
           _isLoading = false;
         });
       }
@@ -4277,13 +4160,16 @@ class _BannersTabState extends State<_BannersTab> {
             ),
             onPressed: () async {
               try {
-                await widget.client.from('banners').insert({
-                  'title': titleCtrl.text,
-                  'image_url': imageCtrl.text,
-                  'link_url': linkCtrl.text,
-                  'is_active': true,
-                  'position': _banners.length,
-                });
+                await ApiService.instance.client.post(
+                  '/api/v1/admin/banners',
+                  data: {
+                    'title': titleCtrl.text,
+                    'imageUrl': imageCtrl.text,
+                    'linkUrl': linkCtrl.text,
+                    'isActive': true,
+                    'position': _banners.length,
+                  },
+                );
                 if (ctx.mounted) Navigator.pop(ctx);
                 _loadBanners();
               } catch (_) {
@@ -4422,10 +4308,10 @@ class _BannersTabState extends State<_BannersTab> {
                                   value: isActive,
                                   onChanged: (v) async {
                                     try {
-                                      await widget.client
-                                          .from('banners')
-                                          .update({'is_active': v})
-                                          .eq('id', b['id']);
+                                      await ApiService.instance.client.patch(
+                                        '/api/v1/admin/banners/${b['id']}',
+                                        data: {'isActive': v},
+                                      );
                                       setState(
                                         () => _banners[i]['is_active'] = v,
                                       );
@@ -4441,10 +4327,9 @@ class _BannersTabState extends State<_BannersTab> {
                                   ),
                                   onPressed: () async {
                                     try {
-                                      await widget.client
-                                          .from('banners')
-                                          .delete()
-                                          .eq('id', b['id']);
+                                      await ApiService.instance.client.delete(
+                                        '/api/v1/admin/banners/${b['id']}',
+                                      );
                                       setState(() => _banners.removeAt(i));
                                     } catch (_) {}
                                   },
@@ -4466,8 +4351,7 @@ class _BannersTabState extends State<_BannersTab> {
 // ─── Payment Modules Tab ──────────────────────────────────────────────────────
 
 class _PaymentModulesTab extends StatefulWidget {
-  final SupabaseClient client;
-  const _PaymentModulesTab({required this.client});
+  const _PaymentModulesTab();
 
   @override
   State<_PaymentModulesTab> createState() => _PaymentModulesTabState();
@@ -4690,13 +4574,8 @@ class _SettingRow extends StatelessWidget {
 
 class _RefundsTab extends StatefulWidget {
   final List<Map<String, dynamic>> orders;
-  final SupabaseClient client;
   final VoidCallback onRefresh;
-  const _RefundsTab({
-    required this.orders,
-    required this.client,
-    required this.onRefresh,
-  });
+  const _RefundsTab({required this.orders, required this.onRefresh});
 
   @override
   State<_RefundsTab> createState() => _RefundsTabState();
@@ -4716,15 +4595,12 @@ class _RefundsTabState extends State<_RefundsTab> {
   Future<void> _loadRefunds() async {
     setState(() => _isLoading = true);
     try {
-      final result = await widget.client
-          .from('refund_requests')
-          .select(
-            '*, orders(order_number, total_amount), user_profiles!buyer_id(full_name)',
-          )
-          .order('created_at', ascending: false);
+      final res = await ApiService.instance.client.get('/api/v1/admin/refunds?limit=200');
+      final raw = res.data;
+      final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) : []);
       if (mounted) {
         setState(() {
-          _refunds = List<Map<String, dynamic>>.from(result as List);
+          _refunds = List<Map<String, dynamic>>.from(list as List);
           _isLoading = false;
         });
       }
@@ -4745,10 +4621,10 @@ class _RefundsTabState extends State<_RefundsTab> {
 
   Future<void> _updateStatus(String refundId, String status) async {
     try {
-      await widget.client
-          .from('refund_requests')
-          .update({'status': status})
-          .eq('id', refundId);
+      await ApiService.instance.client.patch(
+        '/api/v1/admin/refunds/$refundId',
+        data: {'status': status},
+      );
       _loadRefunds();
     } catch (_) {}
   }
@@ -4968,9 +4844,8 @@ class _RefundsTabState extends State<_RefundsTab> {
 // ─── Withdrawals Tab ──────────────────────────────────────────────────────────
 
 class _WithdrawalsTab extends StatefulWidget {
-  final SupabaseClient client;
   final VoidCallback onRefresh;
-  const _WithdrawalsTab({required this.client, required this.onRefresh});
+  const _WithdrawalsTab({required this.onRefresh});
 
   @override
   State<_WithdrawalsTab> createState() => _WithdrawalsTabState();
@@ -4989,13 +4864,12 @@ class _WithdrawalsTabState extends State<_WithdrawalsTab> {
   Future<void> _loadWithdrawals() async {
     setState(() => _isLoading = true);
     try {
-      final result = await widget.client
-          .from('withdrawals')
-          .select('*, user_profiles!seller_id(full_name, phone)')
-          .order('created_at', ascending: false);
+      final res = await ApiService.instance.client.get('/api/v1/admin/withdrawals?limit=200');
+      final raw = res.data;
+      final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) : []);
       if (mounted) {
         setState(() {
-          _withdrawals = List<Map<String, dynamic>>.from(result as List);
+          _withdrawals = List<Map<String, dynamic>>.from(list as List);
           _isLoading = false;
         });
       }
@@ -5006,14 +4880,10 @@ class _WithdrawalsTabState extends State<_WithdrawalsTab> {
 
   Future<void> _updateStatus(String id, String status) async {
     try {
-      await widget.client
-          .from('withdrawals')
-          .update({
-            'status': status,
-            if (status == 'completed')
-              'processed_at': DateTime.now().toIso8601String(),
-          })
-          .eq('id', id);
+      await ApiService.instance.client.patch(
+        '/api/v1/admin/withdrawals/$id',
+        data: {'status': status},
+      );
       _loadWithdrawals();
     } catch (_) {}
   }
@@ -5214,8 +5084,7 @@ class _WithdrawalsTabState extends State<_WithdrawalsTab> {
 // ─── Review Moderation Tab ────────────────────────────────────────────────────
 
 class _ReviewModerationTab extends StatefulWidget {
-  final SupabaseClient client;
-  const _ReviewModerationTab({required this.client});
+  const _ReviewModerationTab();
 
   @override
   State<_ReviewModerationTab> createState() => _ReviewModerationTabState();
@@ -5234,16 +5103,12 @@ class _ReviewModerationTabState extends State<_ReviewModerationTab> {
   Future<void> _loadReviews() async {
     setState(() => _isLoading = true);
     try {
-      final result = await widget.client
-          .from('reviews')
-          .select(
-            '*, user_profiles!reviewer_id(full_name, avatar_url), products(name)',
-          )
-          .order('created_at', ascending: false)
-          .limit(100);
+      final res = await ApiService.instance.client.get('/api/v1/admin/reviews?limit=100');
+      final raw = res.data;
+      final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) : []);
       if (mounted) {
         setState(() {
-          _reviews = List<Map<String, dynamic>>.from(result as List);
+          _reviews = List<Map<String, dynamic>>.from(list as List);
           _isLoading = false;
         });
       }
@@ -5254,7 +5119,7 @@ class _ReviewModerationTabState extends State<_ReviewModerationTab> {
 
   Future<void> _deleteReview(String reviewId) async {
     try {
-      await widget.client.from('reviews').delete().eq('id', reviewId);
+      await ApiService.instance.client.delete('/api/v1/admin/reviews/$reviewId');
       setState(() => _reviews.removeWhere((r) => r['id'] == reviewId));
     } catch (_) {}
   }
@@ -5389,8 +5254,7 @@ class _ReviewModerationTabState extends State<_ReviewModerationTab> {
 // ─── Activity Logs Tab ────────────────────────────────────────────────────────
 
 class _ActivityLogsTab extends StatefulWidget {
-  final SupabaseClient client;
-  const _ActivityLogsTab({required this.client});
+  const _ActivityLogsTab();
 
   @override
   State<_ActivityLogsTab> createState() => _ActivityLogsTabState();
@@ -5409,14 +5273,12 @@ class _ActivityLogsTabState extends State<_ActivityLogsTab> {
   Future<void> _loadLogs() async {
     setState(() => _isLoading = true);
     try {
-      final result = await widget.client
-          .from('admin_logs')
-          .select('*, user_profiles!admin_id(full_name)')
-          .order('created_at', ascending: false)
-          .limit(100);
+      final res = await ApiService.instance.client.get('/api/v1/admin/logs?limit=100');
+      final raw = res.data;
+      final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) : []);
       if (mounted) {
         setState(() {
-          _logs = List<Map<String, dynamic>>.from(result as List);
+          _logs = List<Map<String, dynamic>>.from(list as List);
           _isLoading = false;
         });
       }
@@ -5547,8 +5409,7 @@ class _ActivityLogsTabState extends State<_ActivityLogsTab> {
 // ─── Support Tickets Admin Tab ────────────────────────────────────────────────
 
 class _SupportTicketsAdminTab extends StatefulWidget {
-  final SupabaseClient client;
-  const _SupportTicketsAdminTab({required this.client});
+  const _SupportTicketsAdminTab();
 
   @override
   State<_SupportTicketsAdminTab> createState() =>
@@ -5569,14 +5430,12 @@ class _SupportTicketsAdminTabState extends State<_SupportTicketsAdminTab> {
   Future<void> _loadTickets() async {
     setState(() => _isLoading = true);
     try {
-      final res = await widget.client
-          .from('support_tickets')
-          .select('*, user:user_profiles!user_id(full_name, phone)')
-          .order('created_at', ascending: false)
-          .limit(200);
+      final res = await ApiService.instance.client.get('/api/v1/admin/support-tickets?limit=200');
+      final raw = res.data;
+      final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) : []);
       if (mounted) {
         setState(() {
-          _tickets = List<Map<String, dynamic>>.from(res as List);
+          _tickets = List<Map<String, dynamic>>.from(list as List);
           _isLoading = false;
         });
       }
@@ -5733,15 +5592,13 @@ class _SupportTicketsAdminTabState extends State<_SupportTicketsAdminTab> {
               onPressed: () async {
                 Navigator.pop(ctx);
                 try {
-                  await widget.client
-                      .from('support_tickets')
-                      .update({
-                        'admin_response': responseCtrl.text.trim(),
-                        'admin_reply': responseCtrl.text.trim(),
-                        'status': selectedStatus,
-                        'updated_at': DateTime.now().toIso8601String(),
-                      })
-                      .eq('id', ticket['id']);
+                  await ApiService.instance.client.patch(
+                    '/api/v1/admin/support-tickets/${ticket['id']}',
+                    data: {
+                      'adminResponse': responseCtrl.text.trim(),
+                      'status': selectedStatus,
+                    },
+                  );
                   _loadTickets();
                   if (mounted) {
                     ScaffoldMessenger.of(context).showSnackBar(

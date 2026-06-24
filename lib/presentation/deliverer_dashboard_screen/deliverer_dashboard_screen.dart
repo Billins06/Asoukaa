@@ -9,10 +9,8 @@ import '../../widgets/app_navigation.dart';
 import '../../routes/app_routes.dart';
 import '../../widgets/loading_skeleton_widget.dart';
 import '../../widgets/connection_error_widget.dart';
-import '../../services/database_service.dart';
-import '../../services/auth_service.dart';
-import '../../services/error_handler.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../services/nest_auth_service.dart';
+import '../../services/api_service.dart';
 
 class DelivererDashboardScreen extends StatefulWidget {
   const DelivererDashboardScreen({super.key});
@@ -77,50 +75,51 @@ class _DelivererDashboardScreenState extends State<DelivererDashboardScreen>
     }
 
     try {
-      final user = AuthService.instance.currentUser;
-      if (user != null) {
-        final missionsResult = await DatabaseService.instance.getProducts();
-        final myMissionsResult = await DatabaseService.instance.getBuyerOrders(
-          user.id,
+      final isLoggedIn = await NestAuthService.instance.isLoggedIn()
+          .timeout(const Duration(seconds: 5), onTimeout: () => false);
+      if (!isLoggedIn) {
+        if (mounted) setState(() => _isLoading = false);
+        return;
+      }
+
+      List<Map<String, dynamic>> available = [];
+      List<Map<String, dynamic>> mine = [];
+      int pendingCount = 0;
+
+      try {
+        final r = await ApiService.instance.client.get('/api/v1/deliveries/available');
+        final raw = r.data;
+        final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) as List : []);
+        available = list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+      } catch (_) {}
+
+      try {
+        final r = await ApiService.instance.client.get('/api/v1/deliveries/mine');
+        final raw = r.data;
+        final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) as List : []);
+        mine = list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+      } catch (_) {}
+
+      try {
+        final r = await ApiService.instance.client.get(
+          '/api/v1/delivery-requests',
+          queryParameters: {'status': 'pending', 'limit': '1'},
         );
+        final raw = r.data;
+        pendingCount = raw is List
+            ? raw.length
+            : (raw is Map ? ((raw['total'] ?? raw['count'] ?? (raw['data'] as List?)?.length) as int? ?? 0) : 0);
+      } catch (_) {}
 
-        // Fetch pending delivery requests count
-        int pendingCount = 0;
-        try {
-          final countResult = await Supabase.instance.client
-              .from('delivery_requests')
-              .select('id')
-              .eq('status', 'pending');
-          pendingCount = (countResult as List).length;
-        } catch (_) {}
-
-        if (mounted) {
-          if (missionsResult.isFailure || myMissionsResult.isFailure) {
-            final errorMsg =
-                missionsResult.errorMessage ??
-                myMissionsResult.errorMessage ??
-                'Impossible de charger les missions.';
-            ErrorHandler.showErrorDialog(
-              context,
-              message: errorMsg,
-              onRetry: _loadData,
-            );
-          }
-          setState(() {
-            _availableMissions = missionsResult.data ?? [];
-            _myMissions = myMissionsResult.data ?? [];
-            _pendingDeliveryRequestsCount = pendingCount;
-            _isLoading = false;
-            _isOfflineCached = false;
-            _hasConnectionError = false;
-          });
-        }
-      } else {
-        if (mounted) {
-          setState(() {
-            _isLoading = false;
-          });
-        }
+      if (mounted) {
+        setState(() {
+          _availableMissions = available;
+          _myMissions = mine;
+          _pendingDeliveryRequestsCount = pendingCount;
+          _isLoading = false;
+          _isOfflineCached = false;
+          _hasConnectionError = false;
+        });
       }
     } catch (e) {
       if (mounted) {
@@ -128,7 +127,6 @@ class _DelivererDashboardScreenState extends State<DelivererDashboardScreen>
           _isLoading = false;
           _hasConnectionError = true;
         });
-        ErrorHandler.showExceptionDialog(context, e, onRetry: _loadData);
       }
     }
   }
@@ -2144,31 +2142,23 @@ class _CoursesExpressTabState extends State<_CoursesExpressTab> {
   Future<void> _loadRequests() async {
     setState(() => _isLoading = true);
     try {
-      final baseQuery = Supabase.instance.client
-          .from('delivery_requests')
-          .select(
-            '*, requester:user_profiles!requester_id(full_name, phone_number)',
-          );
-
-      final List<dynamic> data;
+      final String path;
+      final Map<String, dynamic> params;
       if (_filter == 'pending') {
-        data = await baseQuery
-            .eq('status', 'pending')
-            .order('created_at', ascending: false);
+        path = '/api/v1/delivery-requests';
+        params = {'status': 'pending'};
       } else {
-        final user = AuthService.instance.currentUser;
-        if (user == null) {
-          data = [];
-        } else {
-          data = await baseQuery
-              .eq('deliverer_id', user.id)
-              .order('created_at', ascending: false);
-        }
+        path = '/api/v1/delivery-requests/mine';
+        params = {};
       }
+
+      final r = await ApiService.instance.client.get(path, queryParameters: params.isNotEmpty ? params : null);
+      final raw = r.data;
+      final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) as List : []);
 
       if (mounted) {
         setState(() {
-          _requests = List<Map<String, dynamic>>.from(data);
+          _requests = list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
           _isLoading = false;
         });
       }
@@ -2178,18 +2168,10 @@ class _CoursesExpressTabState extends State<_CoursesExpressTab> {
   }
 
   Future<void> _acceptRequest(String requestId) async {
-    final user = AuthService.instance.currentUser;
-    if (user == null) return;
-
     try {
-      await Supabase.instance.client
-          .from('delivery_requests')
-          .update({
-            'deliverer_id': user.id,
-            'status': 'accepted',
-            'accepted_at': DateTime.now().toIso8601String(),
-          })
-          .eq('id', requestId);
+      await ApiService.instance.client.patch(
+        '/api/v1/delivery-requests/$requestId/accept',
+      );
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(

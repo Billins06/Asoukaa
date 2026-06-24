@@ -1,4 +1,5 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'token_storage_service.dart';
 
 class ApiService {
@@ -35,12 +36,16 @@ class _AuthInterceptor extends Interceptor {
     final token = await TokenStorageService.instance.getAccessToken();
     if (token != null && token.isNotEmpty) {
       options.headers['Authorization'] = 'Bearer $token';
+      debugPrint('[API] ${options.method} ${options.path} — token: ${token.substring(0, token.length > 20 ? 20 : token.length)}...');
+    } else {
+      debugPrint('[API] ${options.method} ${options.path} — PAS DE TOKEN');
     }
     handler.next(options);
   }
 
   @override
   void onError(DioException err, ErrorInterceptorHandler handler) {
+    debugPrint('[API] Erreur ${err.response?.statusCode} sur ${err.requestOptions.path}: ${err.message}');
     // 401 handled by callers — token refresh strategy à implémenter en Phase 2
     handler.next(err);
   }

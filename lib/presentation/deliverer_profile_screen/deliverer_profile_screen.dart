@@ -2,10 +2,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
-
 import '../../routes/app_routes.dart';
-import '../../services/auth_service.dart';
+import '../../services/api_service.dart';
+import '../../services/nest_auth_service.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/app_toast.dart';
 import '../../widgets/loading_skeleton_widget.dart';
@@ -69,68 +68,62 @@ class _DelivererProfileScreenState extends State<DelivererProfileScreen>
   }
 
   Future<void> _loadData() async {
+    final isLoggedIn = await NestAuthService.instance
+        .isLoggedIn()
+        .timeout(const Duration(seconds: 5), onTimeout: () => false);
+    if (!isLoggedIn) {
+      if (mounted) setState(() => _isLoading = false);
+      return;
+    }
     try {
-      final user = AuthService.instance.currentUser;
-      if (user == null) {
-        if (mounted) setState(() => _isLoading = false);
-        return;
-      }
-
-      // Load profile
-      final profile = await Supabase.instance.client
-          .from('user_profiles')
-          .select()
-          .eq('id', user.id)
-          .maybeSingle();
-
-      // Load missions for earnings history
+      Map<String, dynamic>? profile;
       List<Map<String, dynamic>> missions = [];
+      List<Map<String, dynamic>> earningsHistory = [];
+
       try {
-        final missionsResult = await Supabase.instance.client
-            .from('deliverer_missions')
-            .select('*, orders(order_number, total)')
-            .eq('deliverer_id', user.id)
-            .eq('status', 'livre')
-            .order('delivered_at', ascending: false)
-            .limit(20);
-        missions = List<Map<String, dynamic>>.from(missionsResult as List);
+        final r = await ApiService.instance.client.get('/api/v1/users/me');
+        profile = r.data is Map ? Map<String, dynamic>.from(r.data as Map) : null;
       } catch (_) {}
 
-      // Calculate stats
+      try {
+        final r = await ApiService.instance.client.get(
+          '/api/v1/deliveries/mine',
+          queryParameters: {'status': 'livre', 'limit': '20'},
+        );
+        final raw = r.data;
+        final list = raw is List
+            ? raw
+            : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) as List : []);
+        missions = list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+      } catch (_) {}
+
       double totalEarnings = 0;
       for (final m in missions) {
-        final fee = (m['delivery_fee'] as num? ?? 0).toDouble();
+        final fee = (m['deliveryFee'] as num? ?? m['delivery_fee'] as num? ?? 0).toDouble();
         totalEarnings += fee;
       }
 
-      // Load earnings history (weekly grouping)
-      List<Map<String, dynamic>> earningsHistory = [];
       try {
-        final withdrawalsResult = await Supabase.instance.client
-            .from('deliverer_earnings')
-            .select()
-            .eq('deliverer_id', user.id)
-            .order('created_at', ascending: false)
-            .limit(10);
-        final withdrawals = List<Map<String, dynamic>>.from(
-          withdrawalsResult as List,
+        final r = await ApiService.instance.client.get(
+          '/api/v1/deliverer-earnings',
+          queryParameters: {'limit': '10'},
         );
+        final raw = r.data;
+        final list = raw is List
+            ? raw
+            : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) as List : []);
+        final withdrawals = list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
         earningsHistory = withdrawals.map((w) {
           final status = w['status'] as String? ?? 'pending';
+          final id = (w['id'] as String? ?? '');
           return {
-            'id':
-                '#LIV-${(w['id'] as String? ?? '').substring(0, 8).toUpperCase()}',
-            'date': _formatDate(w['created_at'] as String?),
-            'amount':
-                '${_formatPrice((w['amount'] as num? ?? 0).toInt())} FCFA',
-            'deliveries': '${w['delivery_count'] ?? 0} livraisons',
+            'id': '#LIV-${id.length >= 8 ? id.substring(0, 8).toUpperCase() : id.toUpperCase()}',
+            'date': _formatDate(w['createdAt'] as String? ?? w['created_at'] as String?),
+            'amount': '${_formatPrice((w['amount'] as num? ?? 0).toInt())} FCFA',
+            'deliveries': '${w['deliveryCount'] ?? w['delivery_count'] ?? 0} livraisons',
             'status': status == 'paid' ? 'Versé' : 'En attente',
-            'statusColor': status == 'paid'
-                ? AppTheme.success
-                : AppTheme.warning,
-            'statusBg': status == 'paid'
-                ? AppTheme.successContainer
-                : AppTheme.warningContainer,
+            'statusColor': status == 'paid' ? AppTheme.success : AppTheme.warning,
+            'statusBg': status == 'paid' ? AppTheme.successContainer : AppTheme.warningContainer,
           };
         }).toList();
       } catch (_) {}
@@ -1545,7 +1538,7 @@ class _DelivererProfileScreenState extends State<DelivererProfileScreen>
           ElevatedButton(
             onPressed: () async {
               Navigator.pop(ctx);
-              await AuthService.instance.signOut();
+              await NestAuthService.instance.logout();
               if (mounted) {
                 Navigator.pushNamedAndRemoveUntil(
                   context,

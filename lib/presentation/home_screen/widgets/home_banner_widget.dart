@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../../routes/app_routes.dart';
 import '../../../widgets/custom_image_widget.dart';
 
@@ -89,42 +88,6 @@ class _HomeBannerWidgetState extends State<HomeBannerWidget>
         curve: Curves.easeInOutCubic,
       );
     });
-    _loadBannersFromSupabase();
-  }
-
-  Future<void> _loadBannersFromSupabase() async {
-    try {
-      final result = await Supabase.instance.client
-          .from('banners')
-          .select()
-          .eq('is_active', true)
-          .order('position', ascending: true)
-          .limit(5);
-      final dbBanners = List<Map<String, dynamic>>.from(result as List);
-      if (dbBanners.isNotEmpty && mounted) {
-        setState(() {
-          _banners = dbBanners
-              .map(
-                (b) => {
-                  'imageUrl': b['image_url'] as String? ?? '',
-                  'semanticLabel':
-                      b['title'] as String? ?? 'Bannière promotionnelle',
-                  'tag': 'PROMO',
-                  'title': b['title'] as String? ?? '',
-                  'subtitle': b['subtitle'] as String? ?? '',
-                  'cta': 'Voir',
-                  'tagColor': const Color(0xFFFF6210),
-                  'countdown': false,
-                  'searchQuery': '',
-                  'linkUrl': b['link_url'] as String? ?? '',
-                },
-              )
-              .toList();
-        });
-      }
-    } catch (_) {
-      // Keep default banners on error
-    }
   }
 
   @override

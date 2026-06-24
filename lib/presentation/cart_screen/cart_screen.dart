@@ -4,9 +4,8 @@ import 'package:google_fonts/google_fonts.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/custom_image_widget.dart';
 import '../../routes/app_routes.dart';
-import '../../services/analytics_service.dart';
-import '../../services/supabase_service.dart';
-import '../../services/auth_service.dart';
+import '../../services/nest_auth_service.dart';
+import '../../services/api_service.dart';
 import '../../widgets/app_toast.dart';
 
 class CartScreen extends StatefulWidget {
@@ -39,22 +38,33 @@ class _CartScreenState extends State<CartScreen> {
   }
 
   Future<void> _loadCart() async {
-    final user = AuthService.instance.currentUser;
-    if (user == null) {
-      setState(() => _isLoading = false);
+    final isLoggedIn = await NestAuthService.instance.isLoggedIn()
+        .timeout(const Duration(seconds: 5), onTimeout: () => false);
+    if (!isLoggedIn) {
+      if (mounted) setState(() => _isLoading = false);
       return;
     }
     setState(() => _isLoading = true);
     try {
-      final client = SupabaseService.instance.client;
-      final data = await client
-          .from('cart_items')
-          .select('*, products(*, shops(id, name))')
-          .eq('user_id', user.id) as List<dynamic>;
-      final result = List<Map<String, dynamic>>.from(data);
+      final response = await ApiService.instance.client.get('/api/v1/cart');
+      final rawData = response.data;
+      List<dynamic> rawList;
+      if (rawData is List) {
+        rawList = rawData;
+      } else if (rawData is Map) {
+        rawList = (rawData['items'] ??
+                rawData['cartItems'] ??
+                rawData['data'] ??
+                []) as List<dynamic>;
+      } else {
+        rawList = [];
+      }
       if (mounted) {
         setState(() {
-          _cartItems = _normalizeCartItems(result);
+          _cartItems = rawList
+              .whereType<Map>()
+              .map((e) => _normalizeCartItem(Map<String, dynamic>.from(e)))
+              .toList();
           _isLoading = false;
         });
       }
@@ -63,55 +73,55 @@ class _CartScreenState extends State<CartScreen> {
     }
   }
 
-  List<Map<String, dynamic>> _normalizeCartItems(
-    List<Map<String, dynamic>> raw,
-  ) {
-    return raw.map((item) {
-      final product = item['products'] as Map<String, dynamic>?;
-      if (product == null) return item;
+  Map<String, dynamic> _normalizeCartItem(Map<String, dynamic> item) {
+    final product =
+        (item['product'] ?? item['products']) as Map<String, dynamic>?;
+    if (product == null) return item;
 
-      final images = product['images'];
-      String imageUrl = '';
-      if (images is List && images.isNotEmpty) {
-        final first = images[0];
-        if (first is Map) {
-          imageUrl = first['url'] as String? ?? '';
-        } else if (first is String) {
-          imageUrl = first;
-        }
+    final images = product['images'];
+    String imageUrl = '';
+    if (images is List && images.isNotEmpty) {
+      final first = images[0];
+      if (first is Map) {
+        imageUrl = first['url'] as String? ?? first['imageUrl'] as String? ?? '';
+      } else if (first is String) {
+        imageUrl = first;
       }
-      if (imageUrl.isEmpty) {
-        imageUrl =
-            'https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=400';
-      }
+    }
+    if (imageUrl.isEmpty) {
+      imageUrl = product['imageUrl'] as String? ?? product['image_url'] as String? ?? '';
+    }
+    if (imageUrl.isEmpty) {
+      imageUrl = 'https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=400';
+    }
 
-      final shopData = product['shops'];
-      final shopName = shopData is Map
-          ? (shopData['name'] as String? ?? 'Boutique')
-          : 'Boutique';
-      final shopId = shopData is Map ? (shopData['id'] as String? ?? '') : '';
+    final shopData = product['shops'] ?? product['vendeur'] ?? product['shop_info'];
+    final shopName = shopData is Map
+        ? (shopData['shopName'] as String? ?? shopData['name'] as String? ?? 'Boutique')
+        : (product['shop'] as String? ?? 'Boutique');
+    final shopId = shopData is Map ? (shopData['id'] as String? ?? '') : '';
 
-      final price = (product['price'] as num? ?? 0).toInt();
-      final originalPrice = (product['original_price'] as num? ?? price)
-          .toInt();
-      final stockQty = product['stock_quantity'] as int? ?? 10;
+    final price = (product['price'] as num? ?? 0).toInt();
+    final originalPrice =
+        (product['original_price'] as num? ?? product['originalPrice'] as num? ?? price)
+            .toInt();
+    final stockQty =
+        product['stock_quantity'] as int? ?? product['stockQuantity'] as int? ?? 10;
 
-      return {
-        'id': item['id'] ?? '',
-        'product_id': product['id'] ?? '',
-        'name': product['name'] ?? '',
-        'shop': shopName,
-        'shop_id': shopId,
-        'price': price,
-        'originalPrice': originalPrice,
-        'quantity': item['quantity'] as int? ?? 1,
-        'imageUrl': imageUrl,
-        'semanticLabel':
-            'Produit ${product['name'] ?? ''} dans le panier Asoukaa',
-        'inStock': stockQty > 0,
-        'stockQty': stockQty,
-      };
-    }).toList();
+    return {
+      'id': item['id'] ?? '',
+      'product_id': product['id'] ?? item['productId'] ?? '',
+      'name': product['name'] ?? '',
+      'shop': shopName,
+      'shop_id': shopId,
+      'price': price,
+      'originalPrice': originalPrice,
+      'quantity': item['quantity'] as int? ?? 1,
+      'imageUrl': imageUrl,
+      'semanticLabel': 'Produit ${product['name'] ?? ''} dans le panier Asoukaa',
+      'inStock': stockQty > 0,
+      'stockQty': stockQty,
+    };
   }
 
   int get _itemCount =>
@@ -165,10 +175,10 @@ class _CartScreenState extends State<CartScreen> {
 
   Future<void> _updateQtyInDb(String cartItemId, int qty) async {
     try {
-      await SupabaseService.instance.client
-          .from('cart_items')
-          .update({'quantity': qty})
-          .eq('id', cartItemId);
+      await ApiService.instance.client.patch(
+        '/api/v1/cart/items/$cartItemId',
+        data: {'quantity': qty},
+      );
     } catch (_) {}
   }
 
@@ -180,32 +190,11 @@ class _CartScreenState extends State<CartScreen> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text('${item['name']} retiré du panier'),
-        action: SnackBarAction(
-          label: 'Annuler',
-          textColor: AppTheme.primaryLight,
-          onPressed: () async {
-            ScaffoldMessenger.of(context).clearSnackBars();
-            final user = AuthService.instance.currentUser;
-            if (user != null) {
-              await SupabaseService.instance.client
-                  .from('cart_items')
-                  .insert({
-                    'user_id': user.id,
-                    'product_id': item['product_id'] as String,
-                    'quantity': item['quantity'] as int,
-                  });
-              _loadCart();
-            }
-          },
-        ),
-        duration: const Duration(seconds: 3),
+        duration: const Duration(seconds: 2),
       ),
     );
     try {
-      await SupabaseService.instance.client
-          .from('cart_items')
-          .delete()
-          .eq('id', cartItemId);
+      await ApiService.instance.client.delete('/api/v1/cart/items/$cartItemId');
     } catch (_) {}
   }
 
@@ -288,14 +277,12 @@ class _CartScreenState extends State<CartScreen> {
   }
 
   Future<void> _clearCart() async {
-    final user = AuthService.instance.currentUser;
-    if (user == null) return;
+    final isLoggedIn = await NestAuthService.instance.isLoggedIn()
+        .timeout(const Duration(seconds: 3), onTimeout: () => false);
+    if (!isLoggedIn) return;
     setState(() => _cartItems.clear());
     try {
-      await SupabaseService.instance.client
-          .from('cart_items')
-          .delete()
-          .eq('user_id', user.id);
+      await ApiService.instance.client.delete('/api/v1/cart');
     } catch (_) {}
   }
 
@@ -375,14 +362,6 @@ class _CartScreenState extends State<CartScreen> {
       return;
     }
 
-    for (final item in inStockItems) {
-      AnalyticsService.instance.trackCartAdd(
-        productId: (item['product_id'] ?? '').toString(),
-        productName: (item['name'] ?? '').toString(),
-        amount: ((item['price'] ?? 0) as num).toDouble(),
-        quantity: (item['quantity'] as int? ?? 1),
-      );
-    }
     // Pass cart items to checkout
     Navigator.pushNamed(
       context,

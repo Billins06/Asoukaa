@@ -2,10 +2,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
-
 import '../../theme/app_theme.dart';
-import '../../services/auth_service.dart';
+import '../../services/api_service.dart';
+import '../../services/nest_auth_service.dart';
 import '../../widgets/app_toast.dart';
 
 class DeliveryRequestScreen extends StatefulWidget {
@@ -60,13 +59,17 @@ class _DeliveryRequestScreenState extends State<DeliveryRequestScreen> {
   Future<void> _submitRequest() async {
     if (!_formKey.currentState!.validate()) return;
 
-    final user = AuthService.instance.currentUser;
-    if (user == null) {
-      AppToast.show(
-        context,
-        message: 'Vous devez être connecté pour faire une demande.',
-        type: ToastType.error,
-      );
+    final isLoggedIn = await NestAuthService.instance
+        .isLoggedIn()
+        .timeout(const Duration(seconds: 5), onTimeout: () => false);
+    if (!isLoggedIn) {
+      if (mounted) {
+        AppToast.show(
+          context,
+          message: 'Vous devez être connecté pour faire une demande.',
+          type: ToastType.error,
+        );
+      }
       return;
     }
 
@@ -75,19 +78,19 @@ class _DeliveryRequestScreenState extends State<DeliveryRequestScreen> {
     try {
       final price =
           double.tryParse(_priceController.text.replaceAll(',', '.')) ?? 0.0;
+      final notes = _notesController.text.trim();
 
-      await Supabase.instance.client.from('delivery_requests').insert({
-        'requester_id': user.id,
-        'pickup_address': _pickupController.text.trim(),
-        'dropoff_address': _dropoffController.text.trim(),
-        'package_description': _descriptionController.text.trim(),
-        'urgency': _urgency,
-        'proposed_price': price,
-        'notes': _notesController.text.trim().isEmpty
-            ? null
-            : _notesController.text.trim(),
-        'status': 'pending',
-      });
+      await ApiService.instance.client.post(
+        '/api/v1/delivery-requests',
+        data: {
+          'pickupAddress': _pickupController.text.trim(),
+          'dropoffAddress': _dropoffController.text.trim(),
+          'packageDescription': _descriptionController.text.trim(),
+          'urgency': _urgency,
+          'proposedPrice': price,
+          if (notes.isNotEmpty) 'notes': notes,
+        },
+      );
 
       if (mounted) {
         AppToast.show(

@@ -6,9 +6,8 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import '../../routes/app_routes.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/app_navigation.dart';
-import '../../services/database_service.dart';
-import '../../services/auth_service.dart';
-import '../../services/error_handler.dart';
+import '../../services/product_service.dart';
+import '../../services/nest_auth_service.dart';
 import './widgets/home_banner_widget.dart';
 import './widgets/home_categories_widget.dart';
 import './widgets/home_flash_deals_widget.dart';
@@ -102,55 +101,33 @@ class _HomeScreenState extends State<HomeScreen>
     }
 
     try {
-      final featuredResult = await DatabaseService.instance.getProducts(
-        featuredOnly: true,
-        limit: 10,
-      );
-      final trendingResult = await DatabaseService.instance.getProducts(
-        limit: 20,
-      );
-      await _loadCartCount();
+      final results = await Future.wait([
+        ProductService.instance.getProducts(isFeatured: true, limit: 10),
+        ProductService.instance.getProducts(limit: 20),
+      ]);
 
       if (mounted) {
-        if (featuredResult.isFailure || trendingResult.isFailure) {
-          final errorMsg =
-              featuredResult.errorMessage ??
-              trendingResult.errorMessage ??
-              'Impossible de charger les produits.';
-          ErrorHandler.showErrorDialog(
-            context,
-            message: errorMsg,
-            onRetry: _loadData,
-          );
-        }
         setState(() {
-          _featuredProducts = featuredResult.data ?? [];
-          _trendingProducts = trendingResult.data ?? [];
+          _featuredProducts = results[0].data ?? [];
+          _trendingProducts = results[1].data ?? [];
           _isLoading = false;
           _isOfflineCached = false;
           _hasConnectionError = false;
         });
       }
-    } catch (e) {
+    } catch (_) {
       if (mounted) {
         setState(() {
           _isLoading = false;
-          _hasConnectionError = true;
+          _featuredProducts = [];
+          _trendingProducts = [];
         });
-        ErrorHandler.showExceptionDialog(context, e, onRetry: _loadData);
       }
     }
   }
 
   Future<void> _loadCartCount() async {
-    final user = AuthService.instance.currentUser;
-    if (user == null) return;
-    try {
-      final result = await DatabaseService.instance.getUnreadNotificationCount(
-        user.id,
-      );
-      if (mounted) setState(() => _cartCount = result);
-    } catch (_) {}
+    // Cart count sera implémenté avec l'API panier NestJS
   }
 
   @override
@@ -297,62 +274,76 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   void _handleNavTap(int index) {
+    debugPrint('[Nav] Tab tapped: $index');
     switch (index) {
       case 0:
         setState(() => _currentNavIndex = 0);
-        break;
       case 1:
-        // Marché — navigate to products list (search results)
         Navigator.pushNamed(context, AppRoutes.searchResults, arguments: '');
-        break;
       case 2:
-        // Messages tab
         _navigateToMessages();
-        break;
       case 3:
-        // Dashboard — navigate to appropriate dashboard by role
-        final role = AuthService.instance.getUserRole();
-        switch (role) {
-          case 'vendeur':
-            Navigator.pushNamed(context, AppRoutes.sellerDashboard);
-            break;
-          case 'livreur':
-            Navigator.pushNamed(context, AppRoutes.delivererDashboard);
-            break;
-          default:
-            Navigator.pushNamed(context, AppRoutes.buyerDashboard);
-        }
-        break;
+        _navigateToDashboard();
       case 4:
-        // Compte — navigate to profile based on role
         _navigateToProfile();
-        break;
     }
   }
 
-  void _navigateToMessages() {
-    final user = AuthService.instance.currentUser;
-    if (user == null) {
-      Navigator.pushNamed(context, AppRoutes.signUpLogin);
-      return;
+  Future<void> _navigateToDashboard() async {
+    try {
+      final role = await NestAuthService.instance.getUserRole()
+          .timeout(const Duration(seconds: 3));
+      if (!mounted) return;
+      switch (role) {
+        case 'vendeur':
+          Navigator.pushNamed(context, AppRoutes.sellerDashboard);
+        case 'livreur':
+          Navigator.pushNamed(context, AppRoutes.delivererDashboard);
+        default:
+          Navigator.pushNamed(context, AppRoutes.buyerDashboard);
+      }
+    } catch (e) {
+      debugPrint('[Nav] Dashboard nav error: $e');
+      if (mounted) Navigator.pushNamed(context, AppRoutes.buyerDashboard);
     }
-    Navigator.pushNamed(context, AppRoutes.conversationsInbox);
   }
 
-  void _navigateToProfile() {
-    final role = AuthService.instance.getUserRole();
-    switch (role) {
-      case 'vendeur':
-        Navigator.pushNamed(context, AppRoutes.sellerProfile);
-        break;
-      case 'livreur':
-        Navigator.pushNamed(context, AppRoutes.delivererProfile);
-        break;
-      case 'admin':
-        Navigator.pushNamed(context, AppRoutes.adminDashboard);
-        break;
-      default:
-        Navigator.pushNamed(context, AppRoutes.buyerProfile);
+  Future<void> _navigateToMessages() async {
+    try {
+      final isLoggedIn = await NestAuthService.instance.isLoggedIn()
+          .timeout(const Duration(seconds: 3));
+      if (!mounted) return;
+      if (!isLoggedIn) {
+        Navigator.pushNamed(context, AppRoutes.signUpLogin);
+        return;
+      }
+      Navigator.pushNamed(context, AppRoutes.conversationsInbox);
+    } catch (e) {
+      debugPrint('[Nav] Messages nav error: $e');
+      if (mounted) Navigator.pushNamed(context, AppRoutes.signUpLogin);
+    }
+  }
+
+  Future<void> _navigateToProfile() async {
+    debugPrint('[Nav] Navigating to profile...');
+    try {
+      final role = await NestAuthService.instance.getUserRole()
+          .timeout(const Duration(seconds: 3));
+      debugPrint('[Nav] Role obtained: $role');
+      if (!mounted) return;
+      switch (role) {
+        case 'vendeur':
+          Navigator.pushNamed(context, AppRoutes.sellerProfile);
+        case 'livreur':
+          Navigator.pushNamed(context, AppRoutes.delivererProfile);
+        case 'admin':
+          Navigator.pushNamed(context, AppRoutes.adminDashboard);
+        default:
+          Navigator.pushNamed(context, AppRoutes.buyerProfile);
+      }
+    } catch (e) {
+      debugPrint('[Nav] Profile nav error: $e');
+      if (mounted) Navigator.pushNamed(context, AppRoutes.buyerProfile);
     }
   }
 

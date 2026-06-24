@@ -2,7 +2,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../theme/app_theme.dart';
 import './widgets/product_action_bar_widget.dart';
@@ -12,8 +11,8 @@ import './widgets/product_price_tiers_widget.dart';
 import './widgets/product_seller_card_widget.dart';
 import './widgets/product_tabs_widget.dart';
 import '../../widgets/loading_skeleton_widget.dart';
-import '../../services/analytics_service.dart';
-import '../../services/auth_service.dart';
+import '../../services/product_service.dart';
+import '../../services/nest_auth_service.dart';
 import '../../routes/app_routes.dart';
 
 class ProductDetailScreen extends StatefulWidget {
@@ -49,14 +48,6 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
       );
     }
     _product = widget.productData ?? {};
-    // Track product view
-    if (_product.isNotEmpty) {
-      AnalyticsService.instance.trackProductView(
-        productId: (_product['id'] ?? '').toString(),
-        productName: (_product['name'] ?? '').toString(),
-        shopId: (_product['shopId'] ?? _product['shop_id'] ?? '').toString(),
-      );
-    }
     _checkWishlistStatus();
     // Load full product data from Supabase if we have an id
     _loadFullProduct();
@@ -69,17 +60,10 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
       return;
     }
     try {
-      final result = await Supabase.instance.client
-          .from('products')
-          .select(
-            '*, shops(id, name, logo_url, rating, is_verified, owner_id), reviews(rating, comment, created_at, reviewer_id, user_profiles(full_name, avatar_url))',
-          )
-          .eq('id', productId)
-          .maybeSingle();
-      if (result != null && mounted) {
-        final normalized = _normalizeSupabaseProduct(result);
+      final result = await ProductService.instance.getProductById(productId);
+      if (result.success && result.data != null && mounted) {
         setState(() {
-          _product = normalized;
+          _product = _normalizeNestProduct(result.data!);
           _isLoading = false;
         });
         _checkWishlistStatus();
@@ -91,15 +75,15 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
     }
   }
 
-  Map<String, dynamic> _normalizeSupabaseProduct(Map<String, dynamic> p) {
-    final shopData = p['shops'] as Map<String, dynamic>?;
+  Map<String, dynamic> _normalizeNestProduct(Map<String, dynamic> p) {
+    // Image
     final images = p['images'];
     List<Map<String, dynamic>> imageList = [];
     if (images is List) {
       for (final img in images) {
         if (img is Map) {
           imageList.add({
-            'url': img['url'] ?? '',
+            'url': img['url'] ?? img['imageUrl'] ?? '',
             'semanticLabel': img['semanticLabel'] ?? 'Image du produit',
           });
         } else if (img is String) {
@@ -108,20 +92,42 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
       }
     }
     if (imageList.isEmpty) {
+      final directUrl = p['imageUrl'] as String? ?? p['image_url'] as String? ?? '';
       imageList = [
         {
-          'url':
-              'https://img.rocket.new/generatedImages/rocket_gen_img_1400468a7-1773808571322.png',
+          'url': directUrl.isNotEmpty
+              ? directUrl
+              : 'https://img.rocket.new/generatedImages/rocket_gen_img_1400468a7-1773808571322.png',
           'semanticLabel': 'Image du produit',
         },
       ];
     }
 
     final price = (p['price'] as num? ?? 0).toInt();
-    final originalPrice = (p['original_price'] as num? ?? price).toInt();
+    final originalPrice = (p['original_price'] as num? ??
+            p['originalPrice'] as num? ??
+            p['compareAtPrice'] as num? ??
+            price)
+        .toInt();
     final discount = originalPrice > price
         ? (((originalPrice - price) / originalPrice) * 100).round()
         : 0;
+
+    // Shop : NestJS = vendeur{shopName, id} ou shops{name}
+    final shopData = p['shops'] ?? p['vendeur'] ?? p['shop_info'];
+    final shopName = shopData is Map
+        ? (shopData['shopName'] as String? ?? shopData['name'] as String? ?? '')
+        : (p['shop'] as String? ?? '');
+    final shopId = shopData is Map ? (shopData['id'] ?? '') : (p['shop_id'] ?? '');
+    final shopLogo = shopData is Map
+        ? (shopData['logoUrl'] as String? ?? shopData['logo_url'] as String? ?? '')
+        : '';
+    final shopRating = shopData is Map
+        ? (shopData['rating'] as num? ?? 4.5).toDouble()
+        : 4.5;
+    final shopVerified = shopData is Map
+        ? (shopData['isVerified'] as bool? ?? shopData['is_verified'] as bool? ?? false)
+        : false;
 
     final specs = p['specs'];
     List<Map<String, dynamic>> specList = [];
@@ -142,29 +148,29 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
     return {
       'id': p['id'] ?? '',
       'name': p['name'] ?? '',
-      'shop': shopData?['name'] ?? '',
-      'shopId': shopData?['id'] ?? '',
-      'shop_id': shopData?['id'] ?? '',
-      'shopLogo': shopData?['logo_url'] ?? '',
-      'shopLogoSemanticLabel': 'Logo de la boutique ${shopData?['name'] ?? ''}',
-      'shopRating': (shopData?['rating'] as num? ?? 4.5).toDouble(),
+      'shop': shopName,
+      'shopId': shopId,
+      'shop_id': shopId,
+      'shopLogo': shopLogo,
+      'shopLogoSemanticLabel': 'Logo de la boutique $shopName',
+      'shopRating': shopRating,
       'shopSales': 0,
       'shopIsOnline': true,
-      'shopIsVerified': shopData?['is_verified'] as bool? ?? false,
-      'seller_id': shopData?['owner_id'] ?? p['seller_id'] ?? '',
+      'shopIsVerified': shopVerified,
+      'seller_id': p['seller_id'] ?? p['vendeurId'] ?? '',
       'price': price,
       'originalPrice': originalPrice,
       'discount': discount,
-      'rating': (p['rating'] as num? ?? 4.5).toDouble(),
-      'reviewCount': p['review_count'] as int? ?? 0,
+      'rating': (p['rating'] as num? ?? p['averageRating'] as num? ?? 4.5).toDouble(),
+      'reviewCount': p['review_count'] as int? ?? p['reviewCount'] as int? ?? 0,
       'imageUrl': imageList.first['url'] ?? '',
       'semanticLabel': imageList.first['semanticLabel'] ?? '',
       'images': imageList,
-      'stockLeft': p['stock_quantity'] as int? ?? 0,
-      'isHot': p['is_featured'] as bool? ?? false,
+      'stockLeft': p['stock_quantity'] as int? ?? p['stockQuantity'] as int? ?? 0,
+      'isHot': p['is_featured'] as bool? ?? p['isFeatured'] as bool? ?? false,
       'category': p['category'] ?? '',
       'location': p['location'] ?? 'Bénin',
-      'minOrder': p['min_order'] as int? ?? 1,
+      'minOrder': p['min_order'] as int? ?? p['minOrder'] as int? ?? 1,
       'description': p['description'] ?? '',
       'priceTiers': tierList,
       'specs': specList,
@@ -173,114 +179,70 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
   }
 
   Future<void> _checkWishlistStatus() async {
-    final user = AuthService.instance.currentUser;
-    if (user == null) return;
-    final productId = (_product['id'] ?? '').toString();
-    if (productId.isEmpty) return;
-    try {
-      final result = await Supabase.instance.client
-          .from('wishlists')
-          .select('id')
-          .eq('user_id', user.id)
-          .eq('product_id', productId)
-          .maybeSingle();
-      if (mounted) setState(() => _isInWishlist = result != null);
-    } catch (_) {}
+    final isLoggedIn = await NestAuthService.instance.isLoggedIn()
+        .timeout(const Duration(seconds: 3), onTimeout: () => false);
+    if (!isLoggedIn || !mounted) return;
+    // Wishlist status check — stub until wishlist API is wired
+    // Will be implemented when wishlist module is integrated
   }
 
   Future<void> _toggleWishlist() async {
-    final user = AuthService.instance.currentUser;
-    if (user == null) {
-      Navigator.pushNamed(context, AppRoutes.signUpLogin);
+    final isLoggedIn = await NestAuthService.instance.isLoggedIn()
+        .timeout(const Duration(seconds: 3), onTimeout: () => false);
+    if (!isLoggedIn) {
+      if (mounted) Navigator.pushNamed(context, AppRoutes.signUpLogin);
       return;
     }
-    final productId = (_product['id'] ?? '').toString();
-    if (productId.isEmpty) return;
     setState(() => _isWishlistLoading = true);
-    try {
-      if (_isInWishlist) {
-        await Supabase.instance.client
-            .from('wishlists')
-            .delete()
-            .eq('user_id', user.id)
-            .eq('product_id', productId);
-        if (mounted) {
-          setState(() {
-            _isInWishlist = false;
-            _isWishlistLoading = false;
-          });
-          ScaffoldMessenger.of(context).clearSnackBars();
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                'Retiré de la liste de souhaits',
-                style: GoogleFonts.outfit(),
+    // Optimistic UI toggle — API call will be added with wishlist module
+    await Future.delayed(const Duration(milliseconds: 200));
+    if (!mounted) return;
+    setState(() {
+      _isInWishlist = !_isInWishlist;
+      _isWishlistLoading = false;
+    });
+    ScaffoldMessenger.of(context).clearSnackBars();
+    if (_isInWishlist) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              const Icon(Icons.favorite_rounded, color: Colors.white, size: 16),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text('Ajouté à la liste de souhaits',
+                    style: GoogleFonts.outfit()),
               ),
-              backgroundColor: AppTheme.textSecondary,
-              behavior: SnackBarBehavior.floating,
-              duration: const Duration(seconds: 2),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(10),
+              TextButton(
+                onPressed: () {
+                  ScaffoldMessenger.of(context).hideCurrentSnackBar();
+                  Navigator.pushNamed(context, AppRoutes.wishlist);
+                },
+                child: Text('Voir',
+                    style: GoogleFonts.outfit(
+                        color: Colors.white, fontWeight: FontWeight.w700)),
               ),
-            ),
-          );
-        }
-      } else {
-        final price = ((_product['price'] ?? 0) as num).toDouble();
-        await Supabase.instance.client.from('wishlists').insert({
-          'user_id': user.id,
-          'product_id': productId,
-          'added_price': price,
-        });
-        if (mounted) {
-          setState(() {
-            _isInWishlist = true;
-            _isWishlistLoading = false;
-          });
-          ScaffoldMessenger.of(context).clearSnackBars();
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Row(
-                children: [
-                  const Icon(
-                    Icons.favorite_rounded,
-                    color: Colors.white,
-                    size: 16,
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      'Ajouté à la liste de souhaits',
-                      style: GoogleFonts.outfit(),
-                    ),
-                  ),
-                  TextButton(
-                    onPressed: () {
-                      ScaffoldMessenger.of(context).hideCurrentSnackBar();
-                      Navigator.pushNamed(context, AppRoutes.wishlist);
-                    },
-                    child: Text(
-                      'Voir',
-                      style: GoogleFonts.outfit(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              backgroundColor: const Color(0xFFDC2626),
-              behavior: SnackBarBehavior.floating,
-              duration: const Duration(seconds: 3),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(10),
-              ),
-            ),
-          );
-        }
-      }
-    } catch (_) {
-      if (mounted) setState(() => _isWishlistLoading = false);
+            ],
+          ),
+          backgroundColor: const Color(0xFFDC2626),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 3),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Retiré de la liste de souhaits',
+              style: GoogleFonts.outfit()),
+          backgroundColor: AppTheme.textSecondary,
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 2),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ),
+      );
     }
   }
 
@@ -431,15 +393,6 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
                 quantity: _quantity,
                 onAddToCart: () {
                   setState(() => _cartCount++);
-                  // Track cart add
-                  AnalyticsService.instance.trackCartAdd(
-                    productId: (_product['id'] ?? '').toString(),
-                    productName: (_product['name'] ?? '').toString(),
-                    amount: ((_product['price'] ?? 0) as num).toDouble(),
-                    quantity: _quantity,
-                    shopId: (_product['shopId'] ?? _product['shop_id'] ?? '')
-                        .toString(),
-                  );
                   ScaffoldMessenger.of(context).clearSnackBars();
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(
@@ -454,13 +407,6 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
                   );
                 },
                 onBuyNow: () {
-                  // Add to cart then navigate to checkout
-                  AnalyticsService.instance.trackCartAdd(
-                    productId: (_product['id'] ?? '').toString(),
-                    productName: (_product['name'] ?? '').toString(),
-                    amount: ((_product['price'] ?? 0) as num).toDouble(),
-                    quantity: _quantity,
-                  );
                   Navigator.pushNamed(context, '/checkout-screen');
                 },
               ),

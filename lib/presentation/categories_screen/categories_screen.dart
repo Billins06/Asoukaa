@@ -4,8 +4,8 @@ import '../../theme/app_theme.dart';
 import '../../widgets/app_navigation.dart';
 import '../../widgets/custom_image_widget.dart';
 import '../../routes/app_routes.dart';
-import '../../services/database_service.dart';
-import '../../services/auth_service.dart';
+import '../../services/product_service.dart';
+import '../../services/nest_auth_service.dart';
 
 class CategoriesScreen extends StatefulWidget {
   final String? initialCategory;
@@ -110,13 +110,18 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
         (c) => c.label == _selectedCategory,
         orElse: () => _categories.first,
       );
-      final result = await DatabaseService.instance.getProducts(
-        category: selectedItem.dbValue,
-        limit: 40,
-      );
+      final result = await ProductService.instance.getProducts(limit: 100);
       if (mounted) {
+        List<Map<String, dynamic>> products = result.data ?? [];
+        if (selectedItem.dbValue != null) {
+          products = products.where((p) {
+            final cat = p['category'];
+            if (cat is Map) return cat['name'] == selectedItem.dbValue;
+            return cat?.toString() == selectedItem.dbValue;
+          }).toList();
+        }
         setState(() {
-          _products = result.data ?? [];
+          _products = products;
           _isLoading = false;
         });
       }
@@ -129,6 +134,17 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
     if (_selectedCategory == cat) return;
     setState(() => _selectedCategory = cat);
     _loadProducts();
+  }
+
+  Future<void> _navigateToProfile() async {
+    final loggedIn = await NestAuthService.instance.isLoggedIn()
+        .timeout(const Duration(seconds: 3), onTimeout: () => false);
+    if (!mounted) return;
+    if (!loggedIn) {
+      Navigator.pushNamed(context, AppRoutes.signUpLogin);
+    } else {
+      Navigator.pushNamed(context, AppRoutes.buyerProfile);
+    }
   }
 
   String _formatPrice(dynamic price) {
@@ -258,11 +274,7 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
               Navigator.pushNamed(context, AppRoutes.cart);
               break;
             case 4:
-              final user = AuthService.instance.currentUser;
-              if (user == null) {
-                Navigator.pushNamed(context, AppRoutes.signUpLogin);
-                return;
-              }
+              _navigateToProfile();
               break;
           }
         },

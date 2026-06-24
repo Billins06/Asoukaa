@@ -3,13 +3,13 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../theme/app_theme.dart';
 import '../../routes/app_routes.dart';
 import '../../widgets/app_toast.dart';
 import '../../widgets/loading_skeleton_widget.dart';
-import '../../services/auth_service.dart';
+import '../../services/nest_auth_service.dart';
+import '../../services/user_service.dart';
 
 class BuyerProfileScreen extends StatefulWidget {
   const BuyerProfileScreen({super.key});
@@ -22,20 +22,18 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
   bool _notifOrders = true;
   bool _notifPromos = true;
   bool _notifMessages = false;
-  String _selectedLanguage = 'Français';
+
   bool _isLoading = true;
+  String? _loadError;
 
-  // Profile data state - mutable so edits are reflected
-  String _fullName = '';
-  String _email = '';
-  String _birthDate = '';
-  String _phone = '';
-  String _address = '';
-  String _city = '';
-  String? _avatarUrl;
-
-  final List<Map<String, dynamic>> _addresses = [];
+  UserProfile? _profile;
+  List<UserAddress> _addresses = [];
   final List<Map<String, dynamic>> _paymentMethods = [];
+
+  // Raccourcis lisibles
+  String get _fullName => _profile?.fullName ?? '';
+  String get _email => _profile?.email ?? '';
+  String get _phone => _profile?.phone ?? '';
 
   @override
   void initState() {
@@ -52,52 +50,34 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
   }
 
   Future<void> _loadPreferences() async {
+    if (mounted) setState(() { _isLoading = true; _loadError = null; });
     try {
       final prefs = await SharedPreferences.getInstance();
-      // Load real user profile from Supabase
-      final user = AuthService.instance.currentUser;
-      if (user != null) {
-        try {
-          final profile = await Supabase.instance.client
-              .from('user_profiles')
-              .select()
-              .eq('id', user.id)
-              .maybeSingle();
-          if (profile != null && mounted) {
-            setState(() {
-              _fullName = profile['full_name'] as String? ?? '';
-              _email = user.email ?? '';
-              _phone = profile['phone'] as String? ?? '';
-              _birthDate = profile['birth_date'] as String? ?? '';
-              _address = profile['address'] as String? ?? '';
-              _city = profile['city'] as String? ?? '';
-              _avatarUrl = profile['avatar_url'] as String?;
-            });
-          } else if (mounted) {
-            setState(() {
-              _email = user.email ?? '';
-              _fullName = user.userMetadata?['full_name'] as String? ?? '';
-              _phone = user.userMetadata?['phone'] as String? ?? '';
-            });
-          }
-        } catch (_) {
-          if (mounted) {
-            setState(() {
-              _email = user.email ?? '';
-              _fullName = user.userMetadata?['full_name'] as String? ?? '';
-            });
-          }
-        }
-      }
+
+      debugPrint('[Profile] Chargement du profil...');
+      final profileResult = await UserService.instance.getMyProfile();
+      debugPrint('[Profile] Résultat profil: success=${profileResult.success} error=${profileResult.error} data=${profileResult.data?.id}');
+
+      final addressResult = await UserService.instance.getAddresses();
+      debugPrint('[Profile] Adresses: success=${addressResult.success} count=${addressResult.data?.length}');
+
+      if (!mounted) return;
       setState(() {
-        _selectedLanguage = prefs.getString('selected_language') ?? 'Français';
+        if (profileResult.success && profileResult.data != null) {
+          _profile = profileResult.data;
+          _loadError = null;
+        } else {
+          _loadError = profileResult.error ?? 'Profil introuvable. Reconnectez-vous.';
+        }
+        if (addressResult.success) _addresses = addressResult.data ?? [];
         _notifOrders = prefs.getBool('notif_orders') ?? true;
         _notifPromos = prefs.getBool('notif_promos') ?? true;
         _notifMessages = prefs.getBool('notif_messages') ?? false;
         _isLoading = false;
       });
-    } catch (_) {
-      setState(() => _isLoading = false);
+    } catch (e, stack) {
+      debugPrint('[Profile] Exception: $e\n$stack');
+      if (mounted) setState(() { _isLoading = false; _loadError = e.toString(); });
     }
   }
 
@@ -118,6 +98,8 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
       backgroundColor: AppTheme.background,
       body: _isLoading
           ? const BuyerProfileSkeleton()
+          : _profile == null
+          ? _buildErrorState()
           : CustomScrollView(
               slivers: [
                 _buildSliverAppBar(),
@@ -151,17 +133,46 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
     );
   }
 
+  Widget _buildErrorState() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.cloud_off_rounded, size: 56, color: AppTheme.muted),
+            const SizedBox(height: 16),
+            Text(
+              'Impossible de charger le profil',
+              style: GoogleFonts.outfit(fontSize: 16, fontWeight: FontWeight.w700, color: AppTheme.textPrimary),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              _loadError ?? '',
+              style: GoogleFonts.outfit(fontSize: 13, color: AppTheme.textSecondary),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 24),
+            ElevatedButton.icon(
+              onPressed: _loadPreferences,
+              icon: const Icon(Icons.refresh_rounded, size: 18),
+              label: Text('Réessayer', style: GoogleFonts.outfit(fontWeight: FontWeight.w600)),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppTheme.primary,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildSliverAppBar() {
-    final user = AuthService.instance.currentUser;
-    final initials = _fullName.isNotEmpty
-        ? _fullName
-              .trim()
-              .split(' ')
-              .map((e) => e.isNotEmpty ? e[0] : '')
-              .take(2)
-              .join()
-              .toUpperCase()
-        : 'U';
+    final initials = _profile?.initials ?? 'U';
 
     return SliverAppBar(
       expandedHeight: 200,
@@ -212,7 +223,7 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  user?.email ?? _email,
+                  _email,
                   style: GoogleFonts.outfit(
                     fontSize: 13,
                     color: Colors.white.withAlpha(200),
@@ -246,41 +257,28 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
                 icon: Icons.person_outline_rounded,
                 label: 'Nom complet',
                 value: _fullName,
-                onTap: () => _showEditDialog(
-                  'Nom complet',
-                  _fullName,
-                  onSave: (v) => _fullName = v,
-                ),
+                onTap: _showEditProfileDialog,
               ),
               _buildDivider(),
               _buildInfoRow(
                 icon: Icons.email_outlined,
                 label: 'Email',
                 value: _email,
-                onTap: () =>
-                    _showEditDialog('Email', _email, onSave: (v) => _email = v),
+                onTap: null, // L'email n'est pas modifiable
               ),
               _buildDivider(),
               _buildInfoRow(
                 icon: Icons.phone_outlined,
                 label: 'Téléphone',
                 value: _phone,
-                onTap: () => _showEditDialog(
-                  'Téléphone',
-                  _phone,
-                  onSave: (v) => _phone = v,
-                ),
+                onTap: () => _showEditPhoneDialog(),
               ),
               _buildDivider(),
               _buildInfoRow(
-                icon: Icons.cake_outlined,
-                label: 'Date de naissance',
-                value: _birthDate,
-                onTap: () => _showEditDialog(
-                  'Date de naissance',
-                  _birthDate,
-                  onSave: (v) => _birthDate = v,
-                ),
+                icon: Icons.lock_outline_rounded,
+                label: 'Mot de passe',
+                value: '••••••••',
+                onTap: _showChangePasswordDialog,
               ),
             ],
           ),
@@ -300,6 +298,11 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
               ..._addresses.asMap().entries.map((entry) {
                 final index = entry.key;
                 final addr = entry.value;
+                final icon = addr.label.toLowerCase().contains('bureau')
+                    ? Icons.work_outline_rounded
+                    : addr.label.toLowerCase().contains('domicile')
+                        ? Icons.home_outlined
+                        : Icons.location_on_outlined;
                 return Column(
                   children: [
                     Padding(
@@ -313,14 +316,14 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
                             width: 36,
                             height: 36,
                             decoration: BoxDecoration(
-                              color: addr['isDefault'] as bool
+                              color: addr.isDefault
                                   ? AppTheme.primaryMuted
                                   : AppTheme.surfaceVariant,
                               borderRadius: BorderRadius.circular(10.0),
                             ),
                             child: Icon(
-                              addr['icon'] as IconData,
-                              color: addr['isDefault'] as bool
+                              icon,
+                              color: addr.isDefault
                                   ? AppTheme.primary
                                   : AppTheme.textSecondary,
                               size: 18,
@@ -334,14 +337,14 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
                                 Row(
                                   children: [
                                     Text(
-                                      addr['label'] as String,
+                                      addr.label,
                                       style: GoogleFonts.outfit(
                                         fontSize: 13,
                                         fontWeight: FontWeight.w600,
                                         color: AppTheme.textPrimary,
                                       ),
                                     ),
-                                    if (addr['isDefault'] as bool) ...[
+                                    if (addr.isDefault) ...[
                                       const SizedBox(width: 6),
                                       Container(
                                         padding: const EdgeInsets.symmetric(
@@ -368,7 +371,7 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
                                 ),
                                 const SizedBox(height: 2),
                                 Text(
-                                  '${addr['address']}, ${addr['city']}',
+                                  addr.displayLine,
                                   style: GoogleFonts.outfit(
                                     fontSize: 12,
                                     color: AppTheme.textSecondary,
@@ -385,16 +388,26 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
                               size: 18,
                               color: AppTheme.muted,
                             ),
-                            onSelected: (value) {
+                            onSelected: (value) async {
                               if (value == 'default') {
-                                setState(() {
-                                  for (var a in _addresses) {
-                                    a['isDefault'] = false;
+                                final result = await UserService.instance.setDefaultAddress(addr.id);
+                                if (!mounted) return;
+                                if (result.success) {
+                                  final r = await UserService.instance.getAddresses();
+                                  if (mounted && r.success) {
+                                    setState(() => _addresses = r.data ?? []);
                                   }
-                                  _addresses[index]['isDefault'] = true;
-                                });
+                                } else {
+                                  AppToast.show(context, message: result.error ?? 'Erreur.', type: ToastType.error, actionLabel: 'OK');
+                                }
                               } else if (value == 'delete') {
-                                setState(() => _addresses.removeAt(index));
+                                final result = await UserService.instance.deleteAddress(addr.id);
+                                if (!mounted) return;
+                                if (result.success) {
+                                  setState(() => _addresses.removeAt(index));
+                                } else {
+                                  AppToast.show(context, message: result.error ?? 'Erreur.', type: ToastType.error, actionLabel: 'OK');
+                                }
                               }
                             },
                             itemBuilder: (_) => [
@@ -866,7 +879,7 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
     required IconData icon,
     required String label,
     required String value,
-    required VoidCallback onTap,
+    VoidCallback? onTap,
     Color? valueColor,
     Widget? trailing,
   }) {
@@ -914,11 +927,12 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
             ),
             if (trailing != null) ...[const SizedBox(width: 8), trailing],
             const SizedBox(width: 4),
-            const Icon(
-              Icons.chevron_right_rounded,
-              color: AppTheme.muted,
-              size: 18,
-            ),
+            if (onTap != null)
+              const Icon(
+                Icons.chevron_right_rounded,
+                color: AppTheme.muted,
+                size: 18,
+              ),
           ],
         ),
       ),
@@ -932,171 +946,327 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
     );
   }
 
-  void _showEditDialog(
-    String field,
-    String currentValue, {
-    Function(String)? onSave,
-  }) {
-    final controller = TextEditingController(text: currentValue);
+  void _showEditProfileDialog() {
+    final prenomCtrl = TextEditingController(text: _profile?.prenom ?? '');
+    final nameCtrl = TextEditingController(text: _profile?.name ?? '');
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16.0),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: Text(
-          'Modifier $field',
+          'Modifier le nom',
           style: GoogleFonts.outfit(fontSize: 16, fontWeight: FontWeight.w700),
         ),
-        content: TextField(
-          controller: controller,
-          decoration: InputDecoration(
-            labelText: field,
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12.0),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: prenomCtrl,
+              decoration: InputDecoration(
+                labelText: 'Prénom',
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+              autofocus: true,
             ),
-          ),
-          autofocus: true,
+            const SizedBox(height: 12),
+            TextField(
+              controller: nameCtrl,
+              decoration: InputDecoration(
+                labelText: 'Nom',
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
+          ],
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: Text(
-              'Annuler',
-              style: GoogleFonts.outfit(color: AppTheme.muted),
-            ),
+            child: Text('Annuler', style: GoogleFonts.outfit(color: AppTheme.muted)),
           ),
           ElevatedButton(
-            onPressed: () {
-              final newValue = controller.text.trim();
+            onPressed: () async {
               Navigator.pop(ctx);
-              if (onSave != null) setState(() => onSave(newValue));
-              AppToast.show(
-                context,
-                message: '$field mis à jour avec succès.',
-                type: ToastType.success,
-                actionLabel: 'OK',
+              final result = await UserService.instance.updateProfile(
+                prenom: prenomCtrl.text.trim(),
+                name: nameCtrl.text.trim(),
               );
+              if (!mounted) return;
+              if (result.success) {
+                setState(() => _profile = result.data);
+                AppToast.show(context, message: 'Profil mis à jour.', type: ToastType.success, actionLabel: 'OK');
+              } else {
+                AppToast.show(context, message: result.error ?? 'Erreur.', type: ToastType.error, actionLabel: 'OK');
+              }
             },
             style: ElevatedButton.styleFrom(
               backgroundColor: AppTheme.primary,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(10.0),
-              ),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
             ),
-            child: Text(
-              'Enregistrer',
-              style: GoogleFonts.outfit(color: Colors.white),
-            ),
+            child: Text('Enregistrer', style: GoogleFonts.outfit(color: Colors.white)),
           ),
         ],
       ),
     );
   }
 
-  void _showEditProfileDialog() {
-    _showEditDialog('Nom complet', _fullName, onSave: (v) => _fullName = v);
+  void _showEditPhoneDialog() {
+    final ctrl = TextEditingController(text: _phone);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text(
+          'Modifier le téléphone',
+          style: GoogleFonts.outfit(fontSize: 16, fontWeight: FontWeight.w700),
+        ),
+        content: TextField(
+          controller: ctrl,
+          keyboardType: TextInputType.phone,
+          decoration: InputDecoration(
+            labelText: 'Numéro de téléphone',
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+          ),
+          autofocus: true,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text('Annuler', style: GoogleFonts.outfit(color: AppTheme.muted)),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              Navigator.pop(ctx);
+              final result = await UserService.instance.updateProfile(phone: ctrl.text.trim());
+              if (!mounted) return;
+              if (result.success) {
+                setState(() => _profile = result.data);
+                AppToast.show(context, message: 'Téléphone mis à jour.', type: ToastType.success, actionLabel: 'OK');
+              } else {
+                AppToast.show(context, message: result.error ?? 'Erreur.', type: ToastType.error, actionLabel: 'OK');
+              }
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppTheme.primary,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ),
+            child: Text('Enregistrer', style: GoogleFonts.outfit(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showChangePasswordDialog() {
+    final currentCtrl = TextEditingController();
+    final newCtrl = TextEditingController();
+    final confirmCtrl = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text(
+          'Changer le mot de passe',
+          style: GoogleFonts.outfit(fontSize: 16, fontWeight: FontWeight.w700),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: currentCtrl,
+              obscureText: true,
+              decoration: InputDecoration(
+                labelText: 'Mot de passe actuel',
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+              autofocus: true,
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: newCtrl,
+              obscureText: true,
+              decoration: InputDecoration(
+                labelText: 'Nouveau mot de passe',
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: confirmCtrl,
+              obscureText: true,
+              decoration: InputDecoration(
+                labelText: 'Confirmer le mot de passe',
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text('Annuler', style: GoogleFonts.outfit(color: AppTheme.muted)),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              Navigator.pop(ctx);
+              final result = await UserService.instance.changePassword(
+                currentPassword: currentCtrl.text,
+                newPassword: newCtrl.text,
+                confirmPassword: confirmCtrl.text,
+              );
+              if (!mounted) return;
+              if (result.success) {
+                AppToast.show(context, message: 'Mot de passe changé avec succès.', type: ToastType.success, actionLabel: 'OK');
+              } else {
+                AppToast.show(context, message: result.error ?? 'Erreur.', type: ToastType.error, actionLabel: 'OK');
+              }
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppTheme.primary,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ),
+            child: Text('Changer', style: GoogleFonts.outfit(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
   }
 
   void _showAddAddressDialog() {
+    final labelCtrl = TextEditingController();
+    final nomCtrl = TextEditingController();
+    final phoneCtrl = TextEditingController();
+    final quartierCtrl = TextEditingController();
+    final villeCtrl = TextEditingController();
+    final countryCtrl = TextEditingController(text: 'Bénin');
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (ctx) => Container(
-        padding: EdgeInsets.only(
-          bottom: MediaQuery.of(ctx).viewInsets.bottom + 24,
-          top: 24,
-          left: 20,
-          right: 20,
-        ),
-        decoration: const BoxDecoration(
-          color: AppTheme.surface,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Center(
-              child: Container(
-                width: 36,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: AppTheme.outline,
-                  borderRadius: BorderRadius.circular(2.0),
-                ),
-              ),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              'Nouvelle adresse',
-              style: GoogleFonts.outfit(
-                fontSize: 17,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              decoration: InputDecoration(
-                labelText: 'Libellé (ex: Domicile)',
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12.0),
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              decoration: InputDecoration(
-                labelText: 'Adresse complète',
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12.0),
-                ),
-              ),
-              maxLines: 2,
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              decoration: InputDecoration(
-                labelText: 'Ville / Pays',
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12.0),
-                ),
-              ),
-            ),
-            const SizedBox(height: 20),
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton(
-                onPressed: () {
-                  setState(() {
-                    _addresses.add({
-                      'label': 'Nouvelle adresse',
-                      'address': 'Adresse saisie',
-                      'city': 'Ville, Pays',
-                      'isDefault': false,
-                      'icon': Icons.location_on_rounded,
-                    });
-                  });
-                  Navigator.pop(ctx);
-                },
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: AppTheme.primary,
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12.0),
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(20, 24, 20, 24),
+          decoration: const BoxDecoration(
+            color: AppTheme.surface,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                  child: Container(
+                    width: 36,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: AppTheme.outline,
+                      borderRadius: BorderRadius.circular(2.0),
+                    ),
                   ),
                 ),
-                child: Text(
-                  'Ajouter',
-                  style: GoogleFonts.outfit(
-                    fontWeight: FontWeight.w600,
-                    color: Colors.white,
+                const SizedBox(height: 16),
+                Text(
+                  'Nouvelle adresse',
+                  style: GoogleFonts.outfit(fontSize: 17, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: labelCtrl,
+                  decoration: InputDecoration(
+                    labelText: 'Libellé (ex: Domicile)',
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12.0)),
                   ),
                 ),
-              ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: nomCtrl,
+                  decoration: InputDecoration(
+                    labelText: 'Nom du destinataire',
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12.0)),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: phoneCtrl,
+                  keyboardType: TextInputType.phone,
+                  decoration: InputDecoration(
+                    labelText: 'Téléphone du destinataire',
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12.0)),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: quartierCtrl,
+                  decoration: InputDecoration(
+                    labelText: 'Quartier',
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12.0)),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: villeCtrl,
+                  decoration: InputDecoration(
+                    labelText: 'Ville',
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12.0)),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: countryCtrl,
+                  decoration: InputDecoration(
+                    labelText: 'Pays',
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12.0)),
+                  ),
+                ),
+                const SizedBox(height: 20),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    onPressed: () async {
+                      if (labelCtrl.text.trim().isEmpty ||
+                          quartierCtrl.text.trim().isEmpty ||
+                          villeCtrl.text.trim().isEmpty) {
+                        AppToast.show(
+                          context,
+                          message: 'Veuillez remplir les champs obligatoires.',
+                          type: ToastType.error,
+                          actionLabel: 'OK',
+                        );
+                        return;
+                      }
+                      Navigator.pop(ctx);
+                      final result = await UserService.instance.createAddress(
+                        label: labelCtrl.text.trim(),
+                        nomDestinataire: nomCtrl.text.trim(),
+                        phoneDestinataire: phoneCtrl.text.trim(),
+                        quartier: quartierCtrl.text.trim(),
+                        ville: villeCtrl.text.trim(),
+                        country: countryCtrl.text.trim().isEmpty ? null : countryCtrl.text.trim(),
+                      );
+                      if (!mounted) return;
+                      if (result.success && result.data != null) {
+                        setState(() => _addresses.add(result.data!));
+                        AppToast.show(context, message: 'Adresse ajoutée.', type: ToastType.success, actionLabel: 'OK');
+                      } else {
+                        AppToast.show(context, message: result.error ?? 'Erreur.', type: ToastType.error, actionLabel: 'OK');
+                      }
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppTheme.primary,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12.0)),
+                    ),
+                    child: Text(
+                      'Ajouter',
+                      style: GoogleFonts.outfit(fontWeight: FontWeight.w600, color: Colors.white),
+                    ),
+                  ),
+                ),
+              ],
             ),
-          ],
+          ),
         ),
       ),
     );
@@ -1173,44 +1343,6 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
             ),
             const SizedBox(height: 8),
           ],
-        ),
-      ),
-    );
-  }
-
-  void _showLanguageDialog() {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16.0),
-        ),
-        title: Text(
-          'Choisir la langue',
-          style: GoogleFonts.outfit(fontSize: 16, fontWeight: FontWeight.w700),
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: ['Français', 'English', 'العربية'].map((lang) {
-            return RadioListTile<String>(
-              title: Text(lang, style: GoogleFonts.outfit(fontSize: 14)),
-              value: lang,
-              groupValue: _selectedLanguage,
-              activeColor: AppTheme.primary,
-              contentPadding: EdgeInsets.zero,
-              onChanged: (v) async {
-                setState(() => _selectedLanguage = v!);
-                await _savePreference('selected_language', v!);
-                Navigator.pop(ctx);
-                AppToast.show(
-                  context,
-                  message: 'Langue changée : $v',
-                  type: ToastType.success,
-                  actionLabel: 'OK',
-                );
-              },
-            );
-          }).toList(),
         ),
       ),
     );
@@ -1364,7 +1496,7 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
           ElevatedButton(
             onPressed: () async {
               Navigator.pop(ctx);
-              await AuthService.instance.signOut();
+              await NestAuthService.instance.logout();
               if (mounted) {
                 Navigator.pushNamedAndRemoveUntil(
                   context,

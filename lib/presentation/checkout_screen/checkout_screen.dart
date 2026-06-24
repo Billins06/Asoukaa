@@ -3,10 +3,9 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../../routes/app_routes.dart';
-import '../../services/analytics_service.dart';
-import '../../services/auth_service.dart';
-import '../../services/database_service.dart';
-import '../../services/error_handler.dart';
+import '../../services/nest_auth_service.dart';
+import '../../services/user_service.dart';
+import '../../services/api_service.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/app_toast.dart';
 import '../../widgets/custom_image_widget.dart';
@@ -86,27 +85,19 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   }
 
   Future<void> _loadUserProfile() async {
-    final user = AuthService.instance.currentUser;
-    if (user == null) {
-      setState(() => _isLoadingProfile = false);
+    final isLoggedIn = await NestAuthService.instance.isLoggedIn()
+        .timeout(const Duration(seconds: 5), onTimeout: () => false);
+    if (!isLoggedIn) {
+      if (mounted) setState(() => _isLoadingProfile = false);
       return;
     }
     try {
-      final profile = await DatabaseService.instance.getUserProfile(user.id);
-      if (mounted && profile != null) {
-        final fullName = profile['full_name'] as String? ?? '';
-        final parts = fullName.split(' ');
-        if (parts.length >= 2) {
-          _lastNameController.text = parts.last;
-          _firstNameController.text = parts.first;
-        } else {
-          _firstNameController.text = fullName;
-        }
-        _phoneController.text = profile['phone'] as String? ?? '';
-        _addressController.text = profile['address'] as String? ?? '';
-        if ((profile['city'] as String? ?? '').isNotEmpty) {
-          _cityController.text = profile['city'] as String;
-        }
+      final result = await UserService.instance.getMyProfile();
+      if (mounted && result.success && result.data != null) {
+        final profile = result.data!;
+        _firstNameController.text = profile.prenom;
+        _lastNameController.text = profile.name;
+        _phoneController.text = profile.phone;
       }
     } catch (_) {}
     if (mounted) setState(() => _isLoadingProfile = false);
@@ -173,76 +164,62 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     setState(() => _isPlacingOrder = true);
 
     try {
-      final user = AuthService.instance.currentUser;
-      if (user == null) {
-        AppToast.show(
-          context,
-          message: 'Veuillez vous connecter',
-          type: ToastType.error,
-        );
-        setState(() => _isPlacingOrder = false);
+      final isLoggedIn = await NestAuthService.instance.isLoggedIn()
+          .timeout(const Duration(seconds: 5), onTimeout: () => false);
+      if (!isLoggedIn) {
+        if (mounted) {
+          AppToast.show(
+            context,
+            message: 'Veuillez vous connecter',
+            type: ToastType.error,
+          );
+          setState(() => _isPlacingOrder = false);
+        }
         return;
       }
 
-      // Determine shop_id from first cart item
+      // Determine vendeur from first cart item
       final firstItem = _orderItems.first;
-      final shopId = firstItem['shop_id'] as String? ?? '';
+      final vendeurId = firstItem['shop_id'] as String? ?? '';
 
-      // Create order in PENDING state before payment
+      // Create order via NestJS API
       final deliveryAddress =
           '${_addressController.text.trim()}, ${_cityController.text.trim()}, $_selectedCountry';
       final orderData = {
-        'buyer_id': user.id,
-        'shop_id': shopId.isNotEmpty ? shopId : null,
-        'status': 'pending_payment',
-        'total_amount': _total,
+        if (vendeurId.isNotEmpty) 'vendeurId': vendeurId,
+        'totalAmount': _total,
         'subtotal': _subtotal,
-        'delivery_fee': _deliveryFee,
-        'discount_amount': _promoDiscount,
-        'delivery_address': deliveryAddress,
-        'delivery_city': _cityController.text.trim(),
-        'delivery_country': _selectedCountry,
-        'buyer_phone': _phoneController.text.trim(),
-        'buyer_name':
+        'deliveryFee': _deliveryFee,
+        'discountAmount': _promoDiscount,
+        'deliveryAddress': deliveryAddress,
+        'deliveryCity': _cityController.text.trim(),
+        'deliveryCountry': _selectedCountry,
+        'buyerPhone': _phoneController.text.trim(),
+        'buyerName':
             '${_firstNameController.text.trim()} ${_lastNameController.text.trim()}',
-        'delivery_notes': _notesController.text.trim(),
-        if (_locationShared && _latitude != null) 'delivery_lat': _latitude,
-        if (_locationShared && _longitude != null) 'delivery_lng': _longitude,
-        'items': _orderItems
+        'deliveryNotes': _notesController.text.trim(),
+        if (_locationShared && _latitude != null) 'deliveryLat': _latitude,
+        if (_locationShared && _longitude != null) 'deliveryLng': _longitude,
+        'orderItems': _orderItems
             .map(
               (i) => {
-                'product_id': i['product_id'] ?? i['id'],
-                'name': i['name'],
-                'price': i['price'],
-                'quantity': i['quantity'],
-                'image_url': i['imageUrl'] ?? '',
+                'productId': i['product_id'] ?? i['id'],
+                'quantity': i['quantity'] ?? 1,
+                'unitPrice': i['price'],
               },
             )
             .toList(),
       };
 
-      final orderResult = await _createOrder(orderData);
+      final createdOrder = await _createOrder(orderData);
+      _pendingOrderId = createdOrder['id'] as String?;
 
-      if (orderResult.isFailure) {
-        AppToast.show(
-          context,
-          message: orderResult.errorMessage ?? 'Erreur lors de la commande',
-          type: ToastType.error,
-        );
-        setState(() => _isPlacingOrder = false);
-        return;
-      }
-
-      _pendingOrderId = orderResult.data?['id'] as String?;
-
-      // Save address if requested
+      // Save phone update if requested (address not in NestJS user profile)
       if (_saveAddress) {
         try {
-          await DatabaseService.instance.updateUserProfile(user.id, {
-            'address': _addressController.text.trim(),
-            'city': _cityController.text.trim(),
-            'phone': _phoneController.text.trim(),
-          });
+          await UserService.instance.updateProfile(
+            phone: _phoneController.text.trim(),
+          );
         } catch (_) {}
       }
 
@@ -251,19 +228,6 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       if (!mounted) return;
 
       final orderId = _pendingOrderId ?? _generateTransKey();
-      AnalyticsService.instance.trackPurchase(
-        orderId: orderId,
-        amount: _total,
-        items: _orderItems
-            .map(
-              (i) => {
-                'name': i['name'],
-                'price': i['price'],
-                'quantity': i['quantity'] ?? 1,
-              },
-            )
-            .toList(),
-      );
 
       final token = _feexpayToken.isNotEmpty
           ? _feexpayToken
@@ -1121,9 +1085,13 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     );
   }
 
-  Future<ServiceResult<Map<String, dynamic>>> _createOrder(
+  Future<Map<String, dynamic>> _createOrder(
     Map<String, dynamic> orderData,
   ) async {
-    return DatabaseService.instance.createOrder(orderData);
+    final response = await ApiService.instance.client.post(
+      '/api/v1/orders',
+      data: orderData,
+    );
+    return Map<String, dynamic>.from(response.data as Map);
   }
 }

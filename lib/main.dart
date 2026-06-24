@@ -3,19 +3,11 @@ import 'package:flutter/services.dart';
 
 import './services/nest_auth_service.dart';
 import './services/notification_service.dart';
-import './services/supabase_service.dart';
 import './widgets/custom_error_widget.dart';
 import 'core/app_export.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
-  // Initialize Supabase
-  try {
-    await SupabaseService.initialize();
-  } catch (e) {
-    debugPrint('Failed to initialize Supabase: $e');
-  }
 
   // Initialize push notifications
   try {
@@ -100,31 +92,35 @@ class _AuthGateState extends State<AuthGate> {
     await Future.delayed(const Duration(milliseconds: 300));
     if (!mounted) return;
 
-    final isLoggedIn = await NestAuthService.instance.isLoggedIn();
-    if (!mounted) return;
-
-    if (isLoggedIn) {
-      try {
-        NotificationService.instance.subscribeToUserNotifications();
-      } catch (_) {}
-
-      final role = await NestAuthService.instance.getUserRole();
+    try {
+      final isLoggedIn = await NestAuthService.instance.isLoggedIn()
+          .timeout(const Duration(seconds: 5));
       if (!mounted) return;
-      switch (role) {
-        case 'vendeur':
-          Navigator.pushReplacementNamed(context, AppRoutes.sellerDashboard);
-          break;
-        case 'livreur':
-          Navigator.pushReplacementNamed(context, AppRoutes.delivererDashboard);
-          break;
-        case 'admin':
-          Navigator.pushReplacementNamed(context, AppRoutes.adminDashboard);
-          break;
-        default:
-          Navigator.pushReplacementNamed(context, AppRoutes.home);
+
+      if (isLoggedIn) {
+        try {
+          NotificationService.instance.subscribeToUserNotifications();
+        } catch (_) {}
+
+        final role = await NestAuthService.instance.getUserRole()
+            .timeout(const Duration(seconds: 5));
+        if (!mounted) return;
+        switch (role) {
+          case 'vendeur':
+            Navigator.pushReplacementNamed(context, AppRoutes.sellerDashboard);
+          case 'livreur':
+            Navigator.pushReplacementNamed(context, AppRoutes.delivererDashboard);
+          case 'admin':
+            Navigator.pushReplacementNamed(context, AppRoutes.adminDashboard);
+          default:
+            Navigator.pushReplacementNamed(context, AppRoutes.home);
+        }
+      } else {
+        Navigator.pushReplacementNamed(context, AppRoutes.signUpLogin);
       }
-    } else {
-      Navigator.pushReplacementNamed(context, AppRoutes.signUpLogin);
+    } catch (e) {
+      debugPrint('[AuthGate] Session check error: $e');
+      if (mounted) Navigator.pushReplacementNamed(context, AppRoutes.signUpLogin);
     }
   }
 

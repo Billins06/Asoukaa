@@ -3,12 +3,12 @@ import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
 
+import 'package:dio/dio.dart';
+
 import '../../theme/app_theme.dart';
 import '../../widgets/app_toast.dart';
-import '../../services/storage_service.dart';
-import '../../services/database_service.dart';
-import '../../services/error_handler.dart';
-import '../../services/auth_service.dart';
+import '../../services/api_service.dart';
+import '../../services/nest_auth_service.dart';
 
 class PublierProduitScreen extends StatefulWidget {
   const PublierProduitScreen({super.key});
@@ -236,26 +236,34 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
     int index, {
     ImageSource source = ImageSource.gallery,
   }) async {
-    final image = await StorageService.instance.pickImage(source: source);
-    if (image == null) return;
+    final picker = ImagePicker();
+    final picked = await picker.pickImage(source: source, maxWidth: 1200, imageQuality: 80);
+    if (picked == null) return;
 
     setState(() => _imageUploading[index] = true);
 
-    final url = await StorageService.instance.uploadProductImage(image);
-
-    if (!mounted) return;
-    setState(() {
-      _imageUploading[index] = false;
-      if (url != null) {
-        _imageSlots[index] = url;
-      } else {
-        AppToast.show(
-          context,
-          message: 'Échec de l\'upload. Réessayez.',
-          type: ToastType.error,
-        );
-      }
-    });
+    try {
+      final bytes = await picked.readAsBytes();
+      final fileName = 'product_${DateTime.now().millisecondsSinceEpoch}.jpg';
+      final formData = FormData.fromMap({
+        'file': MultipartFile.fromBytes(bytes, filename: fileName),
+      });
+      final res = await ApiService.instance.client.post('/api/v1/uploads/image', data: formData);
+      final url = res.data['url'] as String?;
+      if (!mounted) return;
+      setState(() {
+        _imageUploading[index] = false;
+        if (url != null) {
+          _imageSlots[index] = url;
+        } else {
+          AppToast.show(context, message: 'Échec de l\'upload. Réessayez.', type: ToastType.error);
+        }
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _imageUploading[index] = false);
+      AppToast.show(context, message: 'Échec de l\'upload. Réessayez.', type: ToastType.error);
+    }
   }
 
   void _showImageSourceDialog(int index) {
@@ -309,68 +317,49 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
 
     if (!_formKey.currentState!.validate()) return;
 
+    final isLoggedIn = await NestAuthService.instance.isLoggedIn();
+    if (!isLoggedIn) {
+      AppToast.show(context, message: 'Vous devez être connecté.', type: ToastType.error);
+      return;
+    }
+
     setState(() => _isSubmitting = true);
 
-    // Get shop_id for the current seller
-    final user = AuthService.instance.currentUser;
-    if (user == null) {
-      setState(() => _isSubmitting = false);
-      AppToast.show(
-        context,
-        message: 'Vous devez être connecté.',
-        type: ToastType.error,
-      );
-      return;
-    }
+    try {
+      final images = _imageSlots.where((s) => s != null).map((s) => s!).toList();
+      final priceTiers = _tiers
+          .where((t) => t['qte']!.text.isNotEmpty && t['prix']!.text.isNotEmpty)
+          .map(
+            (t) => {
+              'minQty': int.tryParse(t['qte']!.text) ?? 0,
+              'price': int.tryParse(t['prix']!.text) ?? 0,
+            },
+          )
+          .toList();
 
-    final shop = await DatabaseService.instance.getShopByOwnerId(user.id);
-    if (shop == null) {
-      setState(() => _isSubmitting = false);
-      AppToast.show(
-        context,
-        message: 'Boutique introuvable. Créez d\'abord votre boutique.',
-        type: ToastType.error,
-      );
-      return;
-    }
+      await ApiService.instance.client.post('/api/v1/products', data: {
+        'name': _nomController.text.trim(),
+        'description': _descriptionController.text.trim(),
+        'category': _selectedCategory ?? '',
+        'price': int.tryParse(_prixController.text) ?? 0,
+        'originalPrice': int.tryParse(_prixController.text) ?? 0,
+        'stockQuantity': int.tryParse(_stockController.text) ?? 0,
+        'images': images,
+        'priceTiers': priceTiers,
+        'isActive': true,
+        'tags': [
+          if (_marqueController.text.trim().isNotEmpty) _marqueController.text.trim(),
+          if (_selectedSize != null) _selectedSize!,
+          if (_selectedColor != null) _selectedColor!,
+          if (_lieuController.text.trim().isNotEmpty) _lieuController.text.trim(),
+        ],
+      });
 
-    final images = _imageSlots.where((s) => s != null).map((s) => s!).toList();
-    final priceTiers = _tiers
-        .where((t) => t['qte']!.text.isNotEmpty && t['prix']!.text.isNotEmpty)
-        .map(
-          (t) => {
-            'min_qty': int.tryParse(t['qte']!.text) ?? 0,
-            'price': int.tryParse(t['prix']!.text) ?? 0,
-          },
-        )
-        .toList();
-
-    final result = await DatabaseService.instance.createProduct({
-      'name': _nomController.text.trim(),
-      'description': _descriptionController.text.trim(),
-      'category': _selectedCategory ?? '',
-      'price': int.tryParse(_prixController.text) ?? 0,
-      'original_price': int.tryParse(_prixController.text) ?? 0,
-      'stock_quantity': int.tryParse(_stockController.text) ?? 0,
-      'images': images,
-      'price_tiers': priceTiers,
-      'shop_id': shop['id'] as String,
-      'seller_id': user.id,
-      'is_active': true,
-      'tags': [
-        if (_marqueController.text.trim().isNotEmpty)
-          _marqueController.text.trim(),
-        if (_selectedSize != null) _selectedSize!,
-        if (_selectedColor != null) _selectedColor!,
-        if (_lieuController.text.trim().isNotEmpty) _lieuController.text.trim(),
-      ],
-    });
-
-    if (!mounted) return;
-    setState(() => _isSubmitting = false);
-
-    if (result.isSuccess) {
-      setState(() => _isSuccess = true);
+      if (!mounted) return;
+      setState(() {
+        _isSubmitting = false;
+        _isSuccess = true;
+      });
       AppToast.show(
         context,
         message: 'Produit publié avec succès ! Il sera visible sous peu.',
@@ -381,12 +370,10 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
         if (!mounted) return;
         Navigator.pop(context);
       });
-    } else {
-      ErrorHandler.showErrorDialog(
-        context,
-        message: result.errorMessage ?? 'Erreur lors de la publication.',
-        onRetry: _submitForm,
-      );
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _isSubmitting = false);
+      AppToast.show(context, message: 'Erreur lors de la publication. Réessayez.', type: ToastType.error);
     }
   }
 

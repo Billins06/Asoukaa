@@ -1,12 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
-
 import '../../theme/app_theme.dart';
 import '../../routes/app_routes.dart';
-import '../../services/database_service.dart';
-import '../../services/auth_service.dart';
-import '../../services/chat_service.dart';
+import '../../services/nest_auth_service.dart';
+import '../../services/api_service.dart';
 import '../../widgets/empty_state_widget.dart';
 import '../../widgets/app_toast.dart';
 
@@ -60,13 +57,18 @@ class _BoutiqueVendeurScreenState extends State<BoutiqueVendeurScreen>
       Map<String, dynamic>? shopResult;
 
       if (shopId != null && shopId.isNotEmpty) {
-        shopResult = await DatabaseService.instance.getShopById(shopId);
+        try {
+          final r = await ApiService.instance.client.get('/api/v1/shops/$shopId');
+          shopResult = Map<String, dynamic>.from(r.data as Map);
+        } catch (_) {}
       } else if (ownerId != null && ownerId.isNotEmpty) {
-        shopResult = await DatabaseService.instance.getShopByOwnerId(ownerId);
+        try {
+          final r = await ApiService.instance.client.get('/api/v1/shops/owner/$ownerId');
+          shopResult = Map<String, dynamic>.from(r.data as Map);
+        } catch (_) {}
       }
 
       if (shopResult == null && widget.shopData != null) {
-        // Use passed data as fallback if it has enough info
         shopResult = widget.shopData;
       }
 
@@ -82,29 +84,25 @@ class _BoutiqueVendeurScreenState extends State<BoutiqueVendeurScreen>
 
       final resolvedShopId = shopResult['id'] as String? ?? shopId ?? '';
 
-      // Load products for this shop
       List<Map<String, dynamic>> products = [];
       List<Map<String, dynamic>> reviews = [];
 
       if (resolvedShopId.isNotEmpty) {
         try {
-          final productsResult = await Supabase.instance.client
-              .from('products')
-              .select('*')
-              .eq('shop_id', resolvedShopId)
-              .eq('is_active', true)
-              .order('created_at', ascending: false);
-          products = List<Map<String, dynamic>>.from(productsResult as List);
+          final r = await ApiService.instance.client.get(
+            '/api/v1/products',
+            queryParameters: {'vendeurId': resolvedShopId, 'limit': '100'},
+          );
+          final raw = r.data;
+          final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) as List : []);
+          products = list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
         } catch (_) {}
 
         try {
-          final reviewsResult = await Supabase.instance.client
-              .from('reviews')
-              .select('*, user_profiles(full_name, avatar_url), products(name)')
-              .eq('shop_id', resolvedShopId)
-              .order('created_at', ascending: false)
-              .limit(20);
-          reviews = List<Map<String, dynamic>>.from(reviewsResult as List);
+          final r = await ApiService.instance.client.get('/api/v1/shops/$resolvedShopId/reviews');
+          final raw = r.data;
+          final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) as List : []);
+          reviews = list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
         } catch (_) {}
       }
 
@@ -220,8 +218,10 @@ class _BoutiqueVendeurScreenState extends State<BoutiqueVendeurScreen>
   }
 
   Future<void> _openChat() async {
-    final user = AuthService.instance.currentUser;
-    if (user == null) {
+    final isLoggedIn = await NestAuthService.instance.isLoggedIn()
+        .timeout(const Duration(seconds: 5), onTimeout: () => false);
+    if (!mounted) return;
+    if (!isLoggedIn) {
       AppToast.show(
         context,
         message: 'Connectez-vous pour envoyer un message',
@@ -230,23 +230,34 @@ class _BoutiqueVendeurScreenState extends State<BoutiqueVendeurScreen>
       return;
     }
     final sellerId = _shop['owner_id'] as String? ?? '';
-    if (sellerId.isEmpty || sellerId == user.id) return;
+    if (sellerId.isEmpty) return;
 
-    final result = await ChatService.instance.getOrCreateConversation(
-      buyerId: user.id,
-      sellerId: sellerId,
-    );
-    if (!mounted) return;
-    if (result.isSuccess) {
-      Navigator.pushNamed(
-        context,
-        AppRoutes.chat,
-        arguments: {
-          'conversation_id': result.data!['id'],
-          'other_user_name': _shop['name'],
-          'other_user_avatar': _shop['logo'],
-        },
+    try {
+      final r = await ApiService.instance.client.post(
+        '/api/v1/conversations',
+        data: {'recipientId': sellerId},
       );
+      if (!mounted) return;
+      final convId = (r.data as Map)['id'] as String?;
+      if (convId != null) {
+        Navigator.pushNamed(
+          context,
+          AppRoutes.chat,
+          arguments: {
+            'conversation_id': convId,
+            'other_user_name': _shop['name'],
+            'other_user_avatar': _shop['logo'],
+          },
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        AppToast.show(
+          context,
+          message: 'Impossible d\'ouvrir la conversation',
+          type: ToastType.error,
+        );
+      }
     }
   }
 

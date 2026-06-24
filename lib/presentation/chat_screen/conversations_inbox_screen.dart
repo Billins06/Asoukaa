@@ -1,12 +1,11 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../theme/app_theme.dart';
 import '../../routes/app_routes.dart';
-import '../../services/chat_service.dart';
-import '../../services/auth_service.dart';
+import '../../services/api_service.dart';
+import '../../services/nest_auth_service.dart';
 import '../../widgets/empty_state_widget.dart';
 
 class ConversationsInboxScreen extends StatefulWidget {
@@ -21,35 +20,43 @@ class _ConversationsInboxScreenState extends State<ConversationsInboxScreen> {
   bool _isLoading = true;
   List<Map<String, dynamic>> _conversations = [];
   int _totalUnread = 0;
-  RealtimeChannel? _subscription;
+  String? _myUserId;
 
   @override
   void initState() {
     super.initState();
-    _loadConversations();
-    _subscribeToUpdates();
+    _initUser();
   }
 
   @override
   void dispose() {
-    _subscription?.unsubscribe();
     super.dispose();
   }
 
+  Future<void> _initUser() async {
+    try {
+      final res = await ApiService.instance.client.get('/api/v1/users/me');
+      _myUserId = res.data['id'] as String?;
+    } catch (_) {}
+    _loadConversations();
+  }
+
   Future<void> _loadConversations() async {
-    final user = AuthService.instance.currentUser;
-    if (user == null) {
+    final isLoggedIn = await NestAuthService.instance.isLoggedIn();
+    if (!isLoggedIn) {
       if (mounted) setState(() => _isLoading = false);
       return;
     }
-    setState(() => _isLoading = true);
+    if (mounted) setState(() => _isLoading = true);
     try {
-      final result = await ChatService.instance.getConversations(user.id);
-      if (mounted && result.isSuccess) {
-        final convs = result.data ?? [];
+      final res = await ApiService.instance.client.get('/api/v1/conversations');
+      final raw = res.data;
+      final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) : []);
+      if (mounted) {
+        final convs = List<Map<String, dynamic>>.from(list as List);
         int unread = 0;
         for (final c in convs) {
-          final isBuyer = c['buyer_id'] == user.id;
+          final isBuyer = c['buyer_id'] == _myUserId;
           unread += isBuyer
               ? (c['buyer_unread'] as int? ?? 0)
               : (c['seller_unread'] as int? ?? 0);
@@ -59,21 +66,10 @@ class _ConversationsInboxScreenState extends State<ConversationsInboxScreen> {
           _totalUnread = unread;
           _isLoading = false;
         });
-      } else {
-        if (mounted) setState(() => _isLoading = false);
       }
     } catch (_) {
       if (mounted) setState(() => _isLoading = false);
     }
-  }
-
-  void _subscribeToUpdates() {
-    final user = AuthService.instance.currentUser;
-    if (user == null) return;
-    _subscription = ChatService.instance.subscribeToConversations(
-      userId: user.id,
-      onUpdate: _loadConversations,
-    );
   }
 
   String _formatTime(String? dateStr) {
@@ -94,8 +90,6 @@ class _ConversationsInboxScreenState extends State<ConversationsInboxScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final user = AuthService.instance.currentUser;
-
     return Scaffold(
       backgroundColor: AppTheme.background,
       appBar: AppBar(
@@ -170,7 +164,7 @@ class _ConversationsInboxScreenState extends State<ConversationsInboxScreen> {
                     const Divider(height: 1, indent: 72),
                 itemBuilder: (context, index) {
                   final conv = _conversations[index];
-                  final isBuyer = conv['buyer_id'] == user?.id;
+                  final isBuyer = conv['buyer_id'] == _myUserId;
                   final other = isBuyer ? conv['seller'] : conv['buyer'];
                   final otherName = other is Map
                       ? (other['full_name'] as String? ?? 'Utilisateur')

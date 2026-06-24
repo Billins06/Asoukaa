@@ -1,16 +1,15 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:pretty_qr_code/pretty_qr_code.dart';
 import 'package:sizer/sizer.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../theme/app_theme.dart';
 import '../../routes/app_routes.dart';
-import '../../services/gps_tracking_service.dart';
-import '../../services/auth_service.dart';
-import '../../services/storage_service.dart';
+import '../../services/api_service.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
@@ -28,8 +27,7 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
 
   // Live order status
   String _liveStatus = 'expedie';
-  RealtimeChannel? _orderChannel;
-  RealtimeChannel? _positionChannel;
+  Timer? _statusPollTimer;
 
   // Deliverer live position
   double? _delivererLat;
@@ -45,7 +43,6 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
   final TextEditingController _ratingCommentController =
       TextEditingController();
   String _ratingPhotoUrl = '';
-  bool _isUploadingRatingPhoto = false;
   bool _isSubmittingRating = false;
 
   // Status → step index mapping
@@ -114,8 +111,7 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
     final initialStatus = args?['status'] as String?;
     if (initialStatus != null) _liveStatus = initialStatus;
     if (orderId != null) {
-      _subscribeToOrderStatus(orderId);
-      _subscribeToDelivererPosition(orderId);
+      _startStatusPolling(orderId);
     }
   }
 
@@ -123,42 +119,28 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
   void dispose() {
     _animController.dispose();
     _ratingCommentController.dispose();
-    _orderChannel?.unsubscribe();
-    _positionChannel?.unsubscribe();
+    _statusPollTimer?.cancel();
     super.dispose();
   }
 
-  void _subscribeToOrderStatus(String orderId) {
-    _orderChannel = GpsTrackingService.instance.subscribeToOrderStatus(
-      orderId: orderId,
-      onStatusChange: (status) {
-        if (!mounted) return;
-        setState(() => _liveStatus = status);
-        _showStatusNotification(status);
-        if (status == 'livre') {
-          Future.delayed(const Duration(seconds: 2), () {
-            if (mounted) setState(() => _showRatingView = true);
-          });
+  void _startStatusPolling(String orderId) {
+    _statusPollTimer = Timer.periodic(const Duration(seconds: 15), (_) async {
+      try {
+        final response =
+            await ApiService.instance.client.get('/api/v1/orders/$orderId');
+        final status = response.data['status'] as String?;
+        if (status != null && mounted && status != _liveStatus) {
+          setState(() => _liveStatus = status);
+          _showStatusNotification(status);
+          if (status == 'livre') {
+            _statusPollTimer?.cancel();
+            Future.delayed(const Duration(seconds: 2), () {
+              if (mounted) setState(() => _showRatingView = true);
+            });
+          }
         }
-      },
-    );
-  }
-
-  void _subscribeToDelivererPosition(String orderId) {
-    // Subscribe to any deliverer position updates for this order
-    final channel = GpsTrackingService.instance.subscribeToDelivererPosition(
-      delivererId:
-          orderId, // fallback; real app would use deliverer_id from mission
-      onPosition: (pos) {
-        if (!mounted) return;
-        setState(() {
-          _delivererLat = (pos['latitude'] as num?)?.toDouble();
-          _delivererLng = (pos['longitude'] as num?)?.toDouble();
-          _hasLivePosition = true;
-        });
-      },
-    );
-    _positionChannel = channel;
+      } catch (_) {}
+    });
   }
 
   void _showStatusNotification(String status) {
@@ -188,20 +170,13 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
   }
 
   Future<void> _pickRatingPhoto() async {
-    final image = await StorageService.instance.pickImage(
+    final picker = ImagePicker();
+    final image = await picker.pickImage(
       source: ImageSource.gallery,
+      imageQuality: 85,
     );
-    if (image == null) return;
-    setState(() => _isUploadingRatingPhoto = true);
-    final url = await StorageService.instance.uploadDeliveryProof(
-      image,
-      'rating_${DateTime.now().millisecondsSinceEpoch}',
-    );
-    if (!mounted) return;
-    setState(() {
-      _isUploadingRatingPhoto = false;
-      if (url != null) _ratingPhotoUrl = url;
-    });
+    if (image == null || !mounted) return;
+    setState(() => _ratingPhotoUrl = image.path);
   }
 
   Future<void> _submitRating(String orderId) async {
@@ -219,21 +194,22 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
       return;
     }
     setState(() => _isSubmittingRating = true);
-    final userId = AuthService.instance.currentUser?.id ?? '';
-    final success = await GpsTrackingService.instance.submitDeliveryRating(
-      orderId: orderId,
-      buyerId: userId,
-      rating: _selectedRating,
-      comment: _ratingCommentController.text.trim(),
-      photoUrl: _ratingPhotoUrl,
-    );
-    if (!mounted) return;
-    setState(() {
-      _isSubmittingRating = false;
-      if (success) _ratingSubmitted = true;
-    });
-    if (success) {
+    try {
+      await ApiService.instance.client.post(
+        '/api/v1/orders/$orderId/rating',
+        data: {
+          'rating': _selectedRating,
+          'comment': _ratingCommentController.text.trim(),
+        },
+      );
+      if (!mounted) return;
+      setState(() {
+        _isSubmittingRating = false;
+        _ratingSubmitted = true;
+      });
       HapticFeedback.mediumImpact();
+    } catch (_) {
+      if (mounted) setState(() => _isSubmittingRating = false);
     }
   }
 
@@ -910,7 +886,7 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
           ),
           const SizedBox(height: 8),
           GestureDetector(
-            onTap: _isUploadingRatingPhoto ? null : _pickRatingPhoto,
+            onTap: _pickRatingPhoto,
             child: Container(
               height: _ratingPhotoUrl.isNotEmpty ? 140 : 72,
               decoration: BoxDecoration(
@@ -922,11 +898,7 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
                       : AppTheme.outlineVariant,
                 ),
               ),
-              child: _isUploadingRatingPhoto
-                  ? const Center(
-                      child: CircularProgressIndicator(color: AppTheme.primary),
-                    )
-                  : _ratingPhotoUrl.isNotEmpty
+              child: _ratingPhotoUrl.isNotEmpty
                   ? ClipRRect(
                       borderRadius: BorderRadius.circular(9),
                       child: Image.network(

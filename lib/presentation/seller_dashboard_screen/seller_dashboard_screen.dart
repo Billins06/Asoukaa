@@ -12,10 +12,8 @@ import '../../widgets/empty_state_widget.dart';
 import '../../widgets/loading_skeleton_widget.dart';
 import '../../widgets/connection_error_widget.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
-import '../../services/database_service.dart';
-import '../../services/auth_service.dart';
-import '../../services/error_handler.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../services/nest_auth_service.dart';
+import '../../services/api_service.dart';
 
 class SellerDashboardScreen extends StatefulWidget {
   const SellerDashboardScreen({super.key});
@@ -79,53 +77,45 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
     }
 
     try {
-      final user = AuthService.instance.currentUser;
-      if (user != null) {
-        // Get shop first
-        final shop = await DatabaseService.instance.getShopByOwnerId(user.id);
-        List<Map<String, dynamic>> products = [];
-        List<Map<String, dynamic>> orders = [];
+      final isLoggedIn = await NestAuthService.instance.isLoggedIn()
+          .timeout(const Duration(seconds: 5), onTimeout: () => false);
+      if (!isLoggedIn) {
+        if (mounted) setState(() => _isLoading = false);
+        return;
+      }
 
-        if (shop != null) {
-          final productsResult = await DatabaseService.instance
-              .getSellerProducts(user.id);
-          final ordersResult = await DatabaseService.instance.getBuyerOrders(
-            user.id,
-          );
+      Map<String, dynamic>? shop;
+      List<Map<String, dynamic>> products = [];
+      List<Map<String, dynamic>> orders = [];
 
-          if (mounted) {
-            if (productsResult.isFailure || ordersResult.isFailure) {
-              final errorMsg =
-                  productsResult.errorMessage ??
-                  ordersResult.errorMessage ??
-                  'Impossible de charger les données de la boutique.';
-              ErrorHandler.showErrorDialog(
-                context,
-                message: errorMsg,
-                onRetry: _loadData,
-              );
-            }
-          }
-          products = productsResult.data ?? [];
-          orders = ordersResult.data ?? [];
-        }
+      try {
+        final r = await ApiService.instance.client.get('/api/v1/shops/mine');
+        shop = Map<String, dynamic>.from(r.data as Map);
+      } catch (_) {}
 
-        if (mounted) {
-          setState(() {
-            _shop = shop;
-            _products = products;
-            _orders = orders;
-            _isLoading = false;
-            _isOfflineCached = false;
-            _hasConnectionError = false;
-          });
-        }
-      } else {
-        if (mounted) {
-          setState(() {
-            _isLoading = false;
-          });
-        }
+      try {
+        final r = await ApiService.instance.client.get('/api/v1/products/mine');
+        final raw = r.data;
+        final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) as List : []);
+        products = list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+      } catch (_) {}
+
+      try {
+        final r = await ApiService.instance.client.get('/api/v1/orders/mine');
+        final raw = r.data;
+        final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) as List : []);
+        orders = list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+      } catch (_) {}
+
+      if (mounted) {
+        setState(() {
+          _shop = shop;
+          _products = products;
+          _orders = orders;
+          _isLoading = false;
+          _isOfflineCached = false;
+          _hasConnectionError = false;
+        });
       }
     } catch (e) {
       if (mounted) {
@@ -133,7 +123,6 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
           _isLoading = false;
           _hasConnectionError = true;
         });
-        ErrorHandler.showExceptionDialog(context, e, onRetry: _loadData);
       }
     }
   }
@@ -1459,13 +1448,12 @@ class _DevisTabState extends State<_DevisTab> {
   Future<void> _loadRequests() async {
     setState(() => _isLoading = true);
     try {
-      final result = await Supabase.instance.client
-          .from('import_requests')
-          .select('*')
-          .order('created_at', ascending: false);
+      final r = await ApiService.instance.client.get('/api/v1/import-requests');
+      final raw = r.data;
+      final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) as List : []);
       if (mounted) {
         setState(() {
-          _requests = List<Map<String, dynamic>>.from(result);
+          _requests = list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
           _isLoading = false;
         });
       }
@@ -1660,15 +1648,14 @@ class _DevisCardState extends State<_DevisCard> {
     setState(() => _isUpdating = true);
     try {
       final amount = double.tryParse(_devisAmountCtrl.text.trim()) ?? 0;
-      await Supabase.instance.client
-          .from('import_requests')
-          .update({
-            'status': 'approved',
-            'devis_amount': amount,
-            'devis_note': _devisNoteCtrl.text.trim(),
-            'devis_sent_at': DateTime.now().toIso8601String(),
-          })
-          .eq('id', widget.request['id']);
+      await ApiService.instance.client.patch(
+        '/api/v1/import-requests/${widget.request['id']}',
+        data: {
+          'status': 'approved',
+          'devisAmount': amount,
+          'devisNote': _devisNoteCtrl.text.trim(),
+        },
+      );
       if (mounted) {
         Navigator.pop(context);
         widget.onStatusChanged();
@@ -2043,10 +2030,10 @@ class _DevisCardState extends State<_DevisCard> {
                       onPressed: () async {
                         setState(() => _isUpdating = true);
                         try {
-                          await Supabase.instance.client
-                              .from('import_requests')
-                              .update({'status': 'rejected'})
-                              .eq('id', r['id']);
+                          await ApiService.instance.client.patch(
+                            '/api/v1/import-requests/${r['id']}',
+                            data: {'status': 'rejected'},
+                          );
                           widget.onStatusChanged();
                         } catch (_) {}
                         if (mounted) setState(() => _isUpdating = false);

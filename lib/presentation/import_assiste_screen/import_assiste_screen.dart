@@ -4,9 +4,11 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter/foundation.dart';
 import 'package:image_picker/image_picker.dart';
 
+import 'package:dio/dio.dart';
+
 import '../../theme/app_theme.dart';
-import '../../services/supabase_service.dart';
-import '../../services/auth_service.dart';
+import '../../services/api_service.dart';
+import '../../services/nest_auth_service.dart';
 import '../../widgets/app_toast.dart';
 
 class ImportAssisteScreen extends StatefulWidget {
@@ -117,14 +119,11 @@ class _WeeklyCuratedTabState extends State<_WeeklyCuratedTab> {
   Future<void> _loadProducts() async {
     setState(() => _isLoading = true);
     try {
-      final result = await SupabaseService.instance.client
-          .from('import_assiste_products')
-          .select()
-          .eq('is_active', true)
-          .order('created_at', ascending: false)
-          .limit(20);
+      final res = await ApiService.instance.client.get('/api/v1/import-products?limit=20');
+      final raw = res.data;
+      final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) : []);
       if (mounted) {
-        final products = List<Map<String, dynamic>>.from(result as List);
+        final products = List<Map<String, dynamic>>.from(list as List);
         setState(() {
           _weeklyProducts = products.map((p) => _normalizeProduct(p)).toList();
           _isLoading = false;
@@ -265,24 +264,23 @@ class _WeeklyProductCardState extends State<_WeeklyProductCard> {
   bool _isOrdering = false;
 
   Future<void> _placeOrder() async {
-    final user = AuthService.instance.currentUser;
-    if (user == null) {
+    final isLoggedIn = await NestAuthService.instance.isLoggedIn();
+    if (!isLoggedIn) {
       Navigator.pushNamed(context, '/sign-up-login-screen');
       return;
     }
     setState(() => _isOrdering = true);
     try {
-      await SupabaseService.instance.client.from('import_requests').insert({
-        'user_id': user.id,
+      await ApiService.instance.client.post('/api/v1/import-requests', data: {
         'description': widget.product['name'],
         'quantity': _quantity,
         'category': 'Électronique',
         'origin': 'Chine',
         'budget': '${widget.formatPrice(widget.product['price'] as int)} FCFA',
         'status': 'pending',
-        'request_type': 'curated',
-        'product_name': widget.product['name'],
-        'unit_price': widget.product['price'],
+        'requestType': 'curated',
+        'productName': widget.product['name'],
+        'unitPrice': widget.product['price'],
       });
       if (mounted) {
         AppToast.show(
@@ -628,13 +626,12 @@ class _CustomOrderTabState extends State<_CustomOrderTab> {
     try {
       final bytes = await picked.readAsBytes();
       final fileName = 'import_${DateTime.now().millisecondsSinceEpoch}.jpg';
-      await SupabaseService.instance.client.storage
-          .from('product-images')
-          .uploadBinary(fileName, bytes);
-      final url = SupabaseService.instance.client.storage
-          .from('product-images')
-          .getPublicUrl(fileName);
-      if (mounted) setState(() => _imageUrl = url);
+      final formData = FormData.fromMap({
+        'file': MultipartFile.fromBytes(bytes, filename: fileName),
+      });
+      final res = await ApiService.instance.client.post('/api/v1/uploads/image', data: formData);
+      final url = res.data['url'] as String?;
+      if (mounted && url != null) setState(() => _imageUrl = url);
     } catch (_) {
       if (mounted) {
         AppToast.show(
@@ -650,31 +647,28 @@ class _CustomOrderTabState extends State<_CustomOrderTab> {
 
   Future<void> _submitRequest() async {
     if (!_formKey.currentState!.validate()) return;
-    final user = AuthService.instance.currentUser;
-    if (user == null) {
-      Navigator.pushNamed(context, '/sign-up-login-screen');
+    final isLoggedIn = await NestAuthService.instance.isLoggedIn();
+    if (!isLoggedIn) {
+      if (mounted) Navigator.pushNamed(context, '/sign-up-login-screen');
       return;
     }
     setState(() => _isSubmitting = true);
     try {
-      await SupabaseService.instance.client.from('import_requests').insert({
-        'user_id': user.id,
-        'product_url': _urlController.text.trim().isEmpty
-            ? null
-            : _urlController.text.trim(),
+      await ApiService.instance.client.post('/api/v1/import-requests', data: {
+        if (_urlController.text.trim().isNotEmpty) 'productUrl': _urlController.text.trim(),
         'description': _descController.text.trim(),
         'quantity': int.tryParse(_quantityController.text.trim()) ?? 1,
         'category': 'Autre',
         'origin': 'Chine',
         'budget': 'À définir',
-        'needs_customs': true,
-        'needs_quality_check': true,
+        'needsCustoms': true,
+        'needsQualityCheck': true,
         'status': 'pending',
-        'request_type': 'custom',
+        'requestType': 'custom',
         'specs': _specsController.text.trim(),
-        'deposit_amount': _depositAmount,
-        'deposit_paid': false,
-        if (_imageUrl != null) 'product_image_url': _imageUrl,
+        'depositAmount': _depositAmount,
+        'depositPaid': false,
+        if (_imageUrl != null) 'productImageUrl': _imageUrl,
       });
       if (mounted) {
         setState(() {

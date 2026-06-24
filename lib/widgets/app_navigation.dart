@@ -1,7 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
-import '../services/auth_service.dart';
 
 class AsoukaaBottomNav extends StatefulWidget {
   final int currentIndex;
@@ -20,7 +18,7 @@ class AsoukaaBottomNav extends StatefulWidget {
 }
 
 class _AsoukaaBottomNavState extends State<AsoukaaBottomNav> {
-  int _unreadCount = 0;
+  final int _unreadCount = 0;
 
   @override
   void initState() {
@@ -29,22 +27,7 @@ class _AsoukaaBottomNavState extends State<AsoukaaBottomNav> {
   }
 
   Future<void> _loadUnreadCount() async {
-    final user = AuthService.instance.currentUser;
-    if (user == null) return;
-    try {
-      final result = await Supabase.instance.client
-          .from('conversations')
-          .select('buyer_unread, seller_unread, buyer_id')
-          .or('buyer_id.eq.${user.id},seller_id.eq.${user.id}');
-      int total = 0;
-      for (final c in (result as List)) {
-        final isBuyer = c['buyer_id'] == user.id;
-        total += isBuyer
-            ? (c['buyer_unread'] as int? ?? 0)
-            : (c['seller_unread'] as int? ?? 0);
-      }
-      if (mounted) setState(() => _unreadCount = total);
-    } catch (_) {}
+    // Compteur de messages non lus — sera connecté à l'API NestJS
   }
 
   static const List<_NavItem> _items = [

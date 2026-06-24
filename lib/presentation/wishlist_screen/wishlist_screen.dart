@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:sizer/sizer.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../theme/app_theme.dart';
 import '../../routes/app_routes.dart';
-import '../../services/auth_service.dart';
+import '../../services/nest_auth_service.dart';
+import '../../services/api_service.dart';
 import '../../widgets/empty_state_widget.dart';
 import '../../widgets/custom_image_widget.dart';
 import '../../widgets/app_toast.dart';
@@ -20,8 +20,6 @@ class WishlistScreen extends StatefulWidget {
 class _WishlistScreenState extends State<WishlistScreen> {
   bool _isLoading = true;
   List<Map<String, dynamic>> _wishlistItems = [];
-  RealtimeChannel? _priceChannel;
-  final Set<String> _priceChangedIds = {};
 
   @override
   void initState() {
@@ -29,134 +27,100 @@ class _WishlistScreenState extends State<WishlistScreen> {
     _loadWishlist();
   }
 
-  @override
-  void dispose() {
-    _priceChannel?.unsubscribe();
-    super.dispose();
-  }
-
   Future<void> _loadWishlist() async {
     setState(() => _isLoading = true);
-    final user = AuthService.instance.currentUser;
-    if (user == null) {
+    final isLoggedIn = await NestAuthService.instance.isLoggedIn()
+        .timeout(const Duration(seconds: 5), onTimeout: () => false);
+    if (!isLoggedIn) {
       if (mounted) setState(() => _isLoading = false);
       return;
     }
     try {
-      final client = Supabase.instance.client;
-      final result = await client
-          .from('wishlists')
-          .select(
-            'id, product_id, added_price, products(id, name, price, original_price, images, stock_quantity, shops(name))',
-          )
-          .eq('user_id', user.id)
-          .order('created_at', ascending: false);
+      final response =
+          await ApiService.instance.client.get('/api/v1/wishlist');
+      final rawData = response.data;
+      final rawList = rawData is List
+          ? rawData
+          : (rawData is Map ? (rawData['data'] ?? rawData['items'] ?? []) as List : []);
 
       if (mounted) {
         setState(() {
-          _wishlistItems = List<Map<String, dynamic>>.from(result);
+          _wishlistItems = rawList
+              .whereType<Map>()
+              .map((e) => _normalizeItem(Map<String, dynamic>.from(e)))
+              .toList();
           _isLoading = false;
         });
-        _subscribeToPriceChanges();
       }
     } catch (_) {
       if (mounted) setState(() => _isLoading = false);
     }
   }
 
-  void _subscribeToPriceChanges() {
-    final productIds = _wishlistItems
-        .map((item) => item['product_id'] as String?)
-        .whereType<String>()
-        .toList();
-    if (productIds.isEmpty) return;
+  // Normalise un item NestJS vers le format attendu par _WishlistCard
+  Map<String, dynamic> _normalizeItem(Map<String, dynamic> item) {
+    final nestProduct =
+        (item['product'] ?? item['products']) as Map<String, dynamic>?;
+    if (nestProduct == null) return item;
 
-    _priceChannel?.unsubscribe();
-    _priceChannel = Supabase.instance.client
-        .channel('wishlist_prices')
-        .onPostgresChanges(
-          event: PostgresChangeEvent.update,
-          schema: 'public',
-          table: 'products',
-          callback: (payload) {
-            final updated = payload.newRecord;
-            final productId = updated['id'] as String?;
-            if (productId == null || !productIds.contains(productId)) return;
+    // Image
+    final images = nestProduct['images'];
+    String imageUrl = '';
+    if (images is List && images.isNotEmpty) {
+      final first = images[0];
+      imageUrl = first is Map
+          ? (first['url'] as String? ?? first['imageUrl'] as String? ?? '')
+          : first.toString();
+    }
+    if (imageUrl.isEmpty) {
+      imageUrl = nestProduct['imageUrl'] as String? ??
+          nestProduct['image_url'] as String? ??
+          '';
+    }
 
-            final newPrice = (updated['price'] as num?)?.toDouble();
-            if (newPrice == null || !mounted) return;
+    // Shop
+    final shopData = nestProduct['shops'] ??
+        nestProduct['vendeur'] ??
+        nestProduct['shop_info'];
+    final shopName = shopData is Map
+        ? (shopData['shopName'] as String? ??
+            shopData['name'] as String? ??
+            '')
+        : (nestProduct['shop'] as String? ?? '');
 
-            final idx = _wishlistItems.indexWhere(
-              (item) => item['product_id'] == productId,
-            );
-            if (idx == -1) return;
+    final price = (nestProduct['price'] as num? ?? 0).toDouble();
+    final originalPrice =
+        (nestProduct['original_price'] as num? ?? nestProduct['originalPrice'] as num?)
+            ?.toDouble();
+    final stockQty =
+        nestProduct['stock_quantity'] as int? ?? nestProduct['stockQuantity'] as int? ?? 0;
+    final addedPrice =
+        (item['addedPrice'] as num? ?? item['added_price'] as num?)?.toDouble();
 
-            final oldPrice =
-                (_wishlistItems[idx]['products']?['price'] as num?)
-                    ?.toDouble() ??
-                0;
-            if (newPrice != oldPrice) {
-              setState(() {
-                _wishlistItems[idx]['products']['price'] = newPrice;
-                _priceChangedIds.add(productId);
-              });
-              _showPriceAlert(
-                _wishlistItems[idx]['products']?['name'] ?? 'Produit',
-                oldPrice,
-                newPrice,
-              );
-            }
-          },
-        )
-        .subscribe();
+    return {
+      'id': item['id'] ?? '',
+      'product_id': nestProduct['id'] ?? item['productId'] ?? '',
+      'added_price': addedPrice,
+      'products': {
+        'id': nestProduct['id'] ?? '',
+        'name': nestProduct['name'] ?? '',
+        'price': price,
+        'original_price': originalPrice,
+        'images': imageUrl.isNotEmpty ? [imageUrl] : <String>[],
+        'stock_quantity': stockQty,
+        'shops': {'name': shopName},
+      },
+    };
   }
 
-  void _showPriceAlert(String name, double oldPrice, double newPrice) {
-    final dropped = newPrice < oldPrice;
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Row(
-          children: [
-            Icon(
-              dropped ? Icons.trending_down_rounded : Icons.trending_up_rounded,
-              color: Colors.white,
-              size: 18,
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                dropped
-                    ? 'Prix baissé ! "$name" : ${newPrice.toStringAsFixed(0)} F (était ${oldPrice.toStringAsFixed(0)} F)'
-                    : 'Prix augmenté : "$name" : ${newPrice.toStringAsFixed(0)} F',
-                style: GoogleFonts.outfit(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w500,
-                ),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ],
-        ),
-        backgroundColor: dropped ? AppTheme.success : const Color(0xFFDC2626),
-        behavior: SnackBarBehavior.floating,
-        duration: const Duration(seconds: 4),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      ),
-    );
-  }
-
-  Future<void> _removeFromWishlist(String wishlistId, String productId) async {
+  Future<void> _removeFromWishlist(
+      String wishlistId, String productId) async {
     try {
-      await Supabase.instance.client
-          .from('wishlists')
-          .delete()
-          .eq('id', wishlistId);
+      await ApiService.instance.client
+          .delete('/api/v1/wishlist/$productId');
       if (mounted) {
-        setState(() {
-          _wishlistItems.removeWhere((item) => item['id'] == wishlistId);
-          _priceChangedIds.remove(productId);
-        });
+        setState(() =>
+            _wishlistItems.removeWhere((item) => item['id'] == wishlistId));
         AppToast.show(context, message: 'Retiré de la liste de souhaits');
       }
     } catch (_) {
@@ -171,17 +135,12 @@ class _WishlistScreenState extends State<WishlistScreen> {
   }
 
   Future<void> _addToCart(Map<String, dynamic> product) async {
-    final user = AuthService.instance.currentUser;
-    if (user == null) return;
     try {
-      await Supabase.instance.client.from('carts').upsert({
-        'user_id': user.id,
-        'product_id': product['id'] as String,
-        'quantity': 1,
-      }, onConflict: 'user_id,product_id');
-      if (mounted) {
-        AppToast.show(context, message: 'Ajouté au panier !');
-      }
+      await ApiService.instance.client.post(
+        '/api/v1/cart/items',
+        data: {'productId': product['id'], 'quantity': 1},
+      );
+      if (mounted) AppToast.show(context, message: 'Ajouté au panier !');
     } catch (_) {
       if (mounted) {
         AppToast.show(context, message: 'Erreur', type: ToastType.error);
@@ -261,7 +220,7 @@ class _WishlistScreenState extends State<WishlistScreen> {
                   final product =
                       item['products'] as Map<String, dynamic>? ?? {};
                   final productId = item['product_id'] as String? ?? '';
-                  final hasPriceChange = _priceChangedIds.contains(productId);
+                  const hasPriceChange = false;
                   return _WishlistCard(
                     item: item,
                     product: product,

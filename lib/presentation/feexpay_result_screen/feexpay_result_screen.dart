@@ -1,9 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
-
 import '../../routes/app_routes.dart';
-import '../../services/auth_service.dart';
+import '../../services/nest_auth_service.dart';
+import '../../services/api_service.dart';
 import '../../theme/app_theme.dart';
 
 class FeexpayResultScreen extends StatefulWidget {
@@ -34,53 +33,42 @@ class _FeexpayResultScreenState extends State<FeexpayResultScreen> {
   }
 
   Future<void> _processPaymentResult() async {
+    // Read args before any await to avoid BuildContext async gap
+    final args = ModalRoute.of(context)?.settings.arguments;
+    if (args is Map<String, dynamic> && _orderId == null) {
+      _orderId = args['order_id'] as String?;
+    }
+
     try {
-      final user = AuthService.instance.currentUser;
-      if (user == null) {
+      final isLoggedIn = await NestAuthService.instance.isLoggedIn()
+          .timeout(const Duration(seconds: 5), onTimeout: () => false);
+      if (!isLoggedIn) {
         if (mounted) setState(() => _isProcessing = false);
         return;
       }
 
-      // Get order ID from args if not already set
-      final args = ModalRoute.of(context)?.settings.arguments;
-      if (args is Map<String, dynamic> && _orderId == null) {
-        _orderId = args['order_id'] as String?;
-      }
-
       if (_orderId != null && _orderId!.isNotEmpty) {
         if (widget.success) {
-          // Update order status to paid + confirmed
-          // await DatabaseService.instance.updateOrderStatus(
-          //   _orderId!,
-          //   'confirme',
-          // );
-          // Also update payment status
           try {
-            await Supabase.instance.client
-                .from('orders')
-                .update({
-                  'payment_status': 'paid',
-                  'status': 'confirme',
-                  'paid_at': DateTime.now().toIso8601String(),
-                })
-                .eq('id', _orderId!);
+            await ApiService.instance.client.patch(
+              '/api/v1/orders/$_orderId/status',
+              data: {
+                'paymentStatus': 'paid',
+                'status': 'confirme',
+              },
+            );
           } catch (_) {}
-          // Clear cart ONLY after successful payment
+          // Clear cart only after successful payment
           try {
-            await Supabase.instance.client
-                .from('cart_items')
-                .delete()
-                .eq('user_id', user.id);
+            await ApiService.instance.client.delete('/api/v1/cart');
           } catch (_) {}
         } else {
-          // Payment failed - update order status to failed
           try {
-            await Supabase.instance.client
-                .from('orders')
-                .update({'payment_status': 'failed', 'status': 'annule'})
-                .eq('id', _orderId!);
+            await ApiService.instance.client.patch(
+              '/api/v1/orders/$_orderId/status',
+              data: {'paymentStatus': 'failed', 'status': 'annule'},
+            );
           } catch (_) {}
-          // Do NOT clear cart on failure
         }
       }
     } catch (_) {}

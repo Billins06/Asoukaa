@@ -12,9 +12,8 @@ import '../../widgets/loading_skeleton_widget.dart';
 import '../../widgets/connection_error_widget.dart';
 import '../import_assiste_screen/import_assiste_screen.dart';
 import '../notifications_screen/notifications_screen.dart';
-import '../../services/database_service.dart';
-import '../../services/auth_service.dart';
-import '../../services/error_handler.dart';
+import '../../services/nest_auth_service.dart';
+import '../../services/api_service.dart';
 
 class BuyerDashboardScreen extends StatefulWidget {
   const BuyerDashboardScreen({super.key});
@@ -78,50 +77,120 @@ class _BuyerDashboardScreenState extends State<BuyerDashboardScreen>
     }
 
     try {
-      final user = AuthService.instance.currentUser;
-      if (user != null) {
-        final ordersResult = await DatabaseService.instance.getBuyerOrders(
-          user.id,
-        );
-        final favoritesRaw = <Map<String, dynamic>>[];
-        final unread = await DatabaseService.instance
-            .getUnreadNotificationCount(user.id);
-
-        if (mounted) {
-          if (ordersResult.isFailure) {
-            ErrorHandler.showErrorDialog(
-              context,
-              message:
-                  ordersResult.errorMessage ??
-                  'Impossible de charger vos commandes.',
-              onRetry: _loadData,
-            );
-          }
-          setState(() {
-            _orders = ordersResult.data ?? [];
-            _favorites = favoritesRaw;
-            _unreadNotifications = unread;
-            _isLoading = false;
-            _isOfflineCached = false;
-            _hasConnectionError = false;
-          });
-        }
-      } else {
-        if (mounted) {
-          setState(() {
-            _isLoading = false;
-          });
-        }
+      final isLoggedIn = await NestAuthService.instance.isLoggedIn()
+          .timeout(const Duration(seconds: 5));
+      if (!isLoggedIn) {
+        if (mounted) setState(() => _isLoading = false);
+        return;
       }
-    } catch (e) {
+
+      final response = await ApiService.instance.client.get('/api/v1/orders');
+      final rawList = response.data is List
+          ? response.data as List
+          : (response.data is Map
+              ? (response.data['data'] as List? ?? [])
+              : <dynamic>[]);
+
+      if (mounted) {
+        setState(() {
+          _orders = rawList
+              .whereType<Map>()
+              .map((e) => _normalizeOrder(Map<String, dynamic>.from(e)))
+              .toList();
+          _favorites = [];
+          _unreadNotifications = 0;
+          _isLoading = false;
+          _isOfflineCached = false;
+          _hasConnectionError = false;
+        });
+      }
+    } catch (_) {
       if (mounted) {
         setState(() {
           _isLoading = false;
           _hasConnectionError = true;
         });
-        ErrorHandler.showExceptionDialog(context, e, onRetry: _loadData);
       }
     }
+  }
+
+  static String _formatPrice(int amount) {
+    final s = amount.toString();
+    final buf = StringBuffer();
+    for (var i = 0; i < s.length; i++) {
+      if (i > 0 && (s.length - i) % 3 == 0) buf.write(' ');
+      buf.write(s[i]);
+    }
+    return buf.toString();
+  }
+
+  static Map<String, dynamic> _normalizeOrder(Map<String, dynamic> o) {
+    final items = o['orderItems'] as List<dynamic>? ?? [];
+    final firstItem =
+        items.isNotEmpty ? items[0] as Map<String, dynamic>? : null;
+    final product =
+        (firstItem?['product'] ?? firstItem?['productDetails']) as Map? ?? {};
+
+    final statusStr = (o['status'] as String? ?? '').toLowerCase();
+    OrderStatus status;
+    switch (statusStr) {
+      case 'processing':
+        status = OrderStatus.processing;
+      case 'shipped':
+        status = OrderStatus.inDelivery;
+      case 'delivered':
+        status = OrderStatus.confirmed;
+      case 'completed':
+        status = OrderStatus.completed;
+      case 'cancelled':
+        status = OrderStatus.cancelled;
+      case 'failed':
+        status = OrderStatus.failed;
+      default:
+        status = OrderStatus.received;
+    }
+
+    final steps = [
+      true,
+      ['processing', 'shipped', 'delivered', 'completed']
+          .contains(statusStr),
+      ['shipped', 'delivered', 'completed'].contains(statusStr),
+      ['delivered', 'completed'].contains(statusStr),
+      statusStr == 'completed',
+    ];
+
+    final amount = (o['totalAmount'] as num? ?? 0).toInt();
+    final dateStr = o['createdAt'] as String? ?? '';
+    String shortDate = '';
+    if (dateStr.isNotEmpty) {
+      try {
+        final dt = DateTime.parse(dateStr);
+        shortDate =
+            '${dt.day.toString().padLeft(2, '0')}/${dt.month.toString().padLeft(2, '0')}/${dt.year}';
+      } catch (_) {
+        shortDate = dateStr.length >= 10 ? dateStr.substring(0, 10) : dateStr;
+      }
+    }
+
+    final rawId = (o['id'] ?? '').toString();
+    final shortId = rawId.length >= 8 ? rawId.substring(0, 8).toUpperCase() : rawId.toUpperCase();
+    final imageUrl = product['imageUrl'] as String? ??
+        product['image_url'] as String? ??
+        'https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=400';
+    final sellerName = (firstItem?['vendor'] as Map?)?['shopName'] as String? ??
+        'Boutique Asoukaa';
+
+    return {
+      'id': '#ASK-$shortId',
+      'product': product['name'] as String? ?? 'Produit',
+      'seller': sellerName,
+      'price': '${_formatPrice(amount)} FCFA',
+      'image': imageUrl,
+      'status': status,
+      'steps': steps,
+      'date': shortDate,
+      'canReorder': status == OrderStatus.completed,
+    };
   }
 
   @override
