@@ -17,6 +17,7 @@
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "seed": "ts-node -r tsconfig-paths/register src/database/seed-runner.ts",
+    "seed:client": "ts-node -r tsconfig-paths/register src/database/seed-runner-client.ts",
     "typeorm": "typeorm-ts-node-esm",
     "typeorm:run": "npm run typeorm migration:run -- -d src/database/data-source.ts",
     "typeorm:revert": "npm run typeorm migration:revert -- -d src/database/data-source.ts",

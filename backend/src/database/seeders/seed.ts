@@ -7,18 +7,23 @@ import { seedProducts } from './seeds/product.seed';
 import { seedOrders } from './seeds/order.seed';
 
 export async function runAllSeeds(dataSource: DataSource) {
-  console.log('🌱 Starting database seeding...\n');
+  console.log('🌱 Starting database seeding (Admin + Base data)...\n');
 
   try {
-    // Order matters - dependencies first
+    // Backend admin data
     await seedAdmins(dataSource);
+
+    // Base data
+    await seedCategories(dataSource);
+
+    // Test users for admin dashboard
     await seedUsers(dataSource);
     await seedVendorProfiles(dataSource);
-    await seedCategories(dataSource);
     await seedProducts(dataSource);
     await seedOrders(dataSource);
 
-    console.log('\n✅ Database seeding completed successfully!');
+    console.log('\n✅ Base seeding completed successfully!');
+    console.log('💡 Tip: Run "npm run seed:client" to add client test data\n');
   } catch (error) {
     console.error('❌ Seeding failed:', error);
     process.exit(1);
