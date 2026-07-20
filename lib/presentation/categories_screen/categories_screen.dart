@@ -6,6 +6,7 @@ import '../../widgets/custom_image_widget.dart';
 import '../../routes/app_routes.dart';
 import '../../services/product_service.dart';
 import '../../services/nest_auth_service.dart';
+import '../../services/api_service.dart';
 
 class CategoriesScreen extends StatefulWidget {
   final String? initialCategory;
@@ -147,6 +148,24 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
     }
   }
 
+  Future<void> _navigateToDashboard() async {
+    try {
+      final role = await NestAuthService.instance.getUserRole()
+          .timeout(const Duration(seconds: 3));
+      if (!mounted) return;
+      switch (role) {
+        case 'vendeur':
+          Navigator.pushNamed(context, AppRoutes.sellerDashboard);
+        case 'livreur':
+          Navigator.pushNamed(context, AppRoutes.delivererDashboard);
+        default:
+          Navigator.pushNamed(context, AppRoutes.buyerDashboard);
+      }
+    } catch (_) {
+      if (mounted) Navigator.pushNamed(context, AppRoutes.buyerDashboard);
+    }
+  }
+
   String _formatPrice(dynamic price) {
     final p = (price as num?)?.toInt() ?? 0;
     final s = p.toString();
@@ -193,70 +212,72 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
           ),
         ],
       ),
-      body: Column(
-        children: [
-          _buildCategoryGrid(),
-          const Divider(height: 1),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-            child: Row(
-              children: [
-                Text(
-                  _selectedCategory == 'Tous'
-                      ? 'Tous les produits'
-                      : 'Produits — $_selectedCategory',
-                  style: GoogleFonts.outfit(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700,
-                    color: AppTheme.textPrimary,
-                  ),
-                ),
-                const Spacer(),
-                if (!_isLoading)
-                  Text(
-                    '${_products.length} résultats',
-                    style: GoogleFonts.outfit(
-                      fontSize: 12,
-                      color: AppTheme.muted,
-                    ),
-                  ),
-              ],
-            ),
-          ),
-          Expanded(
-            child: _isLoading
-                ? const Center(
-                    child: CircularProgressIndicator(color: Color(0xFFFF6210)),
-                  )
-                : _products.isEmpty
-                ? _buildEmptyState()
-                : RefreshIndicator(
-                    color: AppTheme.primary,
-                    onRefresh: _loadProducts,
-                    child: GridView.builder(
-                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
-                      gridDelegate:
-                          const SliverGridDelegateWithFixedCrossAxisCount(
-                            crossAxisCount: 2,
-                            childAspectRatio: 0.72,
-                            crossAxisSpacing: 12,
-                            mainAxisSpacing: 12,
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator(color: Color(0xFFFF6210)))
+          : RefreshIndicator(
+              color: AppTheme.primary,
+              onRefresh: _loadProducts,
+              child: CustomScrollView(
+                slivers: [
+                  SliverToBoxAdapter(child: _buildCategoryGrid()),
+                  const SliverToBoxAdapter(child: Divider(height: 1)),
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+                      child: Row(
+                        children: [
+                          Text(
+                            _selectedCategory == 'Tous'
+                                ? 'Tous les produits'
+                                : 'Produits — $_selectedCategory',
+                            style: GoogleFonts.outfit(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w700,
+                              color: AppTheme.textPrimary,
+                            ),
                           ),
-                      itemCount: _products.length,
-                      itemBuilder: (_, i) => _ProductCard(
-                        product: _products[i],
-                        onTap: () => Navigator.pushNamed(
-                          context,
-                          AppRoutes.productDetail,
-                          arguments: _products[i],
-                        ),
-                        onAddToCart: () => _addToCart(_products[i]),
+                          const Spacer(),
+                          Text(
+                            '${_products.length} résultats',
+                            style: GoogleFonts.outfit(
+                              fontSize: 12,
+                              color: AppTheme.muted,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ),
-          ),
-        ],
-      ),
+                  if (_products.isEmpty)
+                    SliverFillRemaining(child: _buildEmptyState())
+                  else
+                    SliverPadding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+                      sliver: SliverGrid(
+                        delegate: SliverChildBuilderDelegate(
+                          (_, i) => _ProductCard(
+                            product: _products[i],
+                            onTap: () => Navigator.pushNamed(
+                              context,
+                              AppRoutes.productDetail,
+                              arguments: _products[i],
+                            ),
+                            onAddToCart: () => _addToCart(_products[i]),
+                          ),
+                          childCount: _products.length,
+                        ),
+                        gridDelegate:
+                            const SliverGridDelegateWithFixedCrossAxisCount(
+                              crossAxisCount: 2,
+                              childAspectRatio: 0.72,
+                              crossAxisSpacing: 12,
+                              mainAxisSpacing: 12,
+                            ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
       bottomNavigationBar: AsoukaaBottomNav(
         currentIndex: _currentNavIndex,
         onTap: (i) {
@@ -271,7 +292,7 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
               Navigator.pushNamed(context, AppRoutes.chat);
               break;
             case 3:
-              Navigator.pushNamed(context, AppRoutes.cart);
+              _navigateToDashboard();
               break;
             case 4:
               _navigateToProfile();
@@ -383,21 +404,48 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
     );
   }
 
-  void _addToCart(Map<String, dynamic> product) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('${product['name']} ajouté au panier'),
-        backgroundColor: const Color(0xFF1A1A1A),
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        duration: const Duration(seconds: 2),
-        action: SnackBarAction(
-          label: 'Voir panier',
-          textColor: const Color(0xFFFF6210),
-          onPressed: () => Navigator.pushNamed(context, AppRoutes.cart),
+  Future<void> _addToCart(Map<String, dynamic> product) async {
+    final isLoggedIn = await NestAuthService.instance.isLoggedIn();
+    if (!mounted) return;
+    if (!isLoggedIn) {
+      Navigator.pushNamed(context, AppRoutes.signUpLogin);
+      return;
+    }
+    try {
+      await ApiService.instance.client.post(
+        '/api/v1/cart/items',
+        data: {
+          'productId': product['id'],
+          'quantity': 1,
+          if (product['variantId'] != null) 'variantId': product['variantId'],
+        },
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).clearSnackBars();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('${product['name']} ajouté au panier'),
+          backgroundColor: const Color(0xFF1A1A1A),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          duration: const Duration(seconds: 2),
+          action: SnackBarAction(
+            label: 'Voir panier',
+            textColor: const Color(0xFFFF6210),
+            onPressed: () => Navigator.pushNamed(context, AppRoutes.cart),
+          ),
         ),
-      ),
-    );
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Erreur lors de l\'ajout au panier'),
+          backgroundColor: Color(0xFFDC2626),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
   }
 }
 

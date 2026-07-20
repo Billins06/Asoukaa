@@ -259,7 +259,8 @@ class NestAuthService {
       case DioExceptionType.receiveTimeout:
         return 'Délai dépassé. Vérifiez votre connexion internet.';
       case DioExceptionType.connectionError:
-        return 'Impossible de joindre le serveur. Vérifiez votre connexion.';
+      case DioExceptionType.unknown:
+        return 'Impossible de joindre le serveur. Vérifiez que le serveur est démarré et que votre téléphone est bien connecté.';
       default:
         final status = e.response?.statusCode;
         if (status == 401) return 'Identifiants incorrects.';

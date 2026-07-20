@@ -279,7 +279,7 @@ class _HomeScreenState extends State<HomeScreen>
       case 0:
         setState(() => _currentNavIndex = 0);
       case 1:
-        Navigator.pushNamed(context, AppRoutes.searchResults, arguments: '');
+        Navigator.pushNamed(context, AppRoutes.categories);
       case 2:
         _navigateToMessages();
       case 3:

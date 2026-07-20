@@ -138,7 +138,11 @@ class _WishlistScreenState extends State<WishlistScreen> {
     try {
       await ApiService.instance.client.post(
         '/api/v1/cart/items',
-        data: {'productId': product['id'], 'quantity': 1},
+        data: {
+          'productId': product['id'],
+          'quantity': 1,
+          if (product['variantId'] != null) 'variantId': product['variantId'],
+        },
       );
       if (mounted) AppToast.show(context, message: 'Ajouté au panier !');
     } catch (_) {
@@ -271,7 +275,6 @@ class _WishlistCard extends StatelessWidget {
     final inStock = (product['stock_quantity'] as num?)?.toInt() ?? 0;
 
     final priceDrop = addedPrice != null && price < addedPrice;
-    final priceRise = addedPrice != null && price > addedPrice;
 
     return GestureDetector(
       onTap: onTap,

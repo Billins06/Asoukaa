@@ -3,6 +3,7 @@ import 'package:google_fonts/google_fonts.dart';
 import '../../../routes/app_routes.dart';
 import '../../../widgets/custom_image_widget.dart';
 import '../../../services/nest_auth_service.dart';
+import '../../../services/api_service.dart';
 
 class HomeTrendingWidget extends StatefulWidget {
   final void Function(Map<String, dynamic>) onProductTap;
@@ -109,32 +110,53 @@ class _HomeTrendingWidgetState extends State<HomeTrendingWidget> {
       'soldCount': p['sold_count'] as int? ?? p['soldCount'] as int? ?? 0,
       'seller_id': p['seller_id'] ?? p['vendeurId'] ?? '',
       'shop_id': shopData is Map ? (shopData['id'] ?? '') : '',
+      'variantId': p['variantId'],
     };
   }
 
-  void _addToCart(BuildContext context, Map<String, dynamic> product) async {
+  Future<void> _addToCart(BuildContext context, Map<String, dynamic> product) async {
     final isLoggedIn = await NestAuthService.instance.isLoggedIn();
     if (!context.mounted) return;
     if (!isLoggedIn) {
       Navigator.pushNamed(context, AppRoutes.signUpLogin);
       return;
     }
-    ScaffoldMessenger.of(context).clearSnackBars();
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('${product['name']} ajouté au panier'),
-        backgroundColor: const Color(0xFF1A1A1A),
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        duration: const Duration(seconds: 2),
-        action: SnackBarAction(
-          label: 'Voir panier',
-          textColor: const Color(0xFFFF6210),
-          onPressed: () => Navigator.pushNamed(context, AppRoutes.cart),
+    try {
+      await ApiService.instance.client.post(
+        '/api/v1/cart/items',
+        data: {
+          'productId': product['id'],
+          'quantity': 1,
+          if (product['variantId'] != null) 'variantId': product['variantId'],
+        },
+      );
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).clearSnackBars();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('${product['name']} ajouté au panier'),
+          backgroundColor: const Color(0xFF1A1A1A),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          duration: const Duration(seconds: 2),
+          action: SnackBarAction(
+            label: 'Voir panier',
+            textColor: const Color(0xFFFF6210),
+            onPressed: () => Navigator.pushNamed(context, AppRoutes.cart),
+          ),
         ),
-      ),
-    );
-    widget.onCartUpdated?.call();
+      );
+      widget.onCartUpdated?.call();
+    } catch (_) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Erreur lors de l\'ajout au panier'),
+          backgroundColor: Color(0xFFDC2626),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
   }
 
   @override

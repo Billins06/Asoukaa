@@ -237,7 +237,7 @@ class _BuyerDashboardScreenState extends State<BuyerDashboardScreen>
 
   PreferredSizeWidget _buildAppBar() {
     return PreferredSize(
-      preferredSize: const Size.fromHeight(104),
+      preferredSize: const Size.fromHeight(114),
       child: Container(
         color: AppTheme.surface,
         child: SafeArea(

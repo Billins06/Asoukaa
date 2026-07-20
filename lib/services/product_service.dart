@@ -54,7 +54,7 @@ class ProductService {
 
       final products = rawList
           .whereType<Map>()
-          .map((e) => Map<String, dynamic>.from(e))
+          .map((e) => _normalize(Map<String, dynamic>.from(e)))
           .toList();
 
       return ProductResult.success(products);
@@ -71,13 +71,52 @@ class ProductService {
     try {
       final response = await _client.get('/api/v1/products/$productId');
       return ProductResult.success(
-        Map<String, dynamic>.from(response.data as Map),
+        _normalize(Map<String, dynamic>.from(response.data as Map)),
       );
     } on DioException catch (e) {
       return ProductResult.failure(_extractError(e));
     } catch (_) {
       return ProductResult.failure('Produit introuvable.');
     }
+  }
+
+  static Map<String, dynamic> _normalize(Map<String, dynamic> raw) {
+    final variants = raw['variants'] as List? ?? [];
+    final firstVariant = variants.isNotEmpty ? (variants.first as Map?) : null;
+
+    // Prix : basePrice au niveau produit, sinon variants[0].price
+    double price = 0;
+    final rawPrice = raw['basePrice'] ?? raw['price'];
+    if (rawPrice != null) {
+      price = double.tryParse(rawPrice.toString()) ?? 0;
+    } else if (firstVariant != null) {
+      price = double.tryParse(firstVariant['price']?.toString() ?? '0') ?? 0;
+    }
+
+    // Image : variants[0].imageUrl > images[0] > vide
+    final imagesList = raw['images'] as List? ?? [];
+    String imageUrl = '';
+    if (firstVariant != null && firstVariant['imageUrl'] != null) {
+      imageUrl = firstVariant['imageUrl'].toString();
+    } else if (imagesList.isNotEmpty) {
+      final first = imagesList.first;
+      imageUrl = first is Map
+          ? (first['url'] ?? first['imageUrl'] ?? '').toString()
+          : first.toString();
+    }
+
+    return {
+      ...raw,
+      'name': raw['prod_name'] ?? raw['name'] ?? raw['title'] ?? '',
+      'price': price,
+      'image_url': imageUrl,
+      'images': imageUrl.isNotEmpty ? [imageUrl] : imagesList,
+      'sold_count': raw['totalVentes'] ?? raw['sold_count'] ?? 0,
+      'rating': double.tryParse(raw['noteMoyenne']?.toString() ?? '0') ?? 0,
+      'reviews_count': raw['nbreAvis'] ?? raw['reviews_count'] ?? 0,
+      'variantId': firstVariant?['id'],
+      'stock': firstVariant?['stockQuantity'] ?? raw['stock'] ?? 0,
+    };
   }
 
   String _extractError(DioException e) {
