@@ -1,11 +1,12 @@
 import {
   Injectable,
   BadRequestException,
+  InternalServerErrorException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { v4 as uuidv4 }  from 'uuid';
-import { extname, join } from 'path';
-import * as fs           from 'fs/promises';
+import { extname }       from 'path';
 
 // Types de fichiers autorisés selon le contexte
 export enum UploadType {
@@ -30,10 +31,37 @@ const ALLOWED_MIME_TYPES = [
 // Extensions autorisées
 const ALLOWED_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.pdf'];
 
+// Documents et selfies = pièces KYC sensibles → bucket privé, jamais public.
+// Le reste (produits, boutique, avatar, chat, véhicule) → bucket public.
+const PRIVATE_TYPES = new Set<UploadType>([UploadType.DOCUMENT, UploadType.SELFIE]);
+
+// Durée de validité des URLs signées pour les fichiers privés (7 jours —
+// le temps qu'un admin ait l'occasion de review un dossier vendeur).
+// Au-delà, il faudra régénérer une URL via un endpoint dédié.
+const SIGNED_URL_TTL_SECONDS = 60 * 60 * 24 * 7;
+
 @Injectable()
 export class UploadService {
+  private readonly supabase: SupabaseClient;
+  private readonly publicBucket: string;
+  private readonly privateBucket: string;
 
-  constructor(private readonly configService: ConfigService) {}
+  constructor(private readonly configService: ConfigService) {
+    const supabaseUrl = this.configService.getOrThrow<string>('SUPABASE_URL');
+    const serviceRoleKey = this.configService.getOrThrow<string>('SUPABASE_SERVICE_ROLE_KEY');
+
+    this.supabase = createClient(supabaseUrl, serviceRoleKey, {
+      auth: { persistSession: false },
+    });
+
+    this.publicBucket = this.configService.get<string>('SUPABASE_PUBLIC_BUCKET') ?? 'asoukaa-public';
+    this.privateBucket = this.configService.get<string>('SUPABASE_PRIVATE_BUCKET') ?? 'asoukaa-private';
+  }
+
+  private bucketFor(type: UploadType): { bucket: string; isPrivate: boolean } {
+    const isPrivate = PRIVATE_TYPES.has(type);
+    return { bucket: isPrivate ? this.privateBucket : this.publicBucket, isPrivate };
+  }
 
   // ─────────────────────────────────────────────────────
   // UPLOAD D'UN FICHIER
@@ -41,7 +69,7 @@ export class UploadService {
   async uploadFile(
     file:        Express.Multer.File,
     type:        UploadType,
-  ): Promise<{ url: string; filename: string; size: number }> {
+  ): Promise<{ url: string; path: string; filename: string; size: number }> {
 
     // 1. Vérifier qu'un fichier a bien été envoyé
     if (!file) {
@@ -76,22 +104,32 @@ export class UploadService {
     // Risque de path traversal et conflits
     const uniqueFilename = `${uuidv4()}${ext}`;
 
-    // 6. Construire le chemin
-    const uploadDir = join(process.cwd(), 'uploads', type);
-    const filePath  = join(uploadDir, uniqueFilename);
+    // 6. Construire le chemin dans le bucket (documents/selfies → privé, reste → public)
+    const { bucket, isPrivate } = this.bucketFor(type);
+    const storagePath = `${type}/${uniqueFilename}`;
 
-    // 7. S'assurer que le dossier existe
-    await fs.mkdir(uploadDir, { recursive: true });
+    // 7. Upload vers Supabase Storage
+    const { error: uploadError } = await this.supabase.storage
+      .from(bucket)
+      .upload(storagePath, file.buffer, {
+        contentType: file.mimetype,
+        upsert: false,
+      });
 
-    // 8. Écrire le fichier
-    await fs.writeFile(filePath, file.buffer);
+    if (uploadError) {
+      throw new InternalServerErrorException(
+        `Échec de l'upload vers le stockage : ${uploadError.message}`
+      );
+    }
 
-    // 9. Construire l'URL publique
-    const appUrl = this.configService.get<string>('APP_URL') ?? 'http://localhost:3000';
-    const url    = `${appUrl}/uploads/${type}/${uniqueFilename}`;
+    // 8. Construire l'URL de retour
+    const url = isPrivate
+      ? await this.createSignedUrl(bucket, storagePath)
+      : this.supabase.storage.from(bucket).getPublicUrl(storagePath).data.publicUrl;
 
     return {
       url,
+      path:     `${bucket}/${storagePath}`,
       filename: uniqueFilename,
       size:     file.size,
     };
@@ -103,7 +141,7 @@ export class UploadService {
   async uploadMultiple(
     files: Express.Multer.File[],
     type:  UploadType,
-  ): Promise<Array<{ url: string; filename: string; size: number }>> {
+  ): Promise<Array<{ url: string; path: string; filename: string; size: number }>> {
 
     if (!files || files.length === 0) {
       throw new BadRequestException('Aucun fichier reçu');
@@ -122,29 +160,46 @@ export class UploadService {
   }
 
   // ─────────────────────────────────────────────────────
+  // RÉGÉNÉRER UNE URL SIGNÉE (fichiers privés — documents/selfies)
+  // À appeler quand une URL signée précédente a expiré (> 7 jours).
+  // ─────────────────────────────────────────────────────
+  async refreshSignedUrl(storedPath: string): Promise<string> {
+    const [bucket, ...rest] = storedPath.split('/');
+    const objectPath = rest.join('/');
+    return this.createSignedUrl(bucket, objectPath);
+  }
+
+  private async createSignedUrl(bucket: string, objectPath: string): Promise<string> {
+    const { data, error } = await this.supabase.storage
+      .from(bucket)
+      .createSignedUrl(objectPath, SIGNED_URL_TTL_SECONDS);
+
+    if (error || !data) {
+      throw new InternalServerErrorException(
+        `Échec de génération de l'URL signée : ${error?.message ?? 'inconnue'}`
+      );
+    }
+
+    return data.signedUrl;
+  }
+
+  // ─────────────────────────────────────────────────────
   // SUPPRIMER UN FICHIER
   // ─────────────────────────────────────────────────────
-  async deleteFile(fileUrl: string): Promise<void> {
+  // `storedPath` = valeur retournée dans `path` par uploadFile, ex: "asoukaa-public/products/uuid.jpg"
+  async deleteFile(storedPath: string): Promise<void> {
     try {
-      const appUrl = this.configService.get<string>('APP_URL') ?? 'http://localhost:3000';
+      const [bucket, ...rest] = storedPath.split('/');
+      const objectPath = rest.join('/');
 
-      // Extraire le chemin relatif depuis l'URL
-      // Ex: http://localhost:3000/uploads/products/abc.jpg → uploads/products/abc.jpg
-      const relativePath = fileUrl.replace(`${appUrl}/`, '');
-
-      // ⚠️ Sécurité : empêcher path traversal
-      // Le chemin ne doit jamais contenir ".." ou commencer par "/"
-      if (
-        relativePath.includes('..') ||
-        relativePath.startsWith('/') ||
-        relativePath.startsWith('\\')
-      ) {
+      if (!bucket || !objectPath || storedPath.includes('..')) {
         throw new BadRequestException('Chemin de fichier invalide');
       }
 
-      const filePath = join(process.cwd(), relativePath);
-      await fs.unlink(filePath);
-
+      const { error } = await this.supabase.storage.from(bucket).remove([objectPath]);
+      if (error) {
+        console.error('Erreur suppression fichier Supabase:', error.message);
+      }
     } catch (error) {
       // On ne bloque pas l'app si le fichier n'existe pas
       // (peut être déjà supprimé)

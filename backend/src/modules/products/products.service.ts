@@ -191,8 +191,8 @@ export class ProductsService {
     if (categoryId) {
       query.andWhere(
         'EXISTS (SELECT 1 FROM product_categories pc '
-        + 'WHERE pc.product_id = product.id '
-        + 'AND pc.category_id = :categoryId)',
+        + 'WHERE pc."productId" = product.id '
+        + 'AND pc."categoryId" = :categoryId)',
         { categoryId }
       );
     }

@@ -6,7 +6,6 @@ import { ConfigService } from '@nestjs/config';
 import { AllExceptionsFilter } from './common/filters/http-exception.filter';
 import { SanitizeLogsInterceptor } from './common/interceptors/sanitize-logs.interceptor';
 import { NestExpressApplication } from '@nestjs/platform-express';
-import { join } from 'path';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
@@ -43,11 +42,6 @@ async function bootstrap() {
     allowedHeaders: ['Content-Type', 'Authorization'],
   });
 
-  app.useStaticAssets(join(process.cwd(), 'uploads'), {
-    prefix: '/uploads/',
-  });
-
-
 // Dans bootstrap(), après useGlobalPipes :
 app.useGlobalFilters(new AllExceptionsFilter());
 
@@ -63,7 +57,7 @@ app.useGlobalFilters(new AllExceptionsFilter());
     SwaggerModule.setup('api/docs', app, document);
   }
 
-  const port = config.get<number>('APP_PORT') ?? 3000;
+  const port = config.get<number>('PORT') ?? config.get<number>('APP_PORT') ?? 3000;
   await app.listen(port);
   console.log(`🚀 Asoukaa API lancée sur http://localhost:${port}/api/v1`);
   console.log(`📚 Swagger dispo sur  http://localhost:${port}/api/docs`);
