@@ -421,6 +421,20 @@ class _HomeSearchBarWidgetState extends State<HomeSearchBarWidget>
               ),
               const SizedBox(width: 4),
               InkWell(
+                onTap: () =>
+                    Navigator.pushNamed(context, AppRoutes.wishlist),
+                borderRadius: BorderRadius.circular(8),
+                child: Padding(
+                  padding: const EdgeInsets.all(6),
+                  child: const Icon(
+                    Icons.favorite_border_rounded,
+                    size: 24,
+                    color: Color(0xFF1A1A1A),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 4),
+              InkWell(
                 onTap: _navigateToNotifications,
                 borderRadius: BorderRadius.circular(8),
                 child: Padding(

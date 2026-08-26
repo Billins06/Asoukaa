@@ -36,15 +36,7 @@ class ProductSellerCardWidget extends StatelessWidget {
                 children: [
                   ClipRRect(
                     borderRadius: BorderRadius.circular(12),
-                    child: CustomImageWidget(
-                      imageUrl: product['shopLogo'] as String? ?? '',
-                      width: 52,
-                      height: 52,
-                      fit: BoxFit.cover,
-                      semanticLabel:
-                          product['shopLogoSemanticLabel'] as String? ??
-                          'Logo de la boutique',
-                    ),
+                    child: _buildShopLogo(product),
                   ),
                   Positioned(
                     bottom: 2,
@@ -197,6 +189,35 @@ class ProductSellerCardWidget extends StatelessWidget {
             ],
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildShopLogo(Map<String, dynamic> product) {
+    final logo = (product['shopLogo'] as String? ?? '').trim();
+    final shopName = (product['shop'] as String? ?? 'B');
+    if (logo.isNotEmpty) {
+      return CustomImageWidget(
+        imageUrl: logo,
+        width: 52,
+        height: 52,
+        fit: BoxFit.cover,
+        semanticLabel: product['shopLogoSemanticLabel'] as String? ?? 'Logo de la boutique',
+      );
+    }
+    return Container(
+      width: 52,
+      height: 52,
+      color: const Color(0xFFFF6210),
+      child: Center(
+        child: Text(
+          shopName.isNotEmpty ? shopName[0].toUpperCase() : 'B',
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 22,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
       ),
     );
   }

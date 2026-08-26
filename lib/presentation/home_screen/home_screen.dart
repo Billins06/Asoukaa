@@ -8,6 +8,7 @@ import '../../theme/app_theme.dart';
 import '../../widgets/app_navigation.dart';
 import '../../services/product_service.dart';
 import '../../services/nest_auth_service.dart';
+import '../../services/api_service.dart';
 import './widgets/home_banner_widget.dart';
 import './widgets/home_categories_widget.dart';
 import './widgets/home_flash_deals_widget.dart';
@@ -127,7 +128,26 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _loadCartCount() async {
-    // Cart count sera implémenté avec l'API panier NestJS
+    try {
+      final isLoggedIn = await NestAuthService.instance
+          .isLoggedIn()
+          .timeout(const Duration(seconds: 5), onTimeout: () => false);
+      if (!isLoggedIn) {
+        if (mounted) setState(() => _cartCount = 0);
+        return;
+      }
+      final response =
+          await ApiService.instance.client.get('/api/v1/cart');
+      final data = response.data;
+      final count = (data is Map)
+          ? (data['itemCount'] as int? ??
+              (data['items'] as List?)?.length ??
+              0)
+          : 0;
+      if (mounted) setState(() => _cartCount = count);
+    } catch (_) {
+      if (mounted) setState(() => _cartCount = 0);
+    }
   }
 
   @override

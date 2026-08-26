@@ -142,6 +142,29 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     );
   }
 
+  // Crée l'adresse de livraison dans le backend et retourne son UUID.
+  Future<String?> _createDeliveryAddress() async {
+    try {
+      final resp = await ApiService.instance.client.post(
+        '/api/v1/users/me/addresses',
+        data: {
+          'label': 'Domicile',
+          'nom_destinataire':
+              '${_firstNameController.text.trim()} ${_lastNameController.text.trim()}',
+          'phone_destinataire': _phoneController.text.trim(),
+          'quartier': _addressController.text.trim(),
+          'ville': _cityController.text.trim(),
+          'country': _selectedCountry,
+          'isDefault': _saveAddress,
+        },
+      );
+      final data = resp.data;
+      return (data is Map) ? data['id'] as String? : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<void> _placeOrder() async {
     if (!_formKey.currentState!.validate()) {
       AppToast.show(
@@ -164,7 +187,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     setState(() => _isPlacingOrder = true);
 
     try {
-      final isLoggedIn = await NestAuthService.instance.isLoggedIn()
+      final isLoggedIn = await NestAuthService.instance
+          .isLoggedIn()
           .timeout(const Duration(seconds: 5), onTimeout: () => false);
       if (!isLoggedIn) {
         if (mounted) {
@@ -178,43 +202,29 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         return;
       }
 
-      // Determine vendeur from first cart item
-      final firstItem = _orderItems.first;
-      final vendeurId = firstItem['shop_id'] as String? ?? '';
+      // Étape 1 : créer l'adresse de livraison et récupérer son UUID
+      final addressId = await _createDeliveryAddress();
+      if (addressId == null) {
+        if (mounted) {
+          AppToast.show(
+            context,
+            message: 'Impossible de créer l\'adresse de livraison.',
+            type: ToastType.error,
+          );
+          setState(() => _isPlacingOrder = false);
+        }
+        return;
+      }
 
-      // Create order via NestJS API
-      final deliveryAddress =
-          '${_addressController.text.trim()}, ${_cityController.text.trim()}, $_selectedCountry';
-      final orderData = {
-        if (vendeurId.isNotEmpty) 'vendeurId': vendeurId,
-        'totalAmount': _total,
-        'subtotal': _subtotal,
-        'deliveryFee': _deliveryFee,
-        'discountAmount': _promoDiscount,
-        'deliveryAddress': deliveryAddress,
-        'deliveryCity': _cityController.text.trim(),
-        'deliveryCountry': _selectedCountry,
-        'buyerPhone': _phoneController.text.trim(),
-        'buyerName':
-            '${_firstNameController.text.trim()} ${_lastNameController.text.trim()}',
-        'deliveryNotes': _notesController.text.trim(),
-        if (_locationShared && _latitude != null) 'deliveryLat': _latitude,
-        if (_locationShared && _longitude != null) 'deliveryLng': _longitude,
-        'orderItems': _orderItems
-            .map(
-              (i) => {
-                'productId': i['product_id'] ?? i['id'],
-                'quantity': i['quantity'] ?? 1,
-                'unitPrice': i['price'],
-              },
-            )
-            .toList(),
-      };
+      // Étape 2 : créer la commande depuis le panier
+      // Le backend lit le panier automatiquement — on envoie uniquement addressId.
+      final instructions = _notesController.text.trim();
+      _pendingOrderId = await _createOrder(
+        addressId: addressId,
+        instructions: instructions.isNotEmpty ? instructions : null,
+      );
 
-      final createdOrder = await _createOrder(orderData);
-      _pendingOrderId = createdOrder['id'] as String?;
-
-      // Save phone update if requested (address not in NestJS user profile)
+      // Mettre à jour le téléphone si demandé
       if (_saveAddress) {
         try {
           await UserService.instance.updateProfile(
@@ -249,8 +259,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           ),
         ),
       ).then((_) async {
-        // Navigation to feexpay result screen handles status update and cart clearing
-        // No action needed here - FeexpayResultScreen handles it
+        // FeexpayResultScreen gère la mise à jour du statut et le vidage du panier
       });
     } catch (e) {
       AppToast.show(
@@ -1085,13 +1094,25 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     );
   }
 
-  Future<Map<String, dynamic>> _createOrder(
-    Map<String, dynamic> orderData,
-  ) async {
+  Future<String?> _createOrder({
+    required String addressId,
+    String? instructions,
+  }) async {
+    final data = <String, dynamic>{'addressId': addressId};
+    if (instructions != null && instructions.isNotEmpty) {
+      data['instructions'] = instructions;
+    }
     final response = await ApiService.instance.client.post(
       '/api/v1/orders',
-      data: orderData,
+      data: data,
     );
-    return Map<String, dynamic>.from(response.data as Map);
+    final resData = response.data;
+    if (resData is Map) {
+      final orders = resData['orders'];
+      if (orders is List && orders.isNotEmpty) {
+        return (orders.first as Map<String, dynamic>?)?['id'] as String?;
+      }
+    }
+    return null;
   }
 }

@@ -195,7 +195,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     if (_conversationId == null && _otherUserId != null) {
       try {
         final res = await ApiService.instance.client.post(
-          '/api/v1/conversations',
+          '/api/v1/chat/conversations',
           data: {
             'sellerId': _otherUserId,
             if (args?['product_id'] != null) 'productId': args!['product_id'],
@@ -210,7 +210,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       _startPolling();
     } else {
       try {
-        final res = await ApiService.instance.client.get('/api/v1/conversations');
+        final res = await ApiService.instance.client.get('/api/v1/chat/conversations');
         final raw = res.data;
         final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) : []);
         if ((list as List).isNotEmpty) {
@@ -235,7 +235,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     if (_conversationId == null) return;
     try {
       final res = await ApiService.instance.client
-          .get('/api/v1/conversations/$_conversationId/messages');
+          .get('/api/v1/chat/conversations/$_conversationId/messages');
       final raw = res.data;
       final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) : []);
       if (mounted) {
@@ -255,7 +255,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       // Mark as read
       try {
         await ApiService.instance.client
-            .patch('/api/v1/conversations/$_conversationId/read');
+            .patch('/api/v1/chat/conversations/$_conversationId/read');
       } catch (_) {}
     } catch (_) {}
   }
@@ -286,7 +286,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
 
     try {
       await ApiService.instance.client.post(
-        '/api/v1/conversations/$_conversationId/messages',
+        '/api/v1/chat/conversations/$_conversationId/messages',
         data: {
           'content': product['name'] as String? ?? 'Produit',
           'messageType': 'product_attachment',
@@ -373,7 +373,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     if (_conversationId != null) {
       try {
         await ApiService.instance.client.post(
-          '/api/v1/conversations/$_conversationId/messages',
+          '/api/v1/chat/conversations/$_conversationId/messages',
           data: {'content': text},
         );
         if (mounted) {
@@ -447,7 +447,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
         }
 
         await ApiService.instance.client.post(
-          '/api/v1/conversations/$_conversationId/messages',
+          '/api/v1/chat/conversations/$_conversationId/messages',
           data: {'content': '📷 Image', 'messageType': 'image', 'imageUrl': uploadedUrl},
         );
       }

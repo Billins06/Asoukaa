@@ -57,13 +57,12 @@ class _WishlistScreenState extends State<WishlistScreen> {
     }
   }
 
-  // Normalise un item NestJS vers le format attendu par _WishlistCard
   Map<String, dynamic> _normalizeItem(Map<String, dynamic> item) {
     final nestProduct =
         (item['product'] ?? item['products']) as Map<String, dynamic>?;
     if (nestProduct == null) return item;
 
-    // Image
+    // Image : product.images > variant.imageUrl > placeholder
     final images = nestProduct['images'];
     String imageUrl = '';
     if (images is List && images.isNotEmpty) {
@@ -77,9 +76,18 @@ class _WishlistScreenState extends State<WishlistScreen> {
           nestProduct['image_url'] as String? ??
           '';
     }
+    // Chercher dans les variants si disponibles
+    if (imageUrl.isEmpty) {
+      final variants = nestProduct['variants'] as List?;
+      if (variants != null && variants.isNotEmpty) {
+        final v = variants.first;
+        if (v is Map) imageUrl = (v['imageUrl'] as String? ?? '');
+      }
+    }
 
     // Shop
     final shopData = nestProduct['shops'] ??
+        nestProduct['vendor'] ??
         nestProduct['vendeur'] ??
         nestProduct['shop_info'];
     final shopName = shopData is Map
@@ -88,7 +96,17 @@ class _WishlistScreenState extends State<WishlistScreen> {
             '')
         : (nestProduct['shop'] as String? ?? '');
 
-    final price = (nestProduct['price'] as num? ?? 0).toDouble();
+    // Nom : NestJS retourne prod_name
+    final name = (nestProduct['prod_name'] ??
+            nestProduct['name'] ??
+            nestProduct['title'] ??
+            '').toString();
+
+    // Prix : basePrice (string) > price
+    final rawPrice = nestProduct['basePrice'] ?? nestProduct['price'];
+    final price = rawPrice != null
+        ? (double.tryParse(rawPrice.toString()) ?? 0.0)
+        : 0.0;
     final originalPrice =
         (nestProduct['original_price'] as num? ?? nestProduct['originalPrice'] as num?)
             ?.toDouble();
@@ -103,7 +121,7 @@ class _WishlistScreenState extends State<WishlistScreen> {
       'added_price': addedPrice,
       'products': {
         'id': nestProduct['id'] ?? '',
-        'name': nestProduct['name'] ?? '',
+        'name': name,
         'price': price,
         'original_price': originalPrice,
         'images': imageUrl.isNotEmpty ? [imageUrl] : <String>[],
@@ -139,7 +157,6 @@ class _WishlistScreenState extends State<WishlistScreen> {
       await ApiService.instance.client.post(
         '/api/v1/cart/items',
         data: {
-          'productId': product['id'],
           'quantity': 1,
           if (product['variantId'] != null) 'variantId': product['variantId'],
         },

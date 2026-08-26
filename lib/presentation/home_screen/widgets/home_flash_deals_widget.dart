@@ -291,7 +291,6 @@ class _HomeFlashDealsWidgetState extends State<HomeFlashDealsWidget>
       await ApiService.instance.client.post(
         '/api/v1/cart/items',
         data: {
-          'productId': product['id'],
           'quantity': 1,
           if (product['variantId'] != null) 'variantId': product['variantId'],
         },

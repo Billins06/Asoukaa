@@ -74,51 +74,75 @@ class _CartScreenState extends State<CartScreen> {
   }
 
   Map<String, dynamic> _normalizeCartItem(Map<String, dynamic> item) {
-    final product =
-        (item['product'] ?? item['products']) as Map<String, dynamic>?;
-    if (product == null) return item;
+    // Structure NestJS : item.variant.product (via eager loading)
+    final variant = item['variant'] as Map<String, dynamic>?;
+    final product = variant != null
+        ? (variant['product'] as Map<String, dynamic>?)
+        : (item['product'] ?? item['products']) as Map<String, dynamic>?;
 
-    final images = product['images'];
+    // Image : en priorité variant.imageUrl, sinon product.images
     String imageUrl = '';
-    if (images is List && images.isNotEmpty) {
-      final first = images[0];
-      if (first is Map) {
-        imageUrl = first['url'] as String? ?? first['imageUrl'] as String? ?? '';
-      } else if (first is String) {
-        imageUrl = first;
-      }
+    if (variant != null) {
+      imageUrl = (variant['imageUrl'] as String? ?? '');
     }
-    if (imageUrl.isEmpty) {
-      imageUrl = product['imageUrl'] as String? ?? product['image_url'] as String? ?? '';
+    if (imageUrl.isEmpty && product != null) {
+      final images = product['images'];
+      if (images is List && images.isNotEmpty) {
+        final first = images[0];
+        if (first is Map) {
+          imageUrl = first['url'] as String? ?? first['imageUrl'] as String? ?? '';
+        } else if (first is String) {
+          imageUrl = first;
+        }
+      }
+      if (imageUrl.isEmpty) {
+        imageUrl = product['imageUrl'] as String? ?? product['image_url'] as String? ?? '';
+      }
     }
     if (imageUrl.isEmpty) {
       imageUrl = 'https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=400';
     }
 
-    final shopData = product['shops'] ?? product['vendeur'] ?? product['shop_info'];
-    final shopName = shopData is Map
-        ? (shopData['shopName'] as String? ?? shopData['name'] as String? ?? 'Boutique')
-        : (product['shop'] as String? ?? 'Boutique');
-    final shopId = shopData is Map ? (shopData['id'] as String? ?? '') : '';
+    // Shop : dans le produit NestJS
+    String shopName = 'Boutique';
+    String shopId = '';
+    if (product != null) {
+      final shopData = product['shops'] ?? product['vendeur'] ?? product['shop_info'];
+      shopName = shopData is Map
+          ? (shopData['shopName'] as String? ?? shopData['name'] as String? ?? 'Boutique')
+          : (product['shop'] as String? ?? 'Boutique');
+      shopId = shopData is Map ? (shopData['id'] as String? ?? '') : '';
+    }
 
-    final price = (product['price'] as num? ?? 0).toInt();
-    final originalPrice =
-        (product['original_price'] as num? ?? product['originalPrice'] as num? ?? price)
-            .toInt();
-    final stockQty =
-        product['stock_quantity'] as int? ?? product['stockQuantity'] as int? ?? 10;
+    // Prix : unitPrice (figé au moment de l'ajout) ou variant.price
+    final unitPriceRaw = item['unitPrice'] ?? (variant != null ? variant['price'] : null);
+    final price = (unitPriceRaw is num)
+        ? unitPriceRaw.toInt()
+        : int.tryParse(unitPriceRaw?.toString() ?? '') ?? 0;
+    final originalPrice = price;
+
+    // Stock
+    final stockQty = variant != null
+        ? (variant['stockQuantity'] as int? ?? 10)
+        : (product?['stockQuantity'] as int? ?? 10);
+
+    // Nom
+    final name = product != null
+        ? (product['prod_name'] ?? product['name'] ?? product['title'] ?? '').toString()
+        : '';
 
     return {
       'id': item['id'] ?? '',
-      'product_id': product['id'] ?? item['productId'] ?? '',
-      'name': product['name'] ?? '',
+      'product_id': product?['id'] ?? item['productId'] ?? variant?['productId'] ?? '',
+      'variantId': item['variantId'] ?? variant?['id'] ?? '',
+      'name': name,
       'shop': shopName,
       'shop_id': shopId,
       'price': price,
       'originalPrice': originalPrice,
       'quantity': item['quantity'] as int? ?? 1,
       'imageUrl': imageUrl,
-      'semanticLabel': 'Produit ${product['name'] ?? ''} dans le panier Asoukaa',
+      'semanticLabel': 'Produit $name dans le panier Asoukaa',
       'inStock': stockQty > 0,
       'stockQty': stockQty,
     };

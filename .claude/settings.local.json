@@ -9,7 +9,22 @@
       "PowerShell($body = '{\"identifier\":\"codocollins@gmail.com\",\"password\":\"test123\"}'; try { $response = Invoke-WebRequest -Uri 'http://localhost:3000/api/v1/auth/login' -Method POST -ContentType 'application/json' -Body $body -TimeoutSec 10; Write-Host \"Status: $\\($response.StatusCode\\)\"; Write-Host \"Body: $\\($response.Content\\)\" } catch { Write-Host \"Status: $\\($_.Exception.Response.StatusCode.Value__\\)\"; $reader = New-Object System.IO.StreamReader\\($_.Exception.Response.GetResponseStream\\(\\)\\); Write-Host \"Body: $\\($reader.ReadToEnd\\(\\)\\)\" })",
       "PowerShell(try { Invoke-RestMethod -Uri 'http://localhost:3000/api/v1/auth/login' -Method POST -ContentType 'application/json' -Body '{\"identifier\":\"test@test.com\",\"password\":\"Test123!\"}' -TimeoutSec 10 | ConvertTo-Json } catch { Write-Host \"ERREUR: $\\($_.Exception.Message\\)\"; if \\($_.Exception.Response\\) { $reader = [System.IO.StreamReader]::new\\($_.Exception.Response.GetResponseStream\\(\\)\\); Write-Host \"Réponse serveur: $\\($reader.ReadToEnd\\(\\)\\)\" } })",
       "PowerShell(try { Invoke-RestMethod -Uri 'http://localhost:3001/api/v1/auth/login' -Method POST -ContentType 'application/json' -Body '{\"identifier\":\"test@test.com\",\"password\":\"Test123!\"}' -TimeoutSec 10 | ConvertTo-Json } catch { Write-Host \"Status: $\\($_.Exception.Response.StatusCode.Value__\\)\"; if \\($_.Exception.Response\\) { $reader = [System.IO.StreamReader]::new\\($_.Exception.Response.GetResponseStream\\(\\)\\); Write-Host \"Réponse: $\\($reader.ReadToEnd\\(\\)\\)\" } else { Write-Host \"Pas de réponse: $\\($_.Exception.Message\\)\" } })",
-      "PowerShell(try { $response = Invoke-RestMethod -Uri 'http://localhost:3001/api/v1/products?limit=2&page=1' -Method GET -TimeoutSec 10; $response | ConvertTo-Json -Depth 6 } catch { Write-Host \"ERREUR: $\\($_.Exception.Message\\)\" })"
+      "PowerShell(try { $response = Invoke-RestMethod -Uri 'http://localhost:3001/api/v1/products?limit=2&page=1' -Method GET -TimeoutSec 10; $response | ConvertTo-Json -Depth 6 } catch { Write-Host \"ERREUR: $\\($_.Exception.Message\\)\" })",
+      "Read(//c/PROJET/Asoukaa/Asoukaa/backend/**)",
+      "Bash(PGPASSWORD='asoukaa@2026' psql -h localhost -U asoukaa_user -d db_asoukaa -c 'SELECT email, \"isVerified\", \"isActive\" FROM users LIMIT 10;')",
+      "Bash(PGPASSWORD='asoukaa@2026' psql -h localhost -U asoukaa_user -d db_asoukaa -c 'SELECT email, role, \"isActive\" FROM admin_accounts LIMIT 5;')",
+      "Bash(cat \"C:/PROJET/Asoukaa/Asoukaa/backend/src/modules/cart/cart.controller.ts\" | head -60)",
+      "Read(//c/PROJET/Asoukaa/Asoukaa/backend/src/modules/cart/**)",
+      "Bash(PGPASSWORD='asoukaa@2026' psql -h localhost -U asoukaa_user -d db_asoukaa -c \"\\\\dt\")",
+      "Bash(PGPASSWORD='asoukaa@2026' psql -h localhost -U asoukaa_user -d db_asoukaa -c '\\\\d product_categories')",
+      "Bash(PGPASSWORD='asoukaa@2026' psql -h localhost -U asoukaa_user -d db_asoukaa)",
+      "Bash(cat \"C:/PROJET/Asoukaa/Asoukaa/backend/src/modules/products/products.service.ts\" | grep -A 30 \"categoryId\\\\|findAll\\\\|getProducts\" | head -80)",
+      "Read(//c/PROJET/Asoukaa/Asoukaa/backend/src/modules/products/**)",
+      "Bash(cat \"C:/PROJET/Asoukaa/Asoukaa/backend/src/modules/products/products.service.ts\" | grep -A 10 \"if \\(categoryId\\)\" | head -20)",
+      "PowerShell(Invoke-RestMethod -Uri \"http://localhost:3001/api/v1/products?categoryId=c3f4381a-86d1-47a1-8b85-32006899f66e&limit=5\" -ErrorAction SilentlyContinue)"
+    ],
+    "additionalDirectories": [
+      "C:\\PROJET\\Asoukaa\\Asoukaa\\backend\\src\\modules\\products"
     ]
   }
 }

@@ -145,7 +145,7 @@ class ProductInfoWidget extends StatelessWidget {
               }),
               const SizedBox(width: 6),
               Text(
-                '${product['rating']}',
+                (product['rating'] as num? ?? 0.0).toStringAsFixed(1),
                 style: GoogleFonts.outfit(
                   fontSize: 14,
                   fontWeight: FontWeight.w700,
@@ -154,7 +154,7 @@ class ProductInfoWidget extends StatelessWidget {
               ),
               const SizedBox(width: 4),
               Text(
-                '(${product['reviewCount']} avis)',
+                '(${product['reviewCount'] ?? product['reviews_count'] ?? 0} avis)',
                 style: GoogleFonts.outfit(
                   fontSize: 13,
                   fontWeight: FontWeight.w400,
@@ -222,7 +222,7 @@ class ProductInfoWidget extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
               Text(
-                '${_formatPrice(product['price'] as int? ?? 0)} FCFA',
+                '${_formatPrice((product['price'] as num?)?.toInt() ?? 0)} FCFA',
                 style: GoogleFonts.outfit(
                   fontSize: 26,
                   fontWeight: FontWeight.w800,

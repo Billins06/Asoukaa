@@ -13,6 +13,7 @@ import './widgets/product_tabs_widget.dart';
 import '../../widgets/loading_skeleton_widget.dart';
 import '../../services/product_service.dart';
 import '../../services/nest_auth_service.dart';
+import '../../services/api_service.dart';
 import '../../routes/app_routes.dart';
 
 class ProductDetailScreen extends StatefulWidget {
@@ -92,12 +93,13 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
       }
     }
     if (imageList.isEmpty) {
-      final directUrl = p['imageUrl'] as String? ?? p['image_url'] as String? ?? '';
+      // image_url est défini par ProductService._normalize() depuis variant.imageUrl
+      final directUrl = (p['imageUrl'] ?? p['image_url'] ?? '').toString().trim();
       imageList = [
         {
           'url': directUrl.isNotEmpty
               ? directUrl
-              : 'https://img.rocket.new/generatedImages/rocket_gen_img_1400468a7-1773808571322.png',
+              : 'https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=400',
           'semanticLabel': 'Image du produit',
         },
       ];
@@ -182,8 +184,14 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
     final isLoggedIn = await NestAuthService.instance.isLoggedIn()
         .timeout(const Duration(seconds: 3), onTimeout: () => false);
     if (!isLoggedIn || !mounted) return;
-    // Wishlist status check — stub until wishlist API is wired
-    // Will be implemented when wishlist module is integrated
+    final productId = (_product['id'] ?? '').toString();
+    if (productId.isEmpty) return;
+    try {
+      final res = await ApiService.instance.client
+          .get('/api/v1/wishlist/check/$productId');
+      final inWishlist = res.data?['inWishlist'] as bool? ?? false;
+      if (mounted) setState(() => _isInWishlist = inWishlist);
+    } catch (_) {}
   }
 
   Future<void> _toggleWishlist() async {
@@ -193,54 +201,65 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
       if (mounted) Navigator.pushNamed(context, AppRoutes.signUpLogin);
       return;
     }
+    final productId = (_product['id'] ?? '').toString();
+    if (productId.isEmpty) return;
+
     setState(() => _isWishlistLoading = true);
-    // Optimistic UI toggle — API call will be added with wishlist module
-    await Future.delayed(const Duration(milliseconds: 200));
-    if (!mounted) return;
-    setState(() {
-      _isInWishlist = !_isInWishlist;
-      _isWishlistLoading = false;
-    });
-    ScaffoldMessenger.of(context).clearSnackBars();
-    if (_isInWishlist) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Row(
-            children: [
-              const Icon(Icons.favorite_rounded, color: Colors.white, size: 16),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text('Ajouté à la liste de souhaits',
-                    style: GoogleFonts.outfit()),
-              ),
-              TextButton(
-                onPressed: () {
-                  ScaffoldMessenger.of(context).hideCurrentSnackBar();
-                  Navigator.pushNamed(context, AppRoutes.wishlist);
-                },
-                child: Text('Voir',
-                    style: GoogleFonts.outfit(
-                        color: Colors.white, fontWeight: FontWeight.w700)),
-              ),
-            ],
+    try {
+      if (_isInWishlist) {
+        await ApiService.instance.client.delete('/api/v1/wishlist/$productId');
+        if (!mounted) return;
+        setState(() { _isInWishlist = false; _isWishlistLoading = false; });
+        ScaffoldMessenger.of(context).clearSnackBars();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Retiré de la liste de souhaits', style: GoogleFonts.outfit()),
+            backgroundColor: AppTheme.textSecondary,
+            behavior: SnackBarBehavior.floating,
+            duration: const Duration(seconds: 2),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
           ),
-          backgroundColor: const Color(0xFFDC2626),
-          behavior: SnackBarBehavior.floating,
-          duration: const Duration(seconds: 3),
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        ),
-      );
-    } else {
+        );
+      } else {
+        await ApiService.instance.client.post(
+          '/api/v1/wishlist',
+          data: {'productId': productId},
+        );
+        if (!mounted) return;
+        setState(() { _isInWishlist = true; _isWishlistLoading = false; });
+        ScaffoldMessenger.of(context).clearSnackBars();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.favorite_rounded, color: Colors.white, size: 16),
+                const SizedBox(width: 8),
+                Expanded(child: Text('Ajouté à la liste de souhaits', style: GoogleFonts.outfit())),
+                TextButton(
+                  onPressed: () {
+                    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+                    Navigator.pushNamed(context, AppRoutes.wishlist);
+                  },
+                  child: Text('Voir', style: GoogleFonts.outfit(color: Colors.white, fontWeight: FontWeight.w700)),
+                ),
+              ],
+            ),
+            backgroundColor: const Color(0xFFDC2626),
+            behavior: SnackBarBehavior.floating,
+            duration: const Duration(seconds: 3),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ),
+        );
+      }
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _isWishlistLoading = false);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Retiré de la liste de souhaits',
-              style: GoogleFonts.outfit()),
-          backgroundColor: AppTheme.textSecondary,
+          content: Text('Erreur, veuillez réessayer', style: GoogleFonts.outfit()),
+          backgroundColor: AppTheme.error,
           behavior: SnackBarBehavior.floating,
-          duration: const Duration(seconds: 2),
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
         ),
       );
     }

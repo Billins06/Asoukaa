@@ -21,87 +21,41 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
   late String _selectedCategory;
   bool _isLoading = true;
   List<Map<String, dynamic>> _products = [];
+  // Nom DB → id (chargé depuis /api/v1/categories/flat)
+  Map<String, String> _categoryIds = {};
 
   static const List<_CategoryItem> _categories = [
-    _CategoryItem(
-      label: 'Tous',
-      icon: Icons.apps_rounded,
-      color: Color(0xFFFF6210),
-      dbValue: null,
-    ),
-    _CategoryItem(
-      label: 'Mode',
-      icon: Icons.checkroom_outlined,
-      color: Color(0xFF8B5CF6),
-      dbValue: 'Mode & Vêtements',
-    ),
-    _CategoryItem(
-      label: 'Électronique',
-      icon: Icons.devices_outlined,
-      color: Color(0xFF3B82F6),
-      dbValue: 'Électronique',
-    ),
-    _CategoryItem(
-      label: 'Alimentaire',
-      icon: Icons.restaurant_outlined,
-      color: Color(0xFF10B981),
-      dbValue: 'Alimentation',
-    ),
-    _CategoryItem(
-      label: 'Beauté',
-      icon: Icons.spa_outlined,
-      color: Color(0xFFEC4899),
-      dbValue: 'Beauté & Cosmétiques',
-    ),
-    _CategoryItem(
-      label: 'Auto',
-      icon: Icons.directions_car_outlined,
-      color: Color(0xFFF59E0B),
-      dbValue: 'Auto',
-    ),
-    _CategoryItem(
-      label: 'Maison',
-      icon: Icons.home_outlined,
-      color: Color(0xFF06B6D4),
-      dbValue: 'Maison & Décoration',
-    ),
-    _CategoryItem(
-      label: 'Sports',
-      icon: Icons.sports_basketball_outlined,
-      color: Color(0xFFDC2626),
-      dbValue: 'Sport & Loisirs',
-    ),
-    _CategoryItem(
-      label: 'Santé',
-      icon: Icons.local_hospital_outlined,
-      color: Color(0xFF059669),
-      dbValue: 'Santé',
-    ),
-    _CategoryItem(
-      label: 'Livres',
-      icon: Icons.menu_book_outlined,
-      color: Color(0xFF7C3AED),
-      dbValue: 'Livres',
-    ),
-    _CategoryItem(
-      label: 'Jouets',
-      icon: Icons.toys_outlined,
-      color: Color(0xFFD97706),
-      dbValue: 'Jouets & Enfants',
-    ),
-    _CategoryItem(
-      label: 'Bijoux',
-      icon: Icons.diamond_outlined,
-      color: Color(0xFFDB2777),
-      dbValue: 'Bijoux',
-    ),
+    _CategoryItem(label: 'Tous', icon: Icons.apps_rounded, color: Color(0xFFFF6210), dbValue: null),
+    _CategoryItem(label: 'Mode', icon: Icons.checkroom_outlined, color: Color(0xFF8B5CF6), dbValue: 'Mode'),
+    _CategoryItem(label: 'Électronique', icon: Icons.devices_outlined, color: Color(0xFF3B82F6), dbValue: 'Électronique'),
+    _CategoryItem(label: 'Alimentaire', icon: Icons.restaurant_outlined, color: Color(0xFF10B981), dbValue: 'Alimentation'),
+    _CategoryItem(label: 'Beauté', icon: Icons.spa_outlined, color: Color(0xFFEC4899), dbValue: 'Beauté'),
+    _CategoryItem(label: 'Auto', icon: Icons.directions_car_outlined, color: Color(0xFFF59E0B), dbValue: 'Auto'),
+    _CategoryItem(label: 'Maison', icon: Icons.home_outlined, color: Color(0xFF06B6D4), dbValue: 'Maison'),
+    _CategoryItem(label: 'Sports', icon: Icons.sports_basketball_outlined, color: Color(0xFFDC2626), dbValue: 'Sports'),
+    _CategoryItem(label: 'Santé', icon: Icons.local_hospital_outlined, color: Color(0xFF059669), dbValue: 'Santé'),
+    _CategoryItem(label: 'Livres', icon: Icons.menu_book_outlined, color: Color(0xFF7C3AED), dbValue: 'Livres'),
+    _CategoryItem(label: 'Jouets', icon: Icons.toys_outlined, color: Color(0xFFD97706), dbValue: 'Jouets'),
+    _CategoryItem(label: 'Bijoux', icon: Icons.diamond_outlined, color: Color(0xFFDB2777), dbValue: 'Bijoux'),
   ];
 
   @override
   void initState() {
     super.initState();
     _selectedCategory = widget.initialCategory ?? 'Tous';
-    _loadProducts();
+    _loadCategoryIds().then((_) => _loadProducts());
+  }
+
+  Future<void> _loadCategoryIds() async {
+    try {
+      final res = await ApiService.instance.client.get('/api/v1/categories/flat');
+      final list = res.data as List? ?? [];
+      final map = <String, String>{};
+      for (final cat in list) {
+        if (cat is Map) map[cat['name'].toString()] = cat['id'].toString();
+      }
+      if (mounted) setState(() => _categoryIds = map);
+    } catch (_) {}
   }
 
   Future<void> _loadProducts() async {
@@ -111,18 +65,17 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
         (c) => c.label == _selectedCategory,
         orElse: () => _categories.first,
       );
-      final result = await ProductService.instance.getProducts(limit: 100);
+      // Filtrage côté serveur par categoryId (plus fiable que le nom)
+      final categoryId = selectedItem.dbValue != null
+          ? _categoryIds[selectedItem.dbValue]
+          : null;
+      final result = await ProductService.instance.getProducts(
+        limit: 100,
+        categoryId: categoryId,
+      );
       if (mounted) {
-        List<Map<String, dynamic>> products = result.data ?? [];
-        if (selectedItem.dbValue != null) {
-          products = products.where((p) {
-            final cat = p['category'];
-            if (cat is Map) return cat['name'] == selectedItem.dbValue;
-            return cat?.toString() == selectedItem.dbValue;
-          }).toList();
-        }
         setState(() {
-          _products = products;
+          _products = result.data ?? [];
           _isLoading = false;
         });
       }
@@ -415,7 +368,6 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
       await ApiService.instance.client.post(
         '/api/v1/cart/items',
         data: {
-          'productId': product['id'],
           'quantity': 1,
           if (product['variantId'] != null) 'variantId': product['variantId'],
         },

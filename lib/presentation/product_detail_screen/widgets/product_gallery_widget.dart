@@ -30,13 +30,24 @@ class _ProductGalleryWidgetState extends State<ProductGalleryWidget> {
 
   List<Map<String, dynamic>> get _images {
     final raw = widget.product['images'];
-    if (raw is List) {
-      return raw.cast<Map<String, dynamic>>();
+    if (raw is List && raw.isNotEmpty) {
+      return raw.map((img) {
+        if (img is Map) {
+          return {
+            'url': (img['url'] ?? img['imageUrl'] ?? '').toString(),
+            'semanticLabel': (img['semanticLabel'] ?? 'Image du produit').toString(),
+          };
+        }
+        return {'url': img.toString(), 'semanticLabel': 'Image du produit'};
+      }).toList();
     }
+    final fallbackUrl = (widget.product['imageUrl'] ?? widget.product['image_url'] ?? '').toString();
     return [
       {
-        'url': widget.product['imageUrl'] ?? '',
-        'semanticLabel': widget.product['semanticLabel'] ?? '',
+        'url': fallbackUrl.isNotEmpty
+            ? fallbackUrl
+            : 'https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=400',
+        'semanticLabel': widget.product['semanticLabel'] ?? 'Image du produit',
       },
     ];
   }
