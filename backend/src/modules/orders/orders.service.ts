@@ -17,6 +17,7 @@ import { Address }                 from '../users/entities/address.entity';
 import { VendorProfile }           from '../users/entities/vendor-profile.entity';
 import { Coupon, CouponType }      from '../coupons/entities/coupon.entity';
 import { CouponUsage }             from '../coupons/entities/coupon-usage.entity';
+import { DeliveryZone }            from '../delivery-zones/entities/delivery-zone.entity';
 
 import { CreateOrderDto }         from './dto/create-order.dto';
 import { UpdateOrderStatusDto }   from './dto/update-order-status.dto';
@@ -60,6 +61,9 @@ export class OrdersService {
     @InjectRepository(CouponUsage)
     private readonly couponUsageRepo: Repository<CouponUsage>,
 
+    @InjectRepository(DeliveryZone)
+    private readonly deliveryZoneRepo: Repository<DeliveryZone>,
+
     private readonly dataSource:  DataSource,
     private readonly logService:  ActivityLogService,
   ) {}
@@ -95,6 +99,14 @@ export class OrdersService {
     if (!address) {
       throw new NotFoundException('Adresse introuvable');
     }
+
+    // 2bis. Frais de livraison de la commune de destination (table
+    // delivery_zones, paramétrée par l'admin). Même frais appliqué à chaque
+    // commande (une par boutique) puisque chacune est livrée séparément à
+    // cette même adresse.
+    const fraisLivraisonCommune = await this.getFraisLivraisonForCommune(
+      address.ville,
+    );
 
     // 3. Vérifier le stock de chaque article
     // et regrouper les articles par boutique
@@ -171,10 +183,10 @@ export class OrdersService {
           order.status              = OrderStatus.PENDING;
           order.instructions        = dto.instructions ?? null;
           order.subtotal            = Number(subtotal.toFixed(2));
-          order.fraisLivraison      = 0; // calculé à l'affectation du livreur
+          order.fraisLivraison      = fraisLivraisonCommune;
           order.rabais              = Number(discount.toFixed(2));
           order.montantCommission   = 0; // calculé au paiement
-          order.total               = Number(total.toFixed(2));
+          order.total               = Number((total + fraisLivraisonCommune).toFixed(2));
 
           await manager.save(order);
 
@@ -207,8 +219,11 @@ export class OrdersService {
           await manager.save(usage);
         }
 
-        // 7. Vider le panier après commande réussie
-        await manager.delete(CartItem, { cartId: cart.id });
+        // 7. NE PAS vider le panier ici : la commande est encore PENDING,
+        // le paiement n'est pas confirmé. Le panier est vidé uniquement
+        // après confirmation du paiement (voir FeexpayResultScreen /
+        // DELETE /api/v1/cart côté frontend), pour que le client ne perde
+        // pas ses articles en cas d'échec ou d'interruption du paiement.
 
         return orders;
       }
@@ -456,6 +471,21 @@ export class OrdersService {
   // ─────────────────────────────────────────────────────
   // MÉTHODES PRIVÉES
   // ─────────────────────────────────────────────────────
+
+  // Frais de livraison fixe pour une commune (table delivery_zones,
+  // paramétrée par l'admin). Comparaison insensible à la casse/espaces ;
+  // si la commune n'a pas encore de zone connue, on n'empêche pas la
+  // création de la commande — on applique 0 (à surveiller côté admin).
+  private async getFraisLivraisonForCommune(commune: string): Promise<number> {
+    if (!commune) return 0;
+    const target = commune.trim().toLowerCase();
+    const zone = await this.deliveryZoneRepo
+      .createQueryBuilder('zone')
+      .where('LOWER(TRIM(zone.commune)) = :target', { target })
+      .andWhere('zone.isActive = true')
+      .getOne();
+    return zone ? Number(zone.fraisLivraison) : 0;
+  }
 
   // Génère un numéro de commande unique
   private async generateOrderNumber(): Promise<string> {

@@ -182,7 +182,7 @@ export class ProductsService {
     if (search) {
       query.andWhere(
         '(product.prod_name ILIKE :search OR EXISTS '
-        + '(SELECT 1 FROM product_tags pt WHERE pt.product_id = product.id '
+        + '(SELECT 1 FROM product_tags pt WHERE pt."productId" = product.id '
         + 'AND pt.tag ILIKE :search))',
         { search: `%${search}%` }
       );

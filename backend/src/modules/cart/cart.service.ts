@@ -37,6 +37,8 @@ export class CartService {
         'items.variant',
         'items.variant.product',
         'items.variant.product.images',
+        'items.variant.product.vendor',
+        'items.variant.product.vendor.user',
       ],
     });
 
@@ -71,6 +73,13 @@ export class CartService {
         hasChanges = true;
       } else {
         item.priceChanged = false;
+      }
+
+      // ⚠️ Ne pas exposer les données du vendeur sensibles
+      const vendorUser = (item.variant?.product as any)?.vendor?.user;
+      if (vendorUser) {
+        const { passwordHash, ...userSafe } = vendorUser;
+        (item.variant.product as any).vendor.user = userSafe;
       }
     }
 

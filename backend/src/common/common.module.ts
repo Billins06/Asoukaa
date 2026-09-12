@@ -16,10 +16,10 @@ import { TokenBlacklistService } from './services/token-blacklist.service';
         transport: {
           host: config.getOrThrow<string>('MAIL_HOST'),
           port: Number(config.getOrThrow<string>('MAIL_PORT')),
-          secure: false,
+          secure: config.get<string>('MAIL_SECURE') === 'true',
           auth: {
             user: config.getOrThrow<string>('MAIL_USER'),
-            pass: config.get<string>('MAIL_PASS') ?? '',
+            pass: config.get<string>('MAIL_PASSWORD') ?? '',
           },
         },
         defaults: {

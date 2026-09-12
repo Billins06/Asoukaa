@@ -11,6 +11,7 @@ import { CouponsModule } from './modules/coupons/coupons.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { DeliveryAgentsModule } from './modules/delivery-agents/delivery-agents.module';
 import { DeliveryModule } from './modules/delivery/delivery.module';
+import { DeliveryZonesModule } from './modules/delivery-zones/delivery-zones.module';
 import { FournisseursModule } from './modules/fournisseurs/fournisseurs.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { OrdersModule } from './modules/orders/orders.module';
@@ -67,6 +68,7 @@ import { ActivityLogsModule } from './modules/activity-logs/activity-logs.module
     OrdersModule,
     PaymentsModule,
     DeliveryModule,
+    DeliveryZonesModule,
     ReviewsModule,
     CouponsModule,
     NotificationsModule,

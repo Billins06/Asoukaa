@@ -75,6 +75,19 @@ export class PaymentsController {
     );
   }
 
+  @ApiOperation({ summary: 'Vérifier le statut d\'un paiement (polling client)' })
+  @Get(':id/status')
+  checkStatus(
+    @Req() req: Request,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.paymentsService.checkPaymentStatus(
+      id,
+      getUser(req).id,
+      getIp(req),
+    );
+  }
+
   @ApiOperation({ summary: 'Demander un remboursement' })
   @Post('refund')
   @HttpCode(HttpStatus.CREATED)
@@ -86,6 +99,22 @@ export class PaymentsController {
       getUser(req).id,
       dto,
       getIp(req),
+    );
+  }
+
+  @ApiOperation({ summary: 'Mes demandes de remboursement' })
+  @ApiQuery({ name: 'page',  required: false })
+  @ApiQuery({ name: 'limit', required: false })
+  @Get('refunds/me')
+  getMyRefunds(
+    @Req() req: Request,
+    @Query('page')  page?:  number,
+    @Query('limit') limit?: number,
+  ) {
+    return this.paymentsService.getMyRefunds(
+      getUser(req).id,
+      Number(page)  || 1,
+      Number(limit) || 10,
     );
   }
 

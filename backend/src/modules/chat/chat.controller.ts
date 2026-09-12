@@ -104,6 +104,16 @@ export class ChatController {
     return this.chatService.reportMessage(getUser(req).id, id);
   }
 
+  @ApiOperation({ summary: 'Signaler que je suis en train d\'écrire' })
+  @Patch('conversations/:id/typing')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  setTyping(
+    @Req() req: Request,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.chatService.setTyping(getUser(req).id, id);
+  }
+
   // ─── Routes Admin ─────────────────────────────────────
 
   @ApiOperation({ summary: '[ADMIN] Conversations signalées' })

@@ -14,9 +14,10 @@ import { VendorProfile } from '../../users/entities/vendor-profile.entity';
 import { Product } from '../../products/entities/product.entity';
 import { Message } from './message.entity';
 
-// Un client ne peut avoir qu'une seule conversation
-// avec un vendeur par produit
-@Unique(['clientId', 'vendorId', 'productId'])
+// Un client ne peut avoir qu'une seule conversation avec un vendeur
+// (comme sur WhatsApp avec un contact) : la contrainte ne porte plus
+// sur le produit, qui n'est qu'une référence affichée dans la discussion.
+@Unique(['clientId', 'vendorId'])
 @Entity('conversations')
 export class Conversation {
 

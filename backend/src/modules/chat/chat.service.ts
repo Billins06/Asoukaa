@@ -5,7 +5,7 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository }       from 'typeorm';
+import { Repository, Not }  from 'typeorm';
 
 import { Conversation } from './entities/conversation.entity';
 import { Message }      from './entities/message.entity';
@@ -15,6 +15,7 @@ import { Product }      from '../products/entities/product.entity';
 
 import { CreateConversationDto } from './dto/create-conversation.dto';
 import { SendMessageDto }        from './dto/send-message.dto';
+import { NotificationsService }  from '../notifications/notifications.service';
 
 @Injectable()
 export class ChatService {
@@ -31,7 +32,45 @@ export class ChatService {
 
     @InjectRepository(Product)
     private readonly productRepo: Repository<Product>,
+
+    private readonly notificationsService: NotificationsService,
   ) {}
+
+  // ─────────────────────────────────────────────────────
+  // INDICATEUR "EN TRAIN D'ÉCRIRE" (en mémoire, pas en base :
+  // c'est une information éphémère, pas la peine de la persister
+  // ni de la répliquer entre plusieurs instances du serveur)
+  // ─────────────────────────────────────────────────────
+  private readonly typingState = new Map<
+    string,
+    { userId: string; expiresAt: number }
+  >();
+  private static readonly TYPING_TTL_MS = 7000; // > l'intervalle de polling (5s) côté client
+
+  async setTyping(userId: string, conversationId: string): Promise<void> {
+    const conversation = await this.conversationRepo.findOne({
+      where:     { id: conversationId },
+      relations: ['vendor'],
+    });
+    if (!conversation) throw new NotFoundException('Conversation introuvable');
+
+    const isClient = conversation.clientId === userId;
+    const isVendor = conversation.vendor.userId === userId;
+    if (!isClient && !isVendor) {
+      throw new ForbiddenException('Accès refusé');
+    }
+
+    this.typingState.set(conversationId, {
+      userId,
+      expiresAt: Date.now() + ChatService.TYPING_TTL_MS,
+    });
+  }
+
+  private isOtherParticipantTyping(userId: string, conversationId: string): boolean {
+    const entry = this.typingState.get(conversationId);
+    if (!entry) return false;
+    return entry.userId !== userId && entry.expiresAt > Date.now();
+  }
 
   // ─────────────────────────────────────────────────────
   // CRÉER UNE CONVERSATION
@@ -63,16 +102,24 @@ export class ChatService {
     }
 
     // Vérifier si une conversation existe déjà
-    // (unique sur clientId + vendorId + productId)
+    // (unique sur clientId + vendorId : une seule discussion par boutique,
+    // quel que soit le nombre de produits évoqués — comme sur WhatsApp
+    // avec un contact. Le produit n'est qu'une référence affichée dans
+    // la discussion, pas une clé de dédoublonnage.)
     const existing = await this.conversationRepo.findOne({
       where: {
         clientId,
-        vendorId:  dto.vendorId,
-        productId: dto.productId || undefined,
+        vendorId: dto.vendorId,
       },
     });
 
     if (existing) {
+      // Si un nouveau produit est évoqué, on met à jour la référence
+      // affichée pour refléter le dernier produit discuté.
+      if (dto.productId && existing.productId !== dto.productId) {
+        existing.productId = dto.productId;
+        await this.conversationRepo.save(existing);
+      }
       return existing; // Retourner la conversation existante
     }
 
@@ -97,7 +144,7 @@ export class ChatService {
     // 1. Vérifier que la conversation existe
     const conversation = await this.conversationRepo.findOne({
       where:     { id: conversationId },
-      relations: ['vendor'],
+      relations: ['vendor', 'client'],
     });
 
     if (!conversation) throw new NotFoundException('Conversation introuvable');
@@ -161,6 +208,22 @@ export class ChatService {
       };
     }
 
+    // 8. Notifier l'autre participant (best-effort : ne doit jamais faire
+    // échouer l'envoi du message si la notification plante)
+    try {
+      const receiverId  = isClient ? conversation.vendor.userId : conversation.clientId;
+      const senderName  = isClient
+        ? conversation.client.prenom
+        : conversation.vendor.shopName;
+      await this.notificationsService.notifyNewMessage(
+        receiverId,
+        senderName,
+        conversationId,
+      );
+    } catch (error) {
+      console.error('Erreur notification nouveau message:', error.message);
+    }
+
     return {
       message: 'Message envoyé',
       data:    message,
@@ -208,8 +271,42 @@ export class ChatService {
       return c;
     });
 
+    // Enrichir chaque conversation avec un aperçu du dernier message
+    // et le nombre de messages non lus (envoyés par l'AUTRE participant)
+    // — indispensable pour afficher une liste de conversations utile
+    // (aperçu + badge non-lus) dans l'écran "Messages".
+    const withPreview = await Promise.all(
+      safe.map(async (c) => {
+        const lastMessage = await this.messageRepo.findOne({
+          where:  { conversationId: c.id },
+          order:  { createdAt: 'DESC' },
+        });
+
+        const unreadCount = await this.messageRepo.count({
+          where: {
+            conversationId: c.id,
+            isRead:         false,
+            senderId:       Not(userId),
+          },
+        });
+
+        return {
+          ...c,
+          lastMessage: lastMessage
+            ? {
+                content:   lastMessage.content,
+                imageUrl:  lastMessage.imageUrl,
+                createdAt: lastMessage.createdAt,
+                senderId:  lastMessage.senderId,
+              }
+            : null,
+          unreadCount,
+        };
+      }),
+    );
+
     return {
-      data:  safe,
+      data:  withPreview,
       total,
       page,
       limit,
@@ -249,14 +346,16 @@ export class ChatService {
     });
 
     // Marquer les messages non lus comme lus
-    // (uniquement ceux envoyés par l'autre participant)
+    // (uniquement ceux envoyés par l'autre participant :
+    //  le filtre senderId: Not(userId) est indispensable ici,
+    //  sinon mes propres messages non lus par le destinataire
+    //  se retrouvent marqués "lus" dès que je recharge moi-même
+    //  la conversation)
     await this.messageRepo.update(
       {
         conversationId,
-        isRead: false,
-        // On cible les messages PAS envoyés par moi
-        // (on ne marque pas mes propres messages comme lus
-        //  par moi-même)
+        isRead:   false,
+        senderId: Not(userId),
       },
       { isRead: true },
     );
@@ -267,6 +366,7 @@ export class ChatService {
       page,
       limit,
       pages: Math.ceil(total / limit),
+      otherIsTyping: this.isOtherParticipantTyping(userId, conversationId),
     };
   }
 

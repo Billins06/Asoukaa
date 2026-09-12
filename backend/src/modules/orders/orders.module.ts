@@ -13,6 +13,7 @@ import { Address }          from '../users/entities/address.entity';
 import { VendorProfile }    from '../users/entities/vendor-profile.entity';
 import { Coupon }           from '../coupons/entities/coupon.entity';
 import { CouponUsage }      from '../coupons/entities/coupon-usage.entity';
+import { DeliveryZone }     from '../delivery-zones/entities/delivery-zone.entity';
 import { CommonModule }     from '../../common/common.module';
 
 @Module({
@@ -28,6 +29,7 @@ import { CommonModule }     from '../../common/common.module';
       VendorProfile,
       Coupon,
       CouponUsage,
+      DeliveryZone,
     ]),
     CommonModule,
   ],

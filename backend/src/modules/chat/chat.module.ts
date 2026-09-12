@@ -7,6 +7,7 @@ import { Conversation }   from './entities/conversation.entity';
 import { Message }        from './entities/message.entity';
 import { VendorProfile }  from '../users/entities/vendor-profile.entity';
 import { Product }        from '../products/entities/product.entity';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { Product }        from '../products/entities/product.entity';
       VendorProfile,
       Product,
     ]),
+    NotificationsModule,
   ],
   controllers: [ChatController],
   providers:   [ChatService],

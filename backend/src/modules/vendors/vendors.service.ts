@@ -1,5 +1,6 @@
 import {
   Injectable,
+  Logger,
   NotFoundException,
   ConflictException,
   BadRequestException,
@@ -27,6 +28,7 @@ import {
 
 @Injectable()
 export class VendorsService {
+  private readonly logger = new Logger(VendorsService.name);
 
   constructor(
     @InjectRepository(VendorProfile)
@@ -435,52 +437,63 @@ export class VendorsService {
         roleExists.isActive = true;
         await this.userRoleRepo.save(roleExists);
       }
-
-      // Envoyer email de validation
-      await this.mailerService.sendMail({
-        to:      vendor.user.email,
-        subject: '🎉 Votre boutique Asoukaa a été validée !',
-        html: `
-          <p>Bonjour ${vendor.user.prenom},</p>
-          <p>Félicitations ! Votre boutique 
-             <strong>${vendor.shopName}</strong> 
-             a été validée par notre équipe.</p>
-          <p>Vous pouvez maintenant :</p>
-          <ul>
-            <li>Ajouter votre logo et bannière</li>
-            <li>Configurer vos paramètres de paiement</li>
-            <li>Commencer à ajouter vos produits</li>
-          </ul>
-          <p>Bienvenue sur Asoukaa !</p>
-        `,
-      });
-
     } else {
       // REJECT
       vendor.status     = VendorStatus.REJECTED;
       vendor.motifRefus = dto.rejectionReason ?? null;
-
-      // Envoyer email de refus avec le motif
-      await this.mailerService.sendMail({
-        to:      vendor.user.email,
-        subject: 'Votre demande de boutique Asoukaa',
-        html: `
-          <p>Bonjour ${vendor.user.prenom},</p>
-          <p>Votre demande pour la boutique 
-             <strong>${vendor.shopName}</strong> 
-             n'a pas pu être validée pour la raison suivante :</p>
-          <blockquote style="border-left: 3px solid #ccc; padding-left: 12px;">
-            ${dto.rejectionReason}
-          </blockquote>
-          <p>Vous pouvez corriger ces éléments et 
-             re-soumettre votre demande depuis l'application.</p>
-        `,
-      });
     }
 
+    // ⚠️ On persiste le statut AVANT l'envoi de l'email : un échec SMTP ne
+    // doit jamais laisser le vendeur dans un état incohérent (rôle attribué
+    // mais statut resté "en attente").
     vendor.reviewedById = adminId;
     vendor.reviewedAt   = new Date();
     await this.vendorRepo.save(vendor);
+
+    // Email de notification — best-effort : une erreur d'envoi ne doit pas
+    // faire échouer l'action d'approbation/refus elle-même.
+    try {
+      if (dto.action === VendorReviewAction.APPROVE) {
+        await this.mailerService.sendMail({
+          to:      vendor.user.email,
+          subject: '🎉 Votre boutique Asoukaa a été validée !',
+          html: `
+            <p>Bonjour ${vendor.user.prenom},</p>
+            <p>Félicitations ! Votre boutique 
+               <strong>${vendor.shopName}</strong> 
+               a été validée par notre équipe.</p>
+            <p>Vous pouvez maintenant :</p>
+            <ul>
+              <li>Ajouter votre logo et bannière</li>
+              <li>Configurer vos paramètres de paiement</li>
+              <li>Commencer à ajouter vos produits</li>
+            </ul>
+            <p>Bienvenue sur Asoukaa !</p>
+          `,
+        });
+      } else {
+        await this.mailerService.sendMail({
+          to:      vendor.user.email,
+          subject: 'Votre demande de boutique Asoukaa',
+          html: `
+            <p>Bonjour ${vendor.user.prenom},</p>
+            <p>Votre demande pour la boutique 
+               <strong>${vendor.shopName}</strong> 
+               n'a pas pu être validée pour la raison suivante :</p>
+            <blockquote style="border-left: 3px solid #ccc; padding-left: 12px;">
+              ${dto.rejectionReason}
+            </blockquote>
+            <p>Vous pouvez corriger ces éléments et 
+               re-soumettre votre demande depuis l'application.</p>
+          `,
+        });
+      }
+    } catch (error) {
+      this.logger.error(
+        `Échec envoi mail de revue vendeur → ${vendor.user.email}`,
+        error?.message,
+      );
+    }
 
     await this.logService.log({
       actorId:    adminId,
@@ -537,17 +550,24 @@ export class VendorsService {
 
     await this.vendorRepo.save(vendor);
 
-    // Notifier le vendeur par email
-    await this.mailerService.sendMail({
-      to:      vendor.user.email,
-      subject: 'Votre boutique Asoukaa a été suspendue',
-      html: `
-        <p>Bonjour ${vendor.user.prenom},</p>
-        <p>Votre boutique <strong>${vendor.shopName}</strong> 
-           a été suspendue par notre équipe.</p>
-        <p>Pour plus d'informations, contactez notre support.</p>
-      `,
-    });
+    // Notifier le vendeur par email (best-effort)
+    try {
+      await this.mailerService.sendMail({
+        to:      vendor.user.email,
+        subject: 'Votre boutique Asoukaa a été suspendue',
+        html: `
+          <p>Bonjour ${vendor.user.prenom},</p>
+          <p>Votre boutique <strong>${vendor.shopName}</strong> 
+             a été suspendue par notre équipe.</p>
+          <p>Pour plus d'informations, contactez notre support.</p>
+        `,
+      });
+    } catch (error) {
+      this.logger.error(
+        `Échec envoi mail de blocage vendeur → ${vendor.user.email}`,
+        error?.message,
+      );
+    }
 
     await this.logService.log({
       actorId:    adminId,

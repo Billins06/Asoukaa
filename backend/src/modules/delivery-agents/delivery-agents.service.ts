@@ -1,5 +1,6 @@
 import {
   Injectable,
+  Logger,
   NotFoundException,
   ConflictException,
   BadRequestException,
@@ -31,6 +32,7 @@ import {
 
 @Injectable()
 export class DeliveryAgentsService {
+  private readonly logger = new Logger(DeliveryAgentsService.name);
 
   constructor(
     @InjectRepository(DeliveryAgentProfile)
@@ -343,47 +345,57 @@ export class DeliveryAgentsService {
         roleExists.isActive = true;
         await this.userRoleRepo.save(roleExists);
       }
-
-      // Email de validation
-      await this.mailerService.sendMail({
-        to:      agent.user.email,
-        subject: '🎉 Votre compte livreur Asoukaa a été validé !',
-        html: `
-          <p>Bonjour ${agent.user.prenom},</p>
-          <p>Félicitations ! Votre profil livreur a été validé.</p>
-          <p>Vous pouvez maintenant :</p>
-          <ul>
-            <li>Activer votre disponibilité depuis l'application</li>
-            <li>Commencer à recevoir des demandes de livraison</li>
-          </ul>
-          <p>Bienvenue dans l'équipe Asoukaa !</p>
-        `,
-      });
-
     } else {
       agent.status     = AgentStatus.REJECTED;
-     agent.motifRefus = dto.rejectionReason ?? null;
-
-      // Email de refus
-      await this.mailerService.sendMail({
-        to:      agent.user.email,
-        subject: 'Votre demande livreur Asoukaa',
-        html: `
-          <p>Bonjour ${agent.user.prenom},</p>
-          <p>Votre demande de compte livreur n'a pas pu être validée 
-             pour la raison suivante :</p>
-          <blockquote style="border-left:3px solid #ccc; padding-left:12px;">
-            ${dto.rejectionReason}
-          </blockquote>
-          <p>Vous pouvez corriger ces éléments et re-soumettre 
-             votre demande depuis l'application.</p>
-        `,
-      });
+      agent.motifRefus = dto.rejectionReason ?? null;
     }
 
+    // ⚠️ On persiste le statut AVANT l'envoi de l'email : un échec SMTP ne
+    // doit jamais laisser le livreur dans un état incohérent (rôle attribué
+    // mais statut resté "en attente").
     agent.reviewedById = adminId;
     agent.reviewedAt   = new Date();
     await this.agentRepo.save(agent);
+
+    // Email de notification — best-effort.
+    try {
+      if (dto.action === AgentReviewAction.APPROVE) {
+        await this.mailerService.sendMail({
+          to:      agent.user.email,
+          subject: '🎉 Votre compte livreur Asoukaa a été validé !',
+          html: `
+            <p>Bonjour ${agent.user.prenom},</p>
+            <p>Félicitations ! Votre profil livreur a été validé.</p>
+            <p>Vous pouvez maintenant :</p>
+            <ul>
+              <li>Activer votre disponibilité depuis l'application</li>
+              <li>Commencer à recevoir des demandes de livraison</li>
+            </ul>
+            <p>Bienvenue dans l'équipe Asoukaa !</p>
+          `,
+        });
+      } else {
+        await this.mailerService.sendMail({
+          to:      agent.user.email,
+          subject: 'Votre demande livreur Asoukaa',
+          html: `
+            <p>Bonjour ${agent.user.prenom},</p>
+            <p>Votre demande de compte livreur n'a pas pu être validée 
+               pour la raison suivante :</p>
+            <blockquote style="border-left:3px solid #ccc; padding-left:12px;">
+              ${dto.rejectionReason}
+            </blockquote>
+            <p>Vous pouvez corriger ces éléments et re-soumettre 
+               votre demande depuis l'application.</p>
+          `,
+        });
+      }
+    } catch (error) {
+      this.logger.error(
+        `Échec envoi mail de revue livreur → ${agent.user.email}`,
+        error?.message,
+      );
+    }
 
     await this.logService.log({
       actorId:    adminId,
@@ -442,16 +454,23 @@ export class DeliveryAgentsService {
 
     await this.agentRepo.save(agent);
 
-    // Notifier par email
-    await this.mailerService.sendMail({
-      to:      agent.user.email,
-      subject: 'Votre compte livreur Asoukaa a été suspendu',
-      html: `
-        <p>Bonjour ${agent.user.prenom},</p>
-        <p>Votre compte livreur a été suspendu par notre équipe.</p>
-        <p>Pour plus d'informations, contactez notre support.</p>
-      `,
-    });
+    // Notifier par email (best-effort)
+    try {
+      await this.mailerService.sendMail({
+        to:      agent.user.email,
+        subject: 'Votre compte livreur Asoukaa a été suspendu',
+        html: `
+          <p>Bonjour ${agent.user.prenom},</p>
+          <p>Votre compte livreur a été suspendu par notre équipe.</p>
+          <p>Pour plus d'informations, contactez notre support.</p>
+        `,
+      });
+    } catch (error) {
+      this.logger.error(
+        `Échec envoi mail de blocage livreur → ${agent.user.email}`,
+        error?.message,
+      );
+    }
 
     await this.logService.log({
       actorId:    adminId,

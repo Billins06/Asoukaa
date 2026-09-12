@@ -1,5 +1,6 @@
 import {
   Injectable,
+  Logger,
   NotFoundException,
   BadRequestException,
   ForbiddenException,
@@ -26,6 +27,7 @@ import {
 
 @Injectable()
 export class DeliveryService {
+  private readonly logger = new Logger(DeliveryService.name);
 
   constructor(
     @InjectRepository(Delivery)
@@ -142,20 +144,24 @@ export class DeliveryService {
 
     await this.deliveryRepo.save(delivery);
 
-    // Notifier le livreur par email
-    await this.mailerService.sendMail({
-      to:      agent.user.email,
-      subject: '📦 Nouvelle livraison affectée',
-      html: `
-        <p>Bonjour ${agent.user.prenom},</p>
-        <p>Une nouvelle livraison vous a été affectée.</p>
-        <p><strong>Adresse de récupération :</strong> 
-           ${delivery.pickupAddress}</p>
-        <p><strong>Adresse de livraison :</strong> 
-           ${delivery.adresseLivraison}</p>
-        <p>Connectez-vous à l'application pour plus de détails.</p>
-      `,
-    });
+    // Notifier le livreur par email (best-effort)
+    try {
+      await this.mailerService.sendMail({
+        to:      agent.user.email,
+        subject: '📦 Nouvelle livraison affectée',
+        html: `
+          <p>Bonjour ${agent.user.prenom},</p>
+          <p>Une nouvelle livraison vous a été affectée.</p>
+          <p><strong>Adresse de récupération :</strong> 
+             ${delivery.pickupAddress}</p>
+          <p><strong>Adresse de livraison :</strong> 
+             ${delivery.adresseLivraison}</p>
+          <p>Connectez-vous à l'application pour plus de détails.</p>
+        `,
+      });
+    } catch (error) {
+      this.logger.error(`Échec envoi mail affectation livraison → ${agent.user.email}`, error?.message);
+    }
 
     await this.logService.log({
       actorId:    userId,
@@ -228,17 +234,21 @@ export class DeliveryService {
       // Recalculer le taux de réussite
       await this.recalculateSuccessRate(agent.id);
 
-      // Notifier le client
-      await this.mailerService.sendMail({
-        to:      order.user.email,
-        subject: '✅ Commande livrée !',
-        html: `
-          <p>Bonjour ${order.user.prenom},</p>
-          <p>Votre commande <strong>${order.orderNumber}</strong> 
-             a été livrée avec succès !</p>
-          <p>Merci de faire confiance à Asoukaa.</p>
-        `,
-      });
+      // Notifier le client (best-effort)
+      try {
+        await this.mailerService.sendMail({
+          to:      order.user.email,
+          subject: '✅ Commande livrée !',
+          html: `
+            <p>Bonjour ${order.user.prenom},</p>
+            <p>Votre commande <strong>${order.orderNumber}</strong> 
+               a été livrée avec succès !</p>
+            <p>Merci de faire confiance à Asoukaa.</p>
+          `,
+        });
+      } catch (error) {
+        this.logger.error(`Échec envoi mail commande livrée → ${order.user.email}`, error?.message);
+      }
     }
 
     if (dto.status === DeliveryStatus.FAILED) {
@@ -380,16 +390,20 @@ export class DeliveryService {
     await this.agentRepo.save(agent);
     await this.indepDeliveryRepo.save(delivery);
 
-    // Notifier le demandeur
-    await this.mailerService.sendMail({
-      to:      delivery.requester.email,
-      subject: '✅ Un livreur a accepté votre demande',
-      html: `
-        <p>Bonjour ${delivery.requester.prenom},</p>
-        <p>Un livreur a accepté votre demande de livraison.</p>
-        <p>Il vous contactera prochainement pour les détails.</p>
-      `,
-    });
+    // Notifier le demandeur (best-effort)
+    try {
+      await this.mailerService.sendMail({
+        to:      delivery.requester.email,
+        subject: '✅ Un livreur a accepté votre demande',
+        html: `
+          <p>Bonjour ${delivery.requester.prenom},</p>
+          <p>Un livreur a accepté votre demande de livraison.</p>
+          <p>Il vous contactera prochainement pour les détails.</p>
+        `,
+      });
+    } catch (error) {
+      this.logger.error(`Échec envoi mail acceptation livraison → ${delivery.requester.email}`, error?.message);
+    }
 
     await this.logService.log({
       actorId:    userId,

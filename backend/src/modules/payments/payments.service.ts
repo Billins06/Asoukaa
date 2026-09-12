@@ -1,5 +1,6 @@
 import {
   Injectable,
+  Logger,
   NotFoundException,
   BadRequestException,
   ForbiddenException,
@@ -7,8 +8,9 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { MailerService } from '@nestjs-modules/mailer';
+import { ConfigService } from '@nestjs/config';
 
-import { Payment, PaymentStatus, PaymentMethod } from './entities/payment.entity';
+import { Payment, PaymentStatus, PaymentMethod, PaymentOperator } from './entities/payment.entity';
 import { Commission, CommissionStatus }           from './entities/commission.entity';
 import { Refund, RefundStatus }                   from './entities/refund.entity';
 import { Order, OrderStatus }                     from '../orders/entities/order.entity';
@@ -29,6 +31,7 @@ const DEFAULT_COMMISSION_RATE = 10; // 10%
 
 @Injectable()
 export class PaymentsService {
+  private readonly logger = new Logger(PaymentsService.name);
 
   constructor(
     @InjectRepository(Payment)
@@ -55,6 +58,7 @@ export class PaymentsService {
     private readonly dataSource:    DataSource,
     private readonly mailerService: MailerService,
     private readonly logService:    ActivityLogService,
+    private readonly configService: ConfigService,
   ) {}
 
   // ─────────────────────────────────────────────────────
@@ -115,8 +119,11 @@ export class PaymentsService {
       }
     }
 
-    // 5. Créer le paiement en statut PENDING
-    const payment         = this.paymentRepo.create();
+    // 5. Créer le paiement en statut PENDING — ou réutiliser la ligne
+    //    existante si une tentative précédente a échoué pour cette même
+    //    commande (orderId est unique en base : on ne peut pas en
+    //    insérer une deuxième).
+    const payment         = existingPayment ?? this.paymentRepo.create();
     payment.orderId       = dto.orderId;
     payment.method        = dto.method;
     payment.operator      = dto.operator ?? null;
@@ -135,10 +142,56 @@ export class PaymentsService {
       ipAddress:  ip,
     });
 
-    // ⚠️ En production : ici on appellerait l'API de l'opérateur
-    // (MTN MoMo, Moov Money, Wave, Stripe...)
-    // et on retournerait l'URL de paiement ou le prompt USSD
-    // Pour l'instant on retourne les infos pour simulation
+    // 6. Mobile Money : on demande réellement le paiement à FeexPay
+    //    (MTN / Moov). Les autres méthodes (carte, cash) restent en
+    //    simulation pour le moment — non branchées côté opérateur.
+    if (dto.method === PaymentMethod.MOBILE_MONEY) {
+      const reseau =
+        dto.operator === PaymentOperator.MTN  ? 'MTN'  :
+        dto.operator === PaymentOperator.MOOV ? 'MOOV' : null;
+
+      if (!reseau) {
+        payment.status = PaymentStatus.FAILED;
+        await this.paymentRepo.save(payment);
+        throw new BadRequestException(
+          `L'opérateur "${dto.operator}" n'est pas encore pris en charge `
+          + `via FeexPay (seuls MTN et Moov le sont pour le moment).`
+        );
+      }
+
+      const user = await this.userRepo.findOne({ where: { id: userId } });
+
+      try {
+        const providerRef = await this.callFeexPayRequestToPay({
+          phoneNumber: dto.phoneNumber!,
+          amount:      Number(order.total),
+          reseau,
+          firstName:   user?.prenom ?? 'Client',
+          email:       user?.email ?? '',
+          customId:    payment.id,
+          description: `Commande ${order.orderNumber}`,
+        });
+
+        payment.providerRef = providerRef;
+        await this.paymentRepo.save(payment);
+      } catch (err) {
+        payment.status = PaymentStatus.FAILED;
+        await this.paymentRepo.save(payment);
+        throw err;
+      }
+
+      return {
+        message:   'Demande envoyée. Confirmez le paiement sur votre téléphone.',
+        paymentId: payment.id,
+        amount:    payment.montant,
+        method:    payment.method,
+        operator:  payment.operator,
+      };
+    }
+
+    // ⚠️ En production : pour les autres méthodes (carte, Wave, cash...)
+    // on appellerait l'API correspondante ici.
+    // Pour l'instant on retourne les infos pour simulation.
 
     return {
       message:   'Paiement initié avec succès',
@@ -148,6 +201,239 @@ export class PaymentsService {
       operator:  payment.operator,
       // En production : redirectUrl ou ussdPrompt ici
     };
+  }
+
+  // ─────────────────────────────────────────────────────
+  // APPEL RÉEL À L'API FEEXPAY (requesttopay mobile money)
+  // Référence API confirmée via le SDK PHP officiel de FeexPay :
+  // POST {base}/api/transactions/requesttopay/integration
+  // Corps : phoneNumber, amount, reseau, token, shop, first_name, email
+  // ─────────────────────────────────────────────────────
+  // Récupère l'IP publique sortante du serveur : certains champs FeexPay
+  // (merchant_ip) attendent l'IP réelle du serveur marchand, pas celle du
+  // client. Best-effort : si indisponible, on continue sans (chaîne vide).
+  private async getMerchantPublicIp(): Promise<string> {
+    try {
+      const res = await fetch('https://api.ipify.org?format=json');
+      if (!res.ok) return '';
+      const data: any = await res.json();
+      return data?.ip ?? '';
+    } catch {
+      return '';
+    }
+  }
+
+  // FeexPay attend le numéro au format international SANS "+" : l'indicatif
+  // 229 collé devant le numéro local tel quel (avec son 0 initial).
+  // Ex. confirmé en conditions réelles : "0196782026" -> "2290196782026".
+  // C'est le seul champ qui empêchait le USSD de partir — le reste du
+  // corps/endpoint fonctionne déjà tel quel.
+  private toFeexPayPhoneFormat(phoneNumber: string): string {
+    const digitsOnly = phoneNumber.replace(/[^\d]/g, '');
+    if (digitsOnly.startsWith('229')) return digitsOnly;
+    return `229${digitsOnly}`;
+  }
+
+  private async callFeexPayRequestToPay(params: {
+    phoneNumber: string;
+    amount:      number;
+    reseau:      string;
+    firstName:   string;
+    email:       string;
+    customId:    string;
+    description: string;
+  }): Promise<string> {
+    const token   = this.configService.get<string>('FEEXPAY_API_KEY');
+    const shop    = this.configService.get<string>('FEEXPAY_SHOP_ID');
+    const baseUrl =
+      this.configService.get<string>('FEEXPAY_BASE_URL')
+      ?? 'https://api.feexpay.me';
+
+    if (!token || !shop) {
+      throw new BadRequestException(
+        'FeexPay non configuré côté serveur '
+        + '(FEEXPAY_API_KEY / FEEXPAY_SHOP_ID manquants dans .env)'
+      );
+    }
+
+    const merchantIp = await this.getMerchantPublicIp();
+
+    // ⚠️ Le SDK PHP officiel (plus ancien) envoie ce corps en
+    // x-www-form-urlencoded, mais le SDK React officiel, plus récent,
+    // envoie du JSON ET ajoute un en-tête Authorization: Bearer <token>
+    // en plus du champ "token" dans le corps — c'est ce dernier format
+    // que l'API v2 (api-v2.feexpay.me) attend réellement (confirmé par
+    // la source du SDK @feexpay/react-sdk).
+    // On aligne aussi le corps sur TOUS les champs envoyés par ce SDK :
+    // certains champs qu'on omettait (currency, payment_interface,
+    // merchant_ip, merchant_domain, callback_info, otp, customId,
+    // description) pourraient expliquer pourquoi FeexPay accepte la
+    // demande (HTTP 201) sans jamais déclencher le USSD chez l'opérateur.
+    const body = {
+      phoneNumber:       this.toFeexPayPhoneFormat(params.phoneNumber),
+      amount:            params.amount,
+      reseau:            params.reseau,
+      token,
+      shop,
+      first_name:        params.firstName,
+      email:             params.email,
+      description:       params.description,
+      customId:          params.customId,
+      currency:          'XOF',
+      payment_interface: 'API',
+      callback_info:     {},
+      otp:               '',
+      merchant_domain:
+        this.configService.get<string>('FEEXPAY_MERCHANT_DOMAIN')
+        ?? 'asoukaa.com',
+      merchant_ip:       merchantIp,
+    };
+
+    let response: Response;
+    try {
+      response = await fetch(
+        `${baseUrl}/api/transactions/requesttopay/integration`,
+        {
+          method:  'POST',
+          headers: {
+            'Content-Type':  'application/json',
+            'Authorization': `Bearer ${token}`,
+          },
+          body: JSON.stringify(body),
+        },
+      );
+    } catch (err) {
+      throw new BadRequestException(
+        'Impossible de joindre FeexPay. Vérifiez la connexion internet du serveur.'
+      );
+    }
+
+    // On lit d'abord le texte brut (le corps ne peut être lu qu'une
+    // fois) : si FeexPay ne renvoie pas du JSON valide (page HTML,
+    // texte brut, corps vide...), response.json() planterait sans
+    // qu'on sache jamais ce qui a été réellement reçu.
+    const rawText = await response.text().catch(() => '');
+    let data: any = null;
+    try {
+      data = rawText ? JSON.parse(rawText) : null;
+    } catch {
+      data = null;
+    }
+
+    // Log systématique (succès ET échec) pour voir la vraie forme de la
+    // réponse FeexPay tant qu'elle n'a pas été observée en conditions réelles.
+    console.log(
+      '[FeexPay] Statut HTTP :', response.status,
+      '| Content-Type :', response.headers.get('content-type'),
+      '| Corps brut (texte) :', rawText,
+      '| Corps parsé (JSON) :', JSON.stringify(data),
+    );
+
+    if (!response.ok) {
+      const feexpayMessage =
+        data?.message ?? data?.error ?? data?.error_message
+        ?? data?.errorMessage ?? data?.msg ?? data?.detail;
+      throw new BadRequestException(
+        feexpayMessage
+          ? `FeexPay a refusé la demande de paiement : ${
+              typeof feexpayMessage === 'string' ? feexpayMessage : JSON.stringify(feexpayMessage)
+            }`
+          : `FeexPay a refusé la demande de paiement (HTTP ${response.status}, réponse brute : ${
+              rawText || '(corps vide)'
+            })`
+      );
+    }
+
+    // ⚠️ Le nom exact du champ de référence renvoyé n'a pas encore été
+    // vérifié en conditions réelles (doc FeexPay non accessible) — on
+    // couvre les variantes les plus probables. À ajuster après premier
+    // test réel si nécessaire (voir la réponse brute dans les logs).
+    const reference = data?.reference ?? data?.trans_id ?? data?.id ?? data?._id;
+
+    if (!reference) {
+      throw new BadRequestException(
+        "FeexPay n'a pas renvoyé de référence de transaction exploitable"
+      );
+    }
+
+    return String(reference);
+  }
+
+  // ─────────────────────────────────────────────────────
+  // VÉRIFIER LE STATUT D'UN PAIEMENT (interrogé par l'appli en
+  // attendant que le client confirme sur son téléphone — pas de
+  // webhook possible tant que le backend tourne en local)
+  // ─────────────────────────────────────────────────────
+  async checkPaymentStatus(paymentId: string, userId: string, ip: string) {
+    const payment = await this.paymentRepo.findOne({
+      where:     { id: paymentId },
+      relations: ['order'],
+    });
+
+    if (!payment) throw new NotFoundException('Paiement introuvable');
+    if (payment.order.userId !== userId) {
+      throw new ForbiddenException('Accès refusé');
+    }
+
+    // Déjà finalisé : on renvoie l'état actuel sans rappeler FeexPay
+    if (payment.status !== PaymentStatus.PENDING || !payment.providerRef) {
+      return { status: payment.status };
+    }
+
+    const baseUrl =
+      this.configService.get<string>('FEEXPAY_BASE_URL')
+      ?? 'https://api.feexpay.me';
+    const token = this.configService.get<string>('FEEXPAY_API_KEY');
+
+    // ⚠️ Confirmé en conditions réelles (une autre intégration FeexPay
+    // fonctionnelle utilisant les mêmes clés) : la route de vérification
+    // de statut sur l'API v2 est /api/transactions/public/single/status/{ref},
+    // avec le même en-tête Authorization: Bearer que l'appel de paiement
+    // (contrairement à l'ancienne route du SDK PHP, sans authentification,
+    // qui renvoyait un 404 "Cannot GET" sur ce domaine).
+    const response = await fetch(
+      `${baseUrl}/api/transactions/public/single/status/${payment.providerRef}`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+
+    const rawText = await response.text().catch(() => '');
+    let data: any = null;
+    try {
+      data = rawText ? JSON.parse(rawText) : null;
+    } catch {
+      data = null;
+    }
+    console.log(
+      '[FeexPay] Statut — HTTP :', response.status,
+      '| Corps brut :', rawText,
+    );
+
+    if (!response.ok) {
+      // ⚠️ Ce n'est PAS un vrai statut "en attente" renvoyé par FeexPay :
+      // l'appel HTTP lui-même a échoué (ex. HTTP 404 — cette route n'existe
+      // pas sur l'API v2 au moment de l'écriture de ce code, seulement sur
+      // l'ancien domaine api.feexpay.me). On le distingue clairement pour
+      // ne plus confondre "vérification impossible" et "vraiment en attente".
+      console.warn(
+        `[FeexPay] ⚠️ Vérification de statut impossible (HTTP ${response.status}) `
+        + `pour la référence ${payment.providerRef} — le statut renvoyé au `
+        + `client ("${payment.status}") est notre dernière valeur connue, `
+        + `PAS une confirmation de FeexPay.`
+      );
+      return { status: payment.status, statusCheckFailed: true };
+    }
+
+    const feexStatus = (data?.status ?? data?.statut ?? '').toString().toUpperCase();
+
+    if (['SUCCESSFUL', 'SUCCESS', 'APPROVED'].includes(feexStatus)) {
+      return this.confirmPayment(paymentId, payment.providerRef, ip);
+    }
+
+    if (['FAILED', 'CANCELLED', 'CANCELED', 'ERROR'].includes(feexStatus)) {
+      return this.failPayment(paymentId, ip);
+    }
+
+    return { status: payment.status }; // toujours en attente
   }
 
   // ─────────────────────────────────────────────────────
@@ -219,9 +505,10 @@ export class PaymentsService {
       await this.createCommission(manager, order);
     });
 
-    // 5. Envoyer email de confirmation au client
+    // 5. Envoyer email de confirmation au client (best-effort)
     const user = payment.order.user;
-    await this.mailerService.sendMail({
+    try {
+      await this.mailerService.sendMail({
       to:      user.email,
       subject: `✅ Paiement confirmé — Commande ${payment.order.orderNumber}`,
       html: `
@@ -231,7 +518,10 @@ export class PaymentsService {
            <strong>${payment.order.orderNumber}</strong>.</p>
         <p>Votre commande est maintenant en préparation.</p>
       `,
-    });
+      });
+    } catch (error) {
+      this.logger.error(`Échec envoi mail confirmation paiement → ${user.email}`, error?.message);
+    }
 
     await this.logService.log({
       actorType:  ActorType.SYSTEM,
@@ -360,6 +650,32 @@ export class PaymentsService {
   }
 
   // ─────────────────────────────────────────────────────
+  // CLIENT — MES DEMANDES DE REMBOURSEMENT
+  // (statut : en attente / approuvé / rejetté / traité)
+  // ─────────────────────────────────────────────────────
+  async getMyRefunds(userId: string, page = 1, limit = 10) {
+    const query = this.refundRepo
+      .createQueryBuilder('refund')
+      .innerJoin('refund.order', 'order')
+      .leftJoinAndSelect('refund.order',   'ord')
+      .leftJoinAndSelect('refund.payment', 'payment')
+      .where('order.userId = :userId', { userId })
+      .orderBy('refund.dateDemande', 'DESC')
+      .skip((page - 1) * limit)
+      .take(limit);
+
+    const [refunds, total] = await query.getManyAndCount();
+
+    return {
+      data:  refunds,
+      total,
+      page,
+      limit,
+      pages: Math.ceil(total / limit),
+    };
+  }
+
+  // ─────────────────────────────────────────────────────
   // ADMIN — TRAITER UN REMBOURSEMENT
   // ─────────────────────────────────────────────────────
   async processRefund(
@@ -390,40 +706,46 @@ export class PaymentsService {
       // Marquer le paiement comme remboursé
       refund.payment.status = PaymentStatus.REFUNDED;
       await this.paymentRepo.save(refund.payment);
-
-      // Notifier le client
-      await this.mailerService.sendMail({
-        to:      refund.order.user.email,
-        subject: '✅ Remboursement approuvé',
-        html: `
-          <p>Bonjour ${refund.order.user.prenom},</p>
-          <p>Votre demande de remboursement de 
-             <strong>${refund.montantRemb} FCFA</strong> 
-             pour la commande 
-             <strong>${refund.order.orderNumber}</strong> 
-             a été approuvée.</p>
-          <p>Le montant sera crédité sous 3 à 5 jours ouvrables.</p>
-        `,
-      });
-
     } else {
       refund.status = RefundStatus.REJECTED;
-
-      // Notifier le client du refus
-      await this.mailerService.sendMail({
-        to:      refund.order.user.email,
-        subject: 'Demande de remboursement',
-        html: `
-          <p>Bonjour ${refund.order.user.prenom},</p>
-          <p>Votre demande de remboursement pour la commande 
-             <strong>${refund.order.orderNumber}</strong> 
-             n'a pas pu être approuvée.</p>
-          <p>Pour plus d'informations, contactez notre support.</p>
-        `,
-      });
     }
 
+    // ⚠️ On persiste le statut AVANT l'envoi de l'email : un échec SMTP ne
+    // doit jamais laisser le remboursement dans un état incohérent.
     await this.refundRepo.save(refund);
+
+    // Notifier le client (best-effort)
+    try {
+      if (action === 'approve') {
+        await this.mailerService.sendMail({
+          to:      refund.order.user.email,
+          subject: '✅ Remboursement approuvé',
+          html: `
+            <p>Bonjour ${refund.order.user.prenom},</p>
+            <p>Votre demande de remboursement de 
+               <strong>${refund.montantRemb} FCFA</strong> 
+               pour la commande 
+               <strong>${refund.order.orderNumber}</strong> 
+               a été approuvée.</p>
+            <p>Le montant sera crédité sous 3 à 5 jours ouvrables.</p>
+          `,
+        });
+      } else {
+        await this.mailerService.sendMail({
+          to:      refund.order.user.email,
+          subject: 'Demande de remboursement',
+          html: `
+            <p>Bonjour ${refund.order.user.prenom},</p>
+            <p>Votre demande de remboursement pour la commande 
+               <strong>${refund.order.orderNumber}</strong> 
+               n'a pas pu être approuvée.</p>
+            <p>Pour plus d'informations, contactez notre support.</p>
+          `,
+        });
+      }
+    } catch (error) {
+      this.logger.error(`Échec envoi mail remboursement → ${refund.order.user.email}`, error?.message);
+    }
 
     await this.logService.log({
       actorId:    adminId,
