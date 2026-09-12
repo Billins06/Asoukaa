@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../../widgets/custom_image_widget.dart';
+import '../../../services/api_service.dart';
+import '../../../routes/app_routes.dart';
 
 class ProductTabsWidget extends StatefulWidget {
   final Map<String, dynamic> product;
@@ -15,69 +17,78 @@ class _ProductTabsWidgetState extends State<ProductTabsWidget>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
 
-  static final List<Map<String, dynamic>> _reviewsMaps = [
-    {
-      'name': 'Aminata Coulibaly',
-      'avatar':
-          'https://images.pexels.com/photos/3763188/pexels-photo-3763188.jpeg',
-      'avatarSemanticLabel':
-          'Portrait d\'une femme africaine souriante aux cheveux tressés',
-      'rating': 5,
-      'date': '12 Mars 2026',
-      'comment':
-          'Tissu de très bonne qualité ! Les couleurs sont exactement comme sur les photos. Livraison rapide, je recommande vivement cette boutique.',
-      'reviewImage':
-          'https://images.pexels.com/photos/6153354/pexels-photo-6153354.jpeg',
-      'reviewImageSemanticLabel':
-          'Photo client montrant le tissu wax reçu avec les motifs bien visibles',
-    },
-    {
-      'name': 'Moussa Traoré',
-      'avatar':
-          'https://images.pixabay.com/photo/2016/11/21/12/42/beard-1845166_1280.jpg',
-      'avatarSemanticLabel':
-          'Portrait d\'un homme africain avec barbe courte en chemise blanche',
-      'rating': 4,
-      'date': '8 Mars 2026',
-      'comment':
-          'Bonne qualité globale. Le tissu est solide et les couleurs ne déteint pas au lavage. J\'aurais aimé un emballage un peu plus soigné.',
-      'reviewImage': null,
-      'reviewImageSemanticLabel': null,
-    },
-    {
-      'name': 'Fatou Diallo',
-      'avatar':
-          'https://images.unsplash.com/photo-1531746020798-e6953c6e8e04?w=150',
-      'avatarSemanticLabel':
-          'Portrait d\'une jeune femme africaine avec des boucles d\'oreilles dorées',
-      'rating': 5,
-      'date': '2 Mars 2026',
-      'comment':
-          'Parfait pour mes tenues de cérémonie ! J\'ai commandé 10 yards et je suis ravie. Le vendeur est très réactif et professionnel.',
-      'reviewImage':
-          'https://images.pexels.com/photos/5632398/pexels-photo-5632398.jpeg',
-      'reviewImageSemanticLabel':
-          'Photo de la cliente portant une robe confectionnée avec le tissu commandé',
-    },
-    {
-      'name': 'Koffi Asante',
-      'avatar':
-          'https://images.pixabay.com/photo/2017/08/01/08/29/people-2563491_1280.jpg',
-      'avatarSemanticLabel':
-          'Portrait d\'un homme ghanéen avec lunettes sur fond gris',
-      'rating': 4,
-      'date': '25 Fév 2026',
-      'comment':
-          'Très bon rapport qualité-prix. Le tissu est authentique et de bonne épaisseur. Je reviendrai commander.',
-      'reviewImage': null,
-      'reviewImageSemanticLabel': null,
-    },
-  ];
+  List<Map<String, dynamic>> _reviews = [];
+  double _avgRating = 0;
+  int _reviewCount = 0;
+  bool _isLoadingReviews = true;
+
+  List<Map<String, dynamic>> _similarProducts = [];
+  bool _isLoadingSimilar = true;
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
+    _loadReviews();
+    _loadSimilar();
+  }
+
+  Future<void> _loadReviews() async {
+    final productId = (widget.product['id'] ?? '').toString();
+    if (productId.isEmpty) {
+      if (mounted) setState(() => _isLoadingReviews = false);
+      return;
+    }
+    try {
+      final res = await ApiService.instance.client.get(
+        '/api/v1/reviews/product/$productId',
+        queryParameters: {'limit': 20},
+      );
+      final data = res.data as Map<String, dynamic>? ?? {};
+      final list = (data['data'] as List<dynamic>? ?? [])
+          .whereType<Map>()
+          .map((r) => Map<String, dynamic>.from(r))
+          .toList();
+      if (mounted) {
+        setState(() {
+          _reviews = list;
+          _avgRating = (data['avgRating'] as num? ?? 0).toDouble();
+          _reviewCount = (data['reviewCount'] as num? ?? list.length).toInt();
+          _isLoadingReviews = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _isLoadingReviews = false);
+    }
+  }
+
+  Future<void> _loadSimilar() async {
+    final categoryId = (widget.product['categoryId'] ?? '').toString();
+    final currentId = (widget.product['id'] ?? '').toString();
+    if (categoryId.isEmpty) {
+      if (mounted) setState(() => _isLoadingSimilar = false);
+      return;
+    }
+    try {
+      final res = await ApiService.instance.client.get(
+        '/api/v1/products',
+        queryParameters: {'categoryId': categoryId, 'limit': 8},
+      );
+      final data = res.data as Map<String, dynamic>? ?? {};
+      final list = (data['data'] as List<dynamic>? ?? [])
+          .whereType<Map>()
+          .map((p) => Map<String, dynamic>.from(p))
+          .where((p) => (p['id'] ?? '').toString() != currentId)
+          .toList();
+      if (mounted) {
+        setState(() {
+          _similarProducts = list;
+          _isLoadingSimilar = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _isLoadingSimilar = false);
+    }
   }
 
   @override
@@ -107,10 +118,10 @@ class _ProductTabsWidgetState extends State<ProductTabsWidget>
               fontSize: 13,
               fontWeight: FontWeight.w400,
             ),
-            tabs: const [
-              Tab(text: 'Description'),
-              Tab(text: 'Avis (234)'),
-              Tab(text: 'Similaires'),
+            tabs: [
+              const Tab(text: 'Description'),
+              Tab(text: 'Avis ($_reviewCount)'),
+              const Tab(text: 'Similaires'),
             ],
           ),
           const Divider(height: 1, color: Color(0xFFF0F0F0)),
@@ -238,8 +249,48 @@ class _ProductTabsWidgetState extends State<ProductTabsWidget>
   }
 
   Widget _buildReviewsTab() {
-    // Rating breakdown
-    final ratingCounts = [0, 3, 12, 45, 82, 92]; // index = stars
+    if (_isLoadingReviews) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(32),
+          child: CircularProgressIndicator(color: Color(0xFFFF6210)),
+        ),
+      );
+    }
+
+    if (_reviews.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(
+                Icons.rate_review_outlined,
+                size: 40,
+                color: Color(0xFFBDBDBD),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'Aucun avis pour ce produit pour le moment',
+                textAlign: TextAlign.center,
+                style: GoogleFonts.outfit(
+                  fontSize: 13,
+                  color: const Color(0xFF9E9E9E),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    // Rating breakdown calculé à partir des avis chargés
+    final ratingCounts = [0, 0, 0, 0, 0, 0]; // index = stars (1..5)
+    for (final r in _reviews) {
+      final n = (r['notation'] as num?)?.toInt() ?? 0;
+      if (n >= 1 && n <= 5) ratingCounts[n]++;
+    }
     final total = ratingCounts.reduce((a, b) => a + b).toDouble();
 
     return SingleChildScrollView(
@@ -255,7 +306,7 @@ class _ProductTabsWidgetState extends State<ProductTabsWidget>
               Column(
                 children: [
                   Text(
-                    '4.8',
+                    _avgRating.toStringAsFixed(1),
                     style: GoogleFonts.outfit(
                       fontSize: 48,
                       fontWeight: FontWeight.w800,
@@ -274,7 +325,7 @@ class _ProductTabsWidgetState extends State<ProductTabsWidget>
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    '234 avis',
+                    '$_reviewCount avis',
                     style: GoogleFonts.outfit(
                       fontSize: 12,
                       fontWeight: FontWeight.w400,
@@ -344,8 +395,8 @@ class _ProductTabsWidgetState extends State<ProductTabsWidget>
             ],
           ),
           const SizedBox(height: 20),
-          ...List.generate(_reviewsMaps.length, (index) {
-            final r = _reviewsMaps[index];
+          ...List.generate(_reviews.length, (index) {
+            final r = _reviews[index];
             return Padding(
               padding: const EdgeInsets.only(bottom: 16),
               child: _ReviewItem(review: r),
@@ -357,126 +408,142 @@ class _ProductTabsWidgetState extends State<ProductTabsWidget>
   }
 
   Widget _buildSimilarTab() {
-    final similarProducts = [
-      {
-        'id': 's1',
-        'name': 'Tissu Wax Hollandais 6Y',
-        'price': 22000,
-        'rating': 4.6,
-        'imageUrl':
-            'https://img.rocket.new/generatedImages/rocket_gen_img_1078d5d8c-1772633811639.png',
-        'semanticLabel':
-            'Tissu wax hollandais avec motifs floraux jaunes et rouges plié sur comptoir',
-      },
-      {
-        'id': 's2',
-        'name': 'Tissu Bazin Riche 5Y',
-        'price': 28000,
-        'rating': 4.9,
-        'imageUrl':
-            'https://images.unsplash.com/photo-1715381043637-432896c98033',
-        'semanticLabel':
-            'Tissu bazin riche bleu royal brillant avec reflets argentés sur une table',
-      },
-      {
-        'id': 's3',
-        'name': 'Tissu Kente Ghana 4Y',
-        'price': 35000,
-        'rating': 4.7,
-        'imageUrl':
-            'https://img.rocket.new/generatedImages/rocket_gen_img_10f1d6997-1773009373335.png',
-        'semanticLabel':
-            'Tissu kente ghanéen traditionnel avec bandes multicolores dorées et vertes',
-      },
-      {
-        'id': 's4',
-        'name': 'Tissu Wax Imprimé 6Y',
-        'price': 16000,
-        'rating': 4.4,
-        'imageUrl':
-            'https://img.rocket.new/generatedImages/rocket_gen_img_16ccffa58-1765354970418.png',
-        'semanticLabel':
-            'Tissu wax imprimé avec motifs abstraits colorés bleu et orange déroulé',
-      },
-    ];
+    if (_isLoadingSimilar) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(32),
+          child: CircularProgressIndicator(color: Color(0xFFFF6210)),
+        ),
+      );
+    }
+
+    if (_similarProducts.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(
+                Icons.category_outlined,
+                size: 40,
+                color: Color(0xFFBDBDBD),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'Aucun produit similaire pour le moment',
+                textAlign: TextAlign.center,
+                style: GoogleFonts.outfit(
+                  fontSize: 13,
+                  color: const Color(0xFF9E9E9E),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
 
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
       physics: const BouncingScrollPhysics(),
       padding: const EdgeInsets.all(16),
       child: Row(
-        children: similarProducts.map((p) {
-          return Container(
-            width: 140,
-            margin: const EdgeInsets.only(right: 12),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: const Color(0xFFE0E0E0), width: 1),
+        children: _similarProducts.map((p) {
+          final name = p['prod_name'] as String? ?? 'Produit';
+          final price = (double.tryParse(p['basePrice']?.toString() ?? '') ?? 0)
+              .toInt();
+          final rating = (p['noteMoyenne'] as num?)?.toDouble() ?? 0;
+          final images = p['images'];
+          String imageUrl = '';
+          if (images is List && images.isNotEmpty) {
+            final first = images.first;
+            if (first is Map && first['url'] != null) {
+              imageUrl = first['url'].toString();
+            }
+          }
+          if (imageUrl.isEmpty) {
+            imageUrl =
+                'https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=400';
+          }
+          return GestureDetector(
+            onTap: () => Navigator.pushNamed(
+              context,
+              AppRoutes.productDetail,
+              arguments: {'id': p['id']},
             ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                ClipRRect(
-                  borderRadius: const BorderRadius.vertical(
-                    top: Radius.circular(14),
+            child: Container(
+              width: 140,
+              margin: const EdgeInsets.only(right: 12),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: const Color(0xFFE0E0E0), width: 1),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  ClipRRect(
+                    borderRadius: const BorderRadius.vertical(
+                      top: Radius.circular(14),
+                    ),
+                    child: CustomImageWidget(
+                      imageUrl: imageUrl,
+                      width: 140,
+                      height: 120,
+                      fit: BoxFit.cover,
+                      semanticLabel: 'Image du produit $name',
+                    ),
                   ),
-                  child: CustomImageWidget(
-                    imageUrl: p['imageUrl'] as String,
-                    width: 140,
-                    height: 120,
-                    fit: BoxFit.cover,
-                    semanticLabel: p['semanticLabel'] as String,
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.all(10),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        p['name'] as String,
-                        style: GoogleFonts.outfit(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                          color: const Color(0xFF1A1A1A),
-                        ),
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      const SizedBox(height: 4),
-                      Row(
-                        children: [
-                          const Icon(
-                            Icons.star_rounded,
-                            size: 11,
-                            color: Color(0xFFD97706),
+                  Padding(
+                    padding: const EdgeInsets.all(10),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          name,
+                          style: GoogleFonts.outfit(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: const Color(0xFF1A1A1A),
                           ),
-                          const SizedBox(width: 2),
-                          Text(
-                            '${p['rating']}',
-                            style: GoogleFonts.outfit(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w500,
-                              color: const Color(0xFF1A1A1A),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        const SizedBox(height: 4),
+                        Row(
+                          children: [
+                            const Icon(
+                              Icons.star_rounded,
+                              size: 11,
+                              color: Color(0xFFD97706),
                             ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 6),
-                      Text(
-                        '${_fmt(p['price'] as int)} FCFA',
-                        style: GoogleFonts.outfit(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w700,
-                          color: const Color(0xFFFF6210),
-                          fontFeatures: const [FontFeature.tabularFigures()],
+                            const SizedBox(width: 2),
+                            Text(
+                              rating.toStringAsFixed(1),
+                              style: GoogleFonts.outfit(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w500,
+                                color: const Color(0xFF1A1A1A),
+                              ),
+                            ),
+                          ],
                         ),
-                      ),
-                    ],
+                        const SizedBox(height: 6),
+                        Text(
+                          '${_fmt(price)} FCFA',
+                          style: GoogleFonts.outfit(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                            color: const Color(0xFFFF6210),
+                            fontFeatures: const [FontFeature.tabularFigures()],
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           );
         }).toList(),
@@ -500,10 +567,28 @@ class _ReviewItem extends StatelessWidget {
 
   const _ReviewItem({required this.review});
 
+  String _formatDate(dynamic raw) {
+    final s = raw?.toString() ?? '';
+    if (s.isEmpty) return '';
+    final d = DateTime.tryParse(s);
+    if (d == null) return '';
+    const mois = [
+      'Jan', 'Fév', 'Mars', 'Avr', 'Mai', 'Juin',
+      'Juil', 'Août', 'Sept', 'Oct', 'Nov', 'Déc',
+    ];
+    return '${d.day} ${mois[d.month - 1]} ${d.year}';
+  }
+
   @override
   Widget build(BuildContext context) {
-    final rating = review['rating'] as int;
-    final hasImage = review['reviewImage'] != null;
+    final rating = (review['notation'] as num?)?.toInt() ?? 0;
+    final comment = review['comment'] as String? ?? '';
+    final date = _formatDate(review['createdAt']);
+    final user = review['user'];
+    final prenom = user is Map ? (user['prenom'] as String? ?? '') : '';
+    final nom = user is Map ? (user['name'] as String? ?? '') : '';
+    final displayName = ('$prenom $nom').trim();
+    final initial = displayName.isNotEmpty ? displayName[0].toUpperCase() : '?';
 
     return Container(
       padding: const EdgeInsets.all(14),
@@ -517,14 +602,16 @@ class _ReviewItem extends StatelessWidget {
         children: [
           Row(
             children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(999),
-                child: CustomImageWidget(
-                  imageUrl: review['avatar'] as String,
-                  width: 36,
-                  height: 36,
-                  fit: BoxFit.cover,
-                  semanticLabel: review['avatarSemanticLabel'] as String,
+              CircleAvatar(
+                radius: 18,
+                backgroundColor: const Color(0xFFFFE4D1),
+                child: Text(
+                  initial,
+                  style: GoogleFonts.outfit(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    color: const Color(0xFFFF6210),
+                  ),
                 ),
               ),
               const SizedBox(width: 10),
@@ -533,21 +620,22 @@ class _ReviewItem extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      review['name'] as String,
+                      displayName.isNotEmpty ? displayName : 'Client Asoukaa',
                       style: GoogleFonts.outfit(
                         fontSize: 13,
                         fontWeight: FontWeight.w700,
                         color: const Color(0xFF1A1A1A),
                       ),
                     ),
-                    Text(
-                      review['date'] as String,
-                      style: GoogleFonts.outfit(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w400,
-                        color: const Color(0xFF9E9E9E),
+                    if (date.isNotEmpty)
+                      Text(
+                        date,
+                        style: GoogleFonts.outfit(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w400,
+                          color: const Color(0xFF9E9E9E),
+                        ),
                       ),
-                    ),
                   ],
                 ),
               ),
@@ -565,26 +653,15 @@ class _ReviewItem extends StatelessWidget {
               ),
             ],
           ),
-          const SizedBox(height: 10),
-          Text(
-            review['comment'] as String,
-            style: GoogleFonts.outfit(
-              fontSize: 13,
-              fontWeight: FontWeight.w400,
-              color: const Color(0xFF616161),
-              height: 1.5,
-            ),
-          ),
-          if (hasImage) ...[
+          if (comment.isNotEmpty) ...[
             const SizedBox(height: 10),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(10),
-              child: CustomImageWidget(
-                imageUrl: review['reviewImage'] as String,
-                width: 100,
-                height: 80,
-                fit: BoxFit.cover,
-                semanticLabel: review['reviewImageSemanticLabel'] as String,
+            Text(
+              comment,
+              style: GoogleFonts.outfit(
+                fontSize: 13,
+                fontWeight: FontWeight.w400,
+                color: const Color(0xFF616161),
+                height: 1.5,
               ),
             ),
           ],

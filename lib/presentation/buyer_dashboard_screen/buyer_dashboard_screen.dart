@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -14,6 +16,8 @@ import '../import_assiste_screen/import_assiste_screen.dart';
 import '../notifications_screen/notifications_screen.dart';
 import '../../services/nest_auth_service.dart';
 import '../../services/api_service.dart';
+import '../../routes/app_routes.dart';
+import '../../widgets/app_toast.dart';
 
 class BuyerDashboardScreen extends StatefulWidget {
   const BuyerDashboardScreen({super.key});
@@ -58,6 +62,15 @@ class _BuyerDashboardScreenState extends State<BuyerDashboardScreen>
     });
   }
 
+  Future<void> _fetchUnreadNotifications() async {
+    try {
+      final res = await ApiService.instance.client
+          .get('/api/v1/notifications/unread-count');
+      final count = res.data is Map ? res.data['unreadCount'] as int? : null;
+      if (mounted) setState(() => _unreadNotifications = count ?? 0);
+    } catch (_) {}
+  }
+
   Future<void> _loadData() async {
     setState(() {
       _isLoading = true;
@@ -84,12 +97,25 @@ class _BuyerDashboardScreenState extends State<BuyerDashboardScreen>
         return;
       }
 
-      final response = await ApiService.instance.client.get('/api/v1/orders');
+      final response = await ApiService.instance.client.get('/api/v1/orders/me');
       final rawList = response.data is List
           ? response.data as List
           : (response.data is Map
               ? (response.data['data'] as List? ?? [])
               : <dynamic>[]);
+
+      List<Map<String, dynamic>> favorites = [];
+      try {
+        final wishlistRes =
+            await ApiService.instance.client.get('/api/v1/wishlist');
+        final wishlistRaw = wishlistRes.data is Map
+            ? (wishlistRes.data['data'] as List? ?? [])
+            : (wishlistRes.data is List ? wishlistRes.data as List : <dynamic>[]);
+        favorites = wishlistRaw
+            .whereType<Map>()
+            .map((e) => _normalizeFavorite(Map<String, dynamic>.from(e)))
+            .toList();
+      } catch (_) {}
 
       if (mounted) {
         setState(() {
@@ -97,13 +123,13 @@ class _BuyerDashboardScreenState extends State<BuyerDashboardScreen>
               .whereType<Map>()
               .map((e) => _normalizeOrder(Map<String, dynamic>.from(e)))
               .toList();
-          _favorites = [];
-          _unreadNotifications = 0;
+          _favorites = favorites;
           _isLoading = false;
           _isOfflineCached = false;
           _hasConnectionError = false;
         });
       }
+      unawaited(_fetchUnreadNotifications());
     } catch (_) {
       if (mounted) {
         setState(() {
@@ -124,42 +150,76 @@ class _BuyerDashboardScreenState extends State<BuyerDashboardScreen>
     return buf.toString();
   }
 
+  static Map<String, dynamic> _normalizeFavorite(Map<String, dynamic> w) {
+    final product = w['product'] as Map<String, dynamic>? ?? {};
+
+    final images =
+        (product['images'] as List?)?.whereType<Map>().toList() ?? [];
+    final imageUrl = images.isNotEmpty
+        ? (images.first['url'] as String? ?? '')
+        : 'https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=400';
+
+    final vendor = product['vendor'] as Map<String, dynamic>?;
+    final sellerName = vendor?['shopName'] as String? ?? 'Boutique Asoukaa';
+
+    final rawPrice = product['basePrice'];
+    final amount = rawPrice is num
+        ? rawPrice.round()
+        : (double.tryParse(rawPrice?.toString() ?? '') ?? 0).round();
+
+    return {
+      'id': (product['id'] ?? w['productId'] ?? '').toString(),
+      'name': product['prod_name'] as String? ?? 'Produit',
+      'seller': sellerName,
+      'price': '${_formatPrice(amount)} FCFA',
+      'image': imageUrl,
+      'rating': product['noteMoyenne'] ?? 0,
+      'inStock': true,
+    };
+  }
+
   static Map<String, dynamic> _normalizeOrder(Map<String, dynamic> o) {
-    final items = o['orderItems'] as List<dynamic>? ?? [];
+    // ⚠️ Le backend renvoie la relation OneToMany sous le nom "items"
+    // (pas "orderItems"), et chaque item pointe vers "variant.product"
+    // (pas directement "product").
+    final items = o['items'] as List<dynamic>? ?? [];
     final firstItem =
         items.isNotEmpty ? items[0] as Map<String, dynamic>? : null;
-    final product =
-        (firstItem?['product'] ?? firstItem?['productDetails']) as Map? ?? {};
+    final variant = firstItem?['variant'] as Map<String, dynamic>?;
+    final product = (variant?['product']) as Map<String, dynamic>? ?? {};
 
+    // Le backend renvoie le statut en français ('en attente', 'en cours',
+    // 'expedié', 'livré', 'annulé') — il n'y a ni 'processing'/'shipped'
+    // en anglais, ni de statut 'completed'/'failed' distinct côté serveur.
     final statusStr = (o['status'] as String? ?? '').toLowerCase();
     OrderStatus status;
     switch (statusStr) {
-      case 'processing':
+      case 'en cours':
         status = OrderStatus.processing;
-      case 'shipped':
+      case 'expedié':
         status = OrderStatus.inDelivery;
-      case 'delivered':
-        status = OrderStatus.confirmed;
-      case 'completed':
+      case 'livré':
         status = OrderStatus.completed;
-      case 'cancelled':
+      case 'annulé':
         status = OrderStatus.cancelled;
-      case 'failed':
-        status = OrderStatus.failed;
       default:
-        status = OrderStatus.received;
+        status = OrderStatus.received; // 'en attente' et cas par défaut
     }
 
     final steps = [
       true,
-      ['processing', 'shipped', 'delivered', 'completed']
-          .contains(statusStr),
-      ['shipped', 'delivered', 'completed'].contains(statusStr),
-      ['delivered', 'completed'].contains(statusStr),
-      statusStr == 'completed',
+      ['en cours', 'expedié', 'livré'].contains(statusStr),
+      ['expedié', 'livré'].contains(statusStr),
+      statusStr == 'livré',
+      statusStr == 'livré',
     ];
 
-    final amount = (o['totalAmount'] as num? ?? 0).toInt();
+    // Le champ s'appelle "total" côté backend (pas "totalAmount"), et
+    // TypeORM sérialise les colonnes "decimal" en chaîne de caractères
+    // (ex: "15000.00"), pas en nombre JSON — un cast direct "as num"
+    // plante ici (c'est ce qui causait l'écran "Impossible de charger
+    // le tableau de bord" alors que l'appel API réussissait bien).
+    final amount = (double.tryParse(o['total']?.toString() ?? '') ?? 0).toInt();
     final dateStr = o['createdAt'] as String? ?? '';
     String shortDate = '';
     if (dateStr.isNotEmpty) {
@@ -174,22 +234,76 @@ class _BuyerDashboardScreenState extends State<BuyerDashboardScreen>
 
     final rawId = (o['id'] ?? '').toString();
     final shortId = rawId.length >= 8 ? rawId.substring(0, 8).toUpperCase() : rawId.toUpperCase();
-    final imageUrl = product['imageUrl'] as String? ??
-        product['image_url'] as String? ??
+
+    // Les images sont une liste (relation "images"), avec un booléen
+    // "isPrimary" — pas un champ "imageUrl"/"image_url" direct.
+    final images =
+        (product['images'] as List?)?.whereType<Map>().toList() ?? [];
+    Map? primaryImage;
+    for (final img in images) {
+      if (img['isPrimary'] == true) {
+        primaryImage = img;
+        break;
+      }
+    }
+    primaryImage ??= images.isNotEmpty ? images.first : null;
+    final imageUrl = primaryImage?['url'] as String? ??
         'https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=400';
-    final sellerName = (firstItem?['vendor'] as Map?)?['shopName'] as String? ??
-        'Boutique Asoukaa';
+
+    // Le vendeur est une relation directe sur la commande (o['vendor']),
+    // pas sur chaque item.
+    final vendor = o['vendor'] as Map<String, dynamic>?;
+    final sellerName = vendor?['shopName'] as String? ?? 'Boutique Asoukaa';
+
+    // Adresse de livraison réelle (relation "address"), utilisée pour
+    // pré-remplir l'écran de suivi détaillé quand on y navigue depuis ici.
+    final address = o['address'] as Map<String, dynamic>?;
+    final recipientName = (address?['nom_destinataire'] as String? ?? '').trim();
+    final nameParts = recipientName.isNotEmpty ? recipientName.split(' ') : <String>[];
+    final recipientFirstName = nameParts.isNotEmpty ? nameParts.first : '';
+    final recipientLastName =
+        nameParts.length > 1 ? nameParts.sublist(1).join(' ') : '';
+
+    // Tous les articles de la commande (pas seulement le premier affiché),
+    // avec leur variantId réel — nécessaire pour "Recommander".
+    final cartItems = items
+        .whereType<Map>()
+        .map((it) {
+          final v = it['variant'] as Map<String, dynamic>?;
+          return {
+            'variantId': v?['id'] as String? ?? '',
+            'quantity': it['quantity'] as int? ?? 1,
+          };
+        })
+        .where((e) => (e['variantId'] as String).isNotEmpty)
+        .toList();
 
     return {
       'id': '#ASK-$shortId',
-      'product': product['name'] as String? ?? 'Produit',
+      // UUID réel de la commande — nécessaire pour le suivi en direct
+      // (GET /orders/{id}) et pour la navigation vers l'écran de suivi.
+      'orderId': rawId,
+      'orderNumber': o['orderNumber'] as String? ?? '',
+      // Le champ s'appelle "prod_name" côté backend (pas "name")
+      'product': product['prod_name'] as String? ?? 'Produit',
+      'productId': (product['id'] ?? '').toString(),
       'seller': sellerName,
       'price': '${_formatPrice(amount)} FCFA',
       'image': imageUrl,
       'status': status,
+      // Statut brut ('en attente', 'en cours', 'expedié', 'livré', 'annulé')
+      // tel que renvoyé par le backend, pour l'écran de suivi.
+      'rawStatus': statusStr,
       'steps': steps,
       'date': shortDate,
       'canReorder': status == OrderStatus.completed,
+      'cartItems': cartItems,
+      'address': address?['quartier'] as String? ?? '',
+      'city': address?['ville'] as String? ?? '',
+      'country': address?['country'] as String? ?? 'Bénin',
+      'phone': address?['phone_destinataire'] as String? ?? '',
+      'firstName': recipientFirstName,
+      'lastName': recipientLastName,
     };
   }
 
@@ -260,12 +374,15 @@ class _BuyerDashboardScreenState extends State<BuyerDashboardScreen>
                     ),
                     const Spacer(),
                     GestureDetector(
-                      onTap: () => Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => const NotificationsScreen(),
-                        ),
-                      ),
+                      onTap: () async {
+                        await Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => const NotificationsScreen(),
+                          ),
+                        );
+                        _fetchUnreadNotifications();
+                      },
                       child: Container(
                         width: 38,
                         height: 38,
@@ -275,6 +392,7 @@ class _BuyerDashboardScreenState extends State<BuyerDashboardScreen>
                           borderRadius: BorderRadius.circular(10),
                         ),
                         child: Stack(
+                          clipBehavior: Clip.none,
                           children: [
                             const Center(
                               child: Icon(
@@ -283,18 +401,36 @@ class _BuyerDashboardScreenState extends State<BuyerDashboardScreen>
                                 size: 20,
                               ),
                             ),
-                            Positioned(
-                              top: 6,
-                              right: 6,
-                              child: Container(
-                                width: 8,
-                                height: 8,
-                                decoration: const BoxDecoration(
-                                  color: AppTheme.primary,
-                                  shape: BoxShape.circle,
+                            if (_unreadNotifications > 0)
+                              Positioned(
+                                top: -2,
+                                right: -2,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                                  constraints: const BoxConstraints(
+                                    minWidth: 15,
+                                    minHeight: 15,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: AppTheme.primary,
+                                    borderRadius: BorderRadius.circular(999),
+                                    border: Border.all(color: Colors.white, width: 1.5),
+                                  ),
+                                  child: Center(
+                                    child: Text(
+                                      _unreadNotifications > 9
+                                          ? '9+'
+                                          : '$_unreadNotifications',
+                                      style: const TextStyle(
+                                        fontSize: 9,
+                                        fontWeight: FontWeight.w700,
+                                        color: Colors.white,
+                                        height: 1.2,
+                                      ),
+                                    ),
+                                  ),
                                 ),
                               ),
-                            ),
                           ],
                         ),
                       ),
@@ -595,7 +731,28 @@ class _OrderCard extends StatelessWidget {
     final isCancelled =
         status == OrderStatus.cancelled || status == OrderStatus.failed;
 
-    return Container(
+    return GestureDetector(
+      onTap: () {
+        final orderId = order['orderId'] as String?;
+        if (orderId == null || orderId.isEmpty) return;
+        Navigator.pushNamed(
+          context,
+          AppRoutes.orderTracking,
+          arguments: {
+            'orderId': orderId,
+            'productId': order['productId'],
+            'status': order['rawStatus'],
+            'orderNumber': order['orderNumber'],
+            'firstName': order['firstName'],
+            'lastName': order['lastName'],
+            'address': order['address'],
+            'city': order['city'],
+            'country': order['country'],
+            'phone': order['phone'],
+          },
+        );
+      },
+      child: Container(
       decoration: BoxDecoration(
         color: AppTheme.surface,
         borderRadius: BorderRadius.circular(16),
@@ -724,6 +881,7 @@ class _OrderCard extends StatelessWidget {
             ),
           ],
         ],
+      ),
       ),
     );
   }
@@ -862,6 +1020,26 @@ class _FavoritesTabState extends State<_FavoritesTab> {
     _favorites = List.from(widget.favorites);
   }
 
+  Future<void> _removeFavorite(int index) async {
+    final productId = (_favorites[index]['id'] ?? '').toString();
+    if (productId.isEmpty) return;
+    try {
+      await ApiService.instance.client.delete('/api/v1/wishlist/$productId');
+      if (mounted) {
+        setState(() => _favorites.removeAt(index));
+        AppToast.show(context, message: 'Retiré de la liste de souhaits');
+      }
+    } catch (_) {
+      if (mounted) {
+        AppToast.show(
+          context,
+          message: 'Erreur lors de la suppression',
+          type: ToastType.error,
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_favorites.isEmpty) {
@@ -888,7 +1066,7 @@ class _FavoritesTabState extends State<_FavoritesTab> {
         final item = _favorites[index];
         return _FavoriteCard(
           item: item,
-          onRemove: () => setState(() => _favorites.removeAt(index)),
+          onRemove: () => _removeFavorite(index),
         );
       },
     );
@@ -1085,6 +1263,54 @@ class _HistoryCard extends StatelessWidget {
 
   const _HistoryCard({required this.item});
 
+  Future<void> _reorder(BuildContext context) async {
+    final cartItems = (item['cartItems'] as List<dynamic>? ?? [])
+        .whereType<Map>()
+        .toList();
+    if (cartItems.isEmpty) {
+      AppToast.show(
+        context,
+        message: 'Impossible de recommander cet article.',
+        type: ToastType.error,
+      );
+      return;
+    }
+    var addedCount = 0;
+    for (final ci in cartItems) {
+      final variantId = ci['variantId'] as String? ?? '';
+      final quantity = ci['quantity'] as int? ?? 1;
+      if (variantId.isEmpty) continue;
+      try {
+        await ApiService.instance.client.post(
+          '/api/v1/cart/items',
+          data: {'variantId': variantId, 'quantity': quantity},
+        );
+        addedCount++;
+      } catch (_) {
+        // On continue avec les autres articles même si l'un échoue
+        // (ex: stock épuisé entre-temps) plutôt que d'abandonner.
+      }
+    }
+    if (!context.mounted) return;
+    if (addedCount > 0) {
+      AppToast.show(
+        context,
+        message: addedCount == cartItems.length
+            ? 'Article(s) ajouté(s) au panier.'
+            : 'Certains articles ont été ajoutés au panier (stock '
+                'insuffisant pour les autres).',
+        type: ToastType.success,
+      );
+      Navigator.pushNamed(context, AppRoutes.cart);
+    } else {
+      AppToast.show(
+        context,
+        message: 'Impossible d\'ajouter ces articles au panier (stock épuisé ?).',
+        type: ToastType.error,
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final status = item['status'] as OrderStatus;
@@ -1164,7 +1390,7 @@ class _HistoryCard extends StatelessWidget {
                     const Spacer(),
                     if (canReorder)
                       GestureDetector(
-                        onTap: () {},
+                        onTap: () => _reorder(context),
                         child: Container(
                           padding: const EdgeInsets.symmetric(
                             horizontal: 10,
@@ -1205,70 +1431,125 @@ class _NotificationsTab extends StatefulWidget {
 }
 
 class _NotificationsTabState extends State<_NotificationsTab> {
-  // 🔧 FIX: Must NOT be const — items are mutated (isRead toggled at runtime).
-  // A const List contains unmodifiable Maps; writing n['isRead'] = true throws
-  // "Cannot modify an unmodifiable map" at runtime.
-  final List<Map<String, dynamic>> _notifications = [
-    {
-      'icon': Icons.local_shipping_rounded,
-      'iconColor': AppTheme.primary,
-      'iconBg': AppTheme.primaryMuted,
-      'title': 'Commande en livraison',
-      'body':
-          'Votre commande #ASK-2024-001 est en route. Livraison prévue aujourd\'hui.',
-      'time': 'Il y a 2h',
-      'isRead': false,
-    },
-    {
-      'icon': Icons.check_circle_rounded,
-      'iconColor': AppTheme.success,
-      'iconBg': AppTheme.successContainer,
-      'title': 'Paiement confirmé',
-      'body':
-          'Votre paiement de 28 500 FCFA pour la commande #ASK-2024-002 a été accepté.',
-      'time': 'Il y a 5h',
-      'isRead': false,
-    },
-    {
-      'icon': Icons.local_offer_rounded,
-      'iconColor': const Color(0xFFD97706),
-      'iconBg': const Color(0xFFFEF3C7),
-      'title': 'Promotion Flash !',
-      'body':
-          'Boutique Cotonou Mode offre -20% sur tous les boubous jusqu\'à minuit.',
-      'time': 'Hier',
-      'isRead': true,
-    },
-    {
-      'icon': Icons.star_rounded,
-      'iconColor': const Color(0xFFFFB800),
-      'iconBg': const Color(0xFFFFFBEB),
-      'title': 'Donnez votre avis',
-      'body':
-          'Votre commande #ASK-2023-089 est terminée. Partagez votre expérience !',
-      'time': 'Il y a 3 jours',
-      'isRead': true,
-    },
-    {
-      'icon': Icons.cancel_rounded,
-      'iconColor': AppTheme.error,
-      'iconBg': AppTheme.errorContainer,
-      'title': 'Commande annulée',
-      'body':
-          'La commande #ASK-2024-004 a été annulée. Le remboursement sera traité sous 48h.',
-      'time': 'Il y a 5 jours',
-      'isRead': true,
-    },
-    {
-      'icon': Icons.inventory_2_rounded,
-      'iconColor': const Color(0xFF7C3AED),
-      'iconBg': const Color(0xFFEDE9FE),
-      'title': 'Commande reçue',
-      'body': 'Votre commande #ASK-2024-003 a bien été reçue par le vendeur.',
-      'time': 'Il y a 1 semaine',
-      'isRead': true,
-    },
-  ];
+  List<Map<String, dynamic>> _notifications = [];
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadNotifications();
+  }
+
+  Future<void> _loadNotifications() async {
+    setState(() => _isLoading = true);
+    try {
+      final response =
+          await ApiService.instance.client.get('/api/v1/notifications?limit=10');
+      final rawData = response.data;
+      final rawList = rawData is List
+          ? rawData
+          : (rawData is Map
+              ? (rawData['data'] ?? rawData['items'] ?? []) as List
+              : <dynamic>[]);
+      if (mounted) {
+        setState(() {
+          _notifications = rawList
+              .whereType<Map>()
+              .map((e) => _normalizeNotif(Map<String, dynamic>.from(e)))
+              .toList();
+          _isLoading = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  static IconData _iconForType(String type) {
+    switch (type) {
+      case 'commande':
+        return Icons.inventory_2_rounded;
+      case 'livraison':
+        return Icons.local_shipping_rounded;
+      case 'chat':
+        return Icons.chat_bubble_outline_rounded;
+      case 'promo':
+        return Icons.local_offer_rounded;
+      default:
+        return Icons.notifications_rounded;
+    }
+  }
+
+  static Color _colorForType(String type) {
+    switch (type) {
+      case 'commande':
+        return const Color(0xFF7C3AED);
+      case 'livraison':
+        return AppTheme.primary;
+      case 'chat':
+        return AppTheme.primary;
+      case 'promo':
+        return const Color(0xFFD97706);
+      default:
+        return AppTheme.muted;
+    }
+  }
+
+  static String _formatDate(String? isoDate) {
+    if (isoDate == null) return '';
+    try {
+      final dt = DateTime.parse(isoDate).toLocal();
+      final diff = DateTime.now().difference(dt);
+      if (diff.inMinutes < 1) return 'À l\'instant';
+      if (diff.inMinutes < 60) return 'Il y a ${diff.inMinutes} min';
+      if (diff.inHours < 24) return 'Il y a ${diff.inHours}h';
+      if (diff.inDays == 1) return 'Hier';
+      return 'Il y a ${diff.inDays} jours';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  static Map<String, dynamic> _normalizeNotif(Map<String, dynamic> n) {
+    final type = n['type'] as String? ?? 'systeme';
+    final color = _colorForType(type);
+    return {
+      'id': (n['id'] ?? '').toString(),
+      'icon': _iconForType(type),
+      'iconColor': color,
+      'iconBg': color.withAlpha(30),
+      'title': n['title'] as String? ?? '',
+      'body': n['body'] as String? ?? '',
+      'time': _formatDate(n['createdAt'] as String?),
+      'isRead': n['isRead'] == true,
+    };
+  }
+
+  Future<void> _markAllRead() async {
+    try {
+      await ApiService.instance.client
+          .patch('/api/v1/notifications/mark-all-read');
+    } catch (_) {}
+    if (mounted) {
+      setState(() {
+        for (final n in _notifications) {
+          n['isRead'] = true;
+        }
+      });
+    }
+  }
+
+  Future<void> _markRead(Map<String, dynamic> notif) async {
+    final id = notif['id'] as String? ?? '';
+    if (id.isEmpty || notif['isRead'] == true) return;
+    setState(() => notif['isRead'] = true);
+    try {
+      await ApiService.instance.client.patch(
+        '/api/v1/notifications/mark-read',
+        data: {'ids': [id]},
+      );
+    } catch (_) {}
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1340,11 +1621,7 @@ class _NotificationsTabState extends State<_NotificationsTab> {
                 ),
                 const Spacer(),
                 GestureDetector(
-                  onTap: () => setState(() {
-                    for (final n in _notifications) {
-                      n['isRead'] = true;
-                    }
-                  }),
+                  onTap: _markAllRead,
                   child: Text(
                     'Tout lire',
                     style: GoogleFonts.outfit(
@@ -1359,18 +1636,26 @@ class _NotificationsTabState extends State<_NotificationsTab> {
             ),
           ),
         Expanded(
-          child: ListView.separated(
-            padding: const EdgeInsets.all(16),
-            itemCount: _notifications.length,
-            separatorBuilder: (_, __) => const SizedBox(height: 8),
-            itemBuilder: (context, index) {
-              final notif = _notifications[index];
-              return _NotificationCard(
-                notif: notif,
-                onTap: () => setState(() => notif['isRead'] = true),
-              );
-            },
-          ),
+          child: _isLoading
+              ? const Center(child: CircularProgressIndicator(color: AppTheme.primary))
+              : _notifications.isEmpty
+              ? EmptyStateWidget(
+                  icon: Icons.notifications_none_rounded,
+                  title: 'Aucune notification',
+                  description: 'Vous serez prévenu ici de toute activité sur votre compte.',
+                )
+              : ListView.separated(
+                  padding: const EdgeInsets.all(16),
+                  itemCount: _notifications.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 8),
+                  itemBuilder: (context, index) {
+                    final notif = _notifications[index];
+                    return _NotificationCard(
+                      notif: notif,
+                      onTap: () => _markRead(notif),
+                    );
+                  },
+                ),
         ),
       ],
     );

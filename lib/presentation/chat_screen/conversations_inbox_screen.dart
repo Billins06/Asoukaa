@@ -49,17 +49,20 @@ class _ConversationsInboxScreenState extends State<ConversationsInboxScreen> {
     }
     if (mounted) setState(() => _isLoading = true);
     try {
-      final res = await ApiService.instance.client.get('/api/v1/conversations');
+      // Le backend expose /chat/conversations (pas /conversations), et
+      // renvoie des clés camelCase (clientId/vendorId/client/vendor/...),
+      // pas les anciennes clés snake_case buyer_id/seller_id/etc.
+      final res = await ApiService.instance.client.get('/api/v1/chat/conversations');
       final raw = res.data;
-      final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) : []);
+      final rawList = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) : []);
       if (mounted) {
-        final convs = List<Map<String, dynamic>>.from(list as List);
+        final convs = (rawList as List)
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
         int unread = 0;
         for (final c in convs) {
-          final isBuyer = c['buyer_id'] == _myUserId;
-          unread += isBuyer
-              ? (c['buyer_unread'] as int? ?? 0)
-              : (c['seller_unread'] as int? ?? 0);
+          unread += (c['unreadCount'] as int?) ?? 0;
         }
         setState(() {
           _conversations = convs;
@@ -164,20 +167,30 @@ class _ConversationsInboxScreenState extends State<ConversationsInboxScreen> {
                     const Divider(height: 1, indent: 72),
                 itemBuilder: (context, index) {
                   final conv = _conversations[index];
-                  final isBuyer = conv['buyer_id'] == _myUserId;
-                  final other = isBuyer ? conv['seller'] : conv['buyer'];
-                  final otherName = other is Map
-                      ? (other['full_name'] as String? ?? 'Utilisateur')
-                      : 'Utilisateur';
-                  final otherAvatar = other is Map
-                      ? (other['avatar_url'] as String?)
-                      : null;
-                  final unread = isBuyer
-                      ? (conv['buyer_unread'] as int? ?? 0)
-                      : (conv['seller_unread'] as int? ?? 0);
-                  final lastMsg = conv['last_message'] as String? ?? '';
-                  final lastMsgAt = conv['last_message_at'] as String?;
-                  final product = conv['products'] as Map<String, dynamic>?;
+                  final isClient = conv['clientId'] == _myUserId;
+                  final vendor = conv['vendor'] as Map?;
+                  final client = conv['client'] as Map?;
+                  final otherName = isClient
+                      ? (vendor != null
+                            ? (vendor['shopName'] as String? ?? 'Boutique')
+                            : 'Boutique')
+                      : (client != null
+                            ? ('${client['prenom'] ?? ''} ${client['name'] ?? ''}')
+                                  .trim()
+                            : 'Client');
+                  final otherAvatar = isClient
+                      ? (vendor != null ? vendor['logoUrl'] as String? : null)
+                      : (client != null ? client['avatarUrl'] as String? : null);
+                  final unread = (conv['unreadCount'] as int?) ?? 0;
+                  final lastMessage = conv['lastMessage'] as Map?;
+                  final lastMsg = lastMessage != null
+                      ? (lastMessage['content'] as String? ??
+                            (lastMessage['imageUrl'] != null ? '📷 Photo' : ''))
+                      : '';
+                  final lastMsgAt = lastMessage != null
+                      ? lastMessage['createdAt'] as String?
+                      : conv['updatedAt'] as String?;
+                  final product = conv['product'] as Map<String, dynamic>?;
 
                   return ListTile(
                     contentPadding: const EdgeInsets.symmetric(
@@ -322,17 +335,18 @@ class _ConversationsInboxScreenState extends State<ConversationsInboxScreen> {
                       ],
                     ),
                     onTap: () {
-                      final otherId = isBuyer
-                          ? (conv['seller_id'] as String? ?? '')
-                          : (conv['buyer_id'] as String? ?? '');
+                      final otherId = isClient
+                          ? (vendor != null ? vendor['userId'] as String? : null)
+                          : (client != null ? client['id'] as String? : null);
                       Navigator.pushNamed(
                         context,
                         AppRoutes.chat,
                         arguments: {
                           'conversation_id': conv['id'],
-                          'other_user_id': otherId,
-                          'other_user_name': otherName,
-                          'other_user_avatar': otherAvatar ?? '',
+                          if (isClient && vendor != null) 'vendor_id': vendor['id'],
+                          'seller_id': otherId,
+                          'seller_name': otherName,
+                          'seller_avatar': otherAvatar ?? '',
                           if (product != null) 'product_name': product['name'],
                         },
                       ).then((_) => _loadConversations());

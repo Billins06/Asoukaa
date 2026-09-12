@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:dio/dio.dart';
 
 import '../../theme/app_theme.dart';
 import '../../widgets/custom_image_widget.dart';
 import '../../routes/app_routes.dart';
 import '../../services/nest_auth_service.dart';
 import '../../services/api_service.dart';
+import '../../services/user_service.dart';
+import '../../services/delivery_zone_service.dart';
 import '../../widgets/app_toast.dart';
 
 class CartScreen extends StatefulWidget {
@@ -23,12 +26,37 @@ class _CartScreenState extends State<CartScreen> {
   String _promoCode = '';
   bool _promoApplied = false;
   double _promoDiscount = 0;
+  String _promoMessage = '';
+  bool _isApplyingPromo = false;
   final TextEditingController _promoController = TextEditingController();
 
   @override
   void initState() {
     super.initState();
     _loadCart();
+    _loadDeliveryFeeEstimate();
+  }
+
+  // Estimation des frais de livraison basée sur l'adresse par défaut du
+  // client (si elle existe). Le montant réellement facturé est de toute
+  // façon recalculé à l'étape de paiement (checkout) à partir de l'adresse
+  // finalement choisie — ceci n'est qu'un aperçu dans le panier.
+  Future<void> _loadDeliveryFeeEstimate() async {
+    try {
+      final result = await UserService.instance.getAddresses();
+      if (!result.success || result.data == null || result.data!.isEmpty) {
+        return;
+      }
+      final addresses = result.data!;
+      final defaultAddress = addresses.firstWhere(
+        (a) => a.isDefault,
+        orElse: () => addresses.first,
+      );
+      final fee = await DeliveryZoneService.instance.feeForCommune(
+        defaultAddress.ville,
+      );
+      if (mounted) setState(() => _deliveryFee = fee.toDouble());
+    } catch (_) {}
   }
 
   @override
@@ -107,7 +135,7 @@ class _CartScreenState extends State<CartScreen> {
     String shopName = 'Boutique';
     String shopId = '';
     if (product != null) {
-      final shopData = product['shops'] ?? product['vendeur'] ?? product['shop_info'];
+      final shopData = product['vendor'] ?? product['shops'] ?? product['vendeur'] ?? product['shop_info'];
       shopName = shopData is Map
           ? (shopData['shopName'] as String? ?? shopData['name'] as String? ?? 'Boutique')
           : (product['shop'] as String? ?? 'Boutique');
@@ -118,7 +146,7 @@ class _CartScreenState extends State<CartScreen> {
     final unitPriceRaw = item['unitPrice'] ?? (variant != null ? variant['price'] : null);
     final price = (unitPriceRaw is num)
         ? unitPriceRaw.toInt()
-        : int.tryParse(unitPriceRaw?.toString() ?? '') ?? 0;
+        : (double.tryParse(unitPriceRaw?.toString() ?? '') ?? 0).toInt();
     final originalPrice = price;
 
     // Stock
@@ -165,7 +193,9 @@ class _CartScreenState extends State<CartScreen> {
             (item['quantity'] as int).toDouble(),
   );
 
-  double get _deliveryFee => _subtotal > 50000 ? 0 : 2500;
+  // Estimation ; recalculée pour de bon à l'étape de paiement selon la
+  // commune finalement choisie (voir checkout_screen).
+  double _deliveryFee = 0;
 
   double get _total => _subtotal - _promoDiscount + _deliveryFee;
 
@@ -199,7 +229,10 @@ class _CartScreenState extends State<CartScreen> {
 
   Future<void> _updateQtyInDb(String cartItemId, int qty) async {
     try {
-      await ApiService.instance.client.patch(
+      // Le backend n'expose que PUT sur cette route (pas PATCH) :
+      // un PATCH échoue silencieusement (404/405) et la quantité
+      // affichée localement n'est jamais persistée côté serveur.
+      await ApiService.instance.client.put(
         '/api/v1/cart/items/$cartItemId',
         data: {'quantity': qty},
       );
@@ -310,24 +343,53 @@ class _CartScreenState extends State<CartScreen> {
     } catch (_) {}
   }
 
-  void _applyPromo() {
-    if (_promoController.text.trim().toUpperCase() == 'ASOUKAA10') {
-      setState(() {
-        _promoApplied = true;
-        _promoDiscount = _subtotal * 0.10;
-        _promoCode = _promoController.text.trim().toUpperCase();
-      });
+  Future<void> _applyPromo() async {
+    final code = _promoController.text.trim().toUpperCase();
+    if (code.isEmpty) {
       AppToast.show(
         context,
-        message: 'Code promo appliqué — 10% de réduction',
-        type: ToastType.success,
-      );
-    } else {
-      AppToast.show(
-        context,
-        message: 'Code promo invalide',
+        message: 'Entrez un code promo',
         type: ToastType.error,
       );
+      return;
+    }
+
+    setState(() => _isApplyingPromo = true);
+    try {
+      final response = await ApiService.instance.client.post(
+        '/api/v1/coupons/validate',
+        data: {'code': code, 'subtotal': _subtotal},
+      );
+      final data = response.data;
+      final discount = data is Map ? data['discount'] : null;
+      final message = data is Map ? data['message'] as String? : null;
+      if (!mounted) return;
+      setState(() {
+        _promoApplied = true;
+        _promoCode = code;
+        _promoDiscount = discount is num ? discount.toDouble() : 0;
+        _promoMessage = message ?? 'Code "$code" appliqué';
+      });
+      AppToast.show(context, message: _promoMessage, type: ToastType.success);
+    } on DioException catch (e) {
+      final errData = e.response?.data;
+      final backendMessage = errData is Map ? errData['message'] : null;
+      final text = backendMessage is String
+          ? backendMessage
+          : (backendMessage is List && backendMessage.isNotEmpty
+              ? backendMessage.first.toString()
+              : 'Code promo invalide');
+      if (!mounted) return;
+      AppToast.show(context, message: text, type: ToastType.error);
+    } catch (e) {
+      if (!mounted) return;
+      AppToast.show(
+        context,
+        message: 'Impossible de vérifier le code promo. Réessayez.',
+        type: ToastType.error,
+      );
+    } finally {
+      if (mounted) setState(() => _isApplyingPromo = false);
     }
   }
 
@@ -599,8 +661,6 @@ class _CartScreenState extends State<CartScreen> {
                 _buildPromoSection(),
                 const SizedBox(height: 8),
                 _buildPriceSummary(),
-                const SizedBox(height: 8),
-                _buildDeliveryNote(),
                 const SizedBox(height: 16),
               ],
             ),
@@ -638,8 +698,6 @@ class _CartScreenState extends State<CartScreen> {
                     _buildPromoSection(),
                     const SizedBox(height: 12),
                     _buildPriceSummary(),
-                    const SizedBox(height: 12),
-                    _buildDeliveryNote(),
                   ],
                 ),
               ),
@@ -909,7 +967,9 @@ class _CartScreenState extends State<CartScreen> {
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      'Code "$_promoCode" appliqué — 10% de réduction',
+                      _promoMessage.isNotEmpty
+                          ? _promoMessage
+                          : 'Code "$_promoCode" appliqué',
                       style: GoogleFonts.outfit(
                         fontSize: 13,
                         color: AppTheme.success,
@@ -923,6 +983,7 @@ class _CartScreenState extends State<CartScreen> {
                         _promoApplied = false;
                         _promoDiscount = 0;
                         _promoCode = '';
+                        _promoMessage = '';
                         _promoController.clear();
                       });
                     },
@@ -972,7 +1033,7 @@ class _CartScreenState extends State<CartScreen> {
                 ),
                 const SizedBox(width: 10),
                 ElevatedButton(
-                  onPressed: _applyPromo,
+                  onPressed: _isApplyingPromo ? null : _applyPromo,
                   style: ElevatedButton.styleFrom(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 16,
@@ -982,13 +1043,22 @@ class _CartScreenState extends State<CartScreen> {
                       borderRadius: BorderRadius.circular(10),
                     ),
                   ),
-                  child: Text(
-                    'Appliquer',
-                    style: GoogleFonts.outfit(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
+                  child: _isApplyingPromo
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                          ),
+                        )
+                      : Text(
+                          'Appliquer',
+                          style: GoogleFonts.outfit(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
                 ),
               ],
             ),

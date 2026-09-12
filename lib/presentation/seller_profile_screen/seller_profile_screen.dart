@@ -79,7 +79,7 @@ class _SellerProfileScreenState extends State<SellerProfileScreen>
       } catch (_) {}
 
       try {
-        final r = await ApiService.instance.client.get('/api/v1/shops/mine');
+        final r = await ApiService.instance.client.get('/api/v1/vendors/me');
         shop = r.data is Map ? Map<String, dynamic>.from(r.data as Map) : null;
       } catch (_) {}
 

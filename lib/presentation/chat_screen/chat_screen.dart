@@ -26,6 +26,7 @@ class _ChatMessage {
   final ContactBlockReason? blockedReason;
   final MessageStatus status;
   final String? imageUrl;
+  final bool isReported;
 
   const _ChatMessage({
     required this.id,
@@ -37,16 +38,22 @@ class _ChatMessage {
     this.blockedReason,
     this.status = MessageStatus.sent,
     this.imageUrl,
+    this.isReported = false,
   });
 
   factory _ChatMessage.fromSupabase(
     Map<String, dynamic> data,
     String currentUserId,
   ) {
+    // ⚠️ Le backend NestJS renvoie du camelCase (senderId, createdAt,
+    // isRead, imageUrl...) et n'a pas de messageType/productData —
+    // ce mapping venait d'une ancienne intégration Supabase en
+    // snake_case et ne correspondait plus du tout à l'API réelle
+    // (tous les messages semblaient venir de l'autre participant).
     _ProductAttachment? productAttachment;
-    if (data['message_type'] == 'product_attachment' &&
-        data['product_data'] != null) {
-      final pd = data['product_data'] as Map<String, dynamic>;
+    if (data['messageType'] == 'product_attachment' &&
+        data['productData'] != null) {
+      final pd = data['productData'] as Map<String, dynamic>;
       productAttachment = _ProductAttachment(
         imageUrl: pd['image_url'] as String? ?? '',
         name: pd['name'] as String? ?? 'Produit',
@@ -55,15 +62,15 @@ class _ChatMessage {
         isPurchased: pd['is_purchased'] as bool? ?? false,
       );
     }
-    final isRead = data['is_read'] == true;
-    final isDelivered = data['is_delivered'] == true;
-    final msgType = data['message_type'] as String? ?? 'text';
+    final isRead = data['isRead'] == true;
+    final isReported = data['isReported'] == true;
+    final msgType = data['messageType'] as String? ?? 'text';
     return _ChatMessage(
       id: data['id'] as String,
       text: data['content'] as String? ?? '',
-      isMe: data['sender_id'] == currentUserId,
+      isMe: data['senderId'] == currentUserId,
       timestamp:
-          DateTime.tryParse(data['created_at'] as String? ?? '') ??
+          DateTime.tryParse(data['createdAt'] as String? ?? '') ??
           DateTime.now(),
       type: msgType == 'product_attachment'
           ? MessageType.productAttachment
@@ -71,12 +78,9 @@ class _ChatMessage {
           ? MessageType.imageAttachment
           : MessageType.text,
       product: productAttachment,
-      imageUrl: data['image_url'] as String?,
-      status: isRead
-          ? MessageStatus.read
-          : isDelivered
-          ? MessageStatus.delivered
-          : MessageStatus.sent,
+      imageUrl: data['imageUrl'] as String?,
+      status: isRead ? MessageStatus.read : MessageStatus.sent,
+      isReported: isReported,
     );
   }
 }
@@ -134,6 +138,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   List<_ChatMessage> _messages = [];
   final bool _isOnline = true;
   bool _isTyping = false;
+  bool _otherIsTyping = false;
+  DateTime? _lastTypingPing;
   bool _isLoading = true;
   bool _isSending = false;
   bool _isUploadingImage = false;
@@ -178,6 +184,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     } catch (_) {}
 
     final args = widget.chatArgs;
+    String? vendorId;
     if (args != null) {
       _otherUserId =
           args['seller_id'] as String? ?? args['other_user_id'] as String?;
@@ -190,14 +197,17 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
           args['other_user_avatar'] as String? ??
           '';
       _conversationId = args['conversation_id'] as String?;
+      // ID de la boutique (VendorProfile.id) attendu par POST /chat/conversations,
+      // distinct de _otherUserId qui est l'ID utilisateur du vendeur.
+      vendorId = args['vendor_id'] as String? ?? args['vendorId'] as String?;
     }
 
-    if (_conversationId == null && _otherUserId != null) {
+    if (_conversationId == null && vendorId != null && vendorId.isNotEmpty) {
       try {
         final res = await ApiService.instance.client.post(
           '/api/v1/chat/conversations',
           data: {
-            'sellerId': _otherUserId,
+            'vendorId': vendorId,
             if (args?['product_id'] != null) 'productId': args!['product_id'],
           },
         );
@@ -205,23 +215,27 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       } catch (_) {}
     }
 
+    // Si on a un conversationId (venu des arguments, ex. depuis une
+    // notification "nouveau message") mais pas de nom d'interlocuteur
+    // (seller_name absent des arguments), on va le chercher.
+    final needsOtherPartyLookup = _otherUserId == null || _otherUserId!.isEmpty;
+
     if (_conversationId != null) {
+      if (needsOtherPartyLookup) {
+        await _resolveOtherParticipant(_conversationId!);
+      }
       await _loadMessages();
       _startPolling();
     } else {
       try {
         final res = await ApiService.instance.client.get('/api/v1/chat/conversations');
         final raw = res.data;
-        final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) : []);
-        if ((list as List).isNotEmpty) {
-          final conv = list.first as Map<String, dynamic>;
+        final rawList = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) : []);
+        final list = (rawList as List).whereType<Map>().toList();
+        if (list.isNotEmpty) {
+          final conv = Map<String, dynamic>.from(list.first);
           _conversationId = conv['id'] as String?;
-          final isBuyer = conv['buyer_id'] == _currentUserId;
-          final other = isBuyer ? conv['seller'] : conv['buyer'];
-          if (other is Map) {
-            _otherUserName = other['full_name'] as String? ?? 'Vendeur';
-            _otherUserAvatar = other['avatar_url'] as String? ?? '';
-          }
+          _applyOtherParticipant(conv);
           await _loadMessages();
           _startPolling();
         }
@@ -231,6 +245,48 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     if (mounted) setState(() => _isLoading = false);
   }
 
+  // Structure NestJS réelle de GET /chat/conversations :
+  // { clientId, client: {id, prenom, nom}, vendorId,
+  //   vendor: {id, userId, shopName, ...}, ... }
+  // (les clés snake_case buyer_id/seller/buyer n'existent pas côté backend)
+  void _applyOtherParticipant(Map<String, dynamic> conv) {
+    final isClient = conv['clientId'] == _currentUserId;
+    if (isClient) {
+      final vendor = conv['vendor'] as Map?;
+      _otherUserId = vendor != null ? vendor['userId'] as String? : null;
+      _otherUserName = vendor != null
+          ? (vendor['shopName'] as String? ?? 'Vendeur')
+          : 'Vendeur';
+      _otherUserAvatar = vendor != null
+          ? (vendor['logoUrl'] as String? ?? '')
+          : '';
+    } else {
+      final client = conv['client'] as Map?;
+      _otherUserId = client != null ? client['id'] as String? : null;
+      final prenom = client != null ? client['prenom'] as String? ?? '' : '';
+      final name = client != null ? client['name'] as String? ?? '' : '';
+      final fullName = ('$prenom $name').trim();
+      _otherUserName = fullName.isNotEmpty ? fullName : 'Client';
+      _otherUserAvatar = client != null ? (client['avatarUrl'] as String? ?? '') : '';
+    }
+  }
+
+  Future<void> _resolveOtherParticipant(String conversationId) async {
+    try {
+      final res = await ApiService.instance.client.get('/api/v1/chat/conversations');
+      final raw = res.data;
+      final rawList = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) : []);
+      final list = (rawList as List).whereType<Map>().toList();
+      final match = list.cast<Map>().firstWhere(
+        (c) => c['id'] == conversationId,
+        orElse: () => {},
+      );
+      if (match.isNotEmpty) {
+        _applyOtherParticipant(Map<String, dynamic>.from(match));
+      }
+    } catch (_) {}
+  }
+
   Future<void> _loadMessages() async {
     if (_conversationId == null) return;
     try {
@@ -238,6 +294,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
           .get('/api/v1/chat/conversations/$_conversationId/messages');
       final raw = res.data;
       final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) : []);
+      final otherIsTyping = raw is Map ? raw['otherIsTyping'] == true : false;
       if (mounted) {
         setState(() {
           _messages = (list as List)
@@ -246,17 +303,17 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                     _currentUserId ?? '',
                   ))
               .toList();
+          _otherIsTyping = otherIsTyping;
         });
         _scrollToBottom(animated: false);
         if (_messages.isEmpty && _productAttachment != null) {
           _sendProductAttachment();
         }
       }
-      // Mark as read
-      try {
-        await ApiService.instance.client
-            .patch('/api/v1/chat/conversations/$_conversationId/read');
-      } catch (_) {}
+      // Pas d'appel "mark as read" séparé : le backend n'expose aucune
+      // route /chat/conversations/:id/read (404 systématique observé en
+      // QA) — GET .../messages marque déjà les messages non lus comme
+      // lus en effet de bord côté serveur.
     } catch (_) {}
   }
 
@@ -285,20 +342,89 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     }
 
     try {
+      // Le backend (SendMessageDto) n'accepte que { content, imageUrl } —
+      // il rejette (400) tout champ inconnu comme messageType/productData,
+      // qu'il ne sait de toute façon pas persister. On envoie donc un
+      // texte descriptif ; la bulle "carte produit" ci-dessus reste
+      // affichée localement pour une UX correcte à l'instant T.
+      final priceText = product['price'] != null
+          ? ' — ${product['price']} FCFA'
+          : '';
       await ApiService.instance.client.post(
         '/api/v1/chat/conversations/$_conversationId/messages',
         data: {
-          'content': product['name'] as String? ?? 'Produit',
-          'messageType': 'product_attachment',
-          'productData': {
-            'name': product['name'],
-            'price': product['price'],
-            'image_url': product['image_url'],
-            'is_purchased': false,
-          },
+          'content':
+              '🛍️ ${product['name'] as String? ?? 'Produit'}$priceText',
         },
       );
     } catch (_) {}
+  }
+
+  Future<void> _confirmAndReportMessage(_ChatMessage msg) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Signaler ce message', style: GoogleFonts.outfit(fontWeight: FontWeight.w700)),
+        content: Text(
+          'Ce message sera transmis à l\'équipe de modération. Continuer ?',
+          style: GoogleFonts.outfit(),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text('Annuler', style: GoogleFonts.outfit()),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(
+              'Signaler',
+              style: GoogleFonts.outfit(color: AppTheme.error, fontWeight: FontWeight.w700),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    try {
+      await ApiService.instance.client.patch(
+        '/api/v1/chat/messages/${msg.id}/report',
+      );
+      if (!mounted) return;
+      setState(() {
+        final idx = _messages.indexWhere((m) => m.id == msg.id);
+        if (idx != -1) {
+          _messages[idx] = _ChatMessage(
+            id: msg.id,
+            text: msg.text,
+            isMe: msg.isMe,
+            timestamp: msg.timestamp,
+            type: msg.type,
+            product: msg.product,
+            imageUrl: msg.imageUrl,
+            status: msg.status,
+            isReported: true,
+          );
+        }
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Message signalé. Merci, notre équipe va l\'examiner.', style: GoogleFonts.outfit()),
+          backgroundColor: const Color(0xFF1A1A1A),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      final msg2 = e is DioException
+          ? (e.response?.data is Map ? (e.response!.data['message']?.toString()) : null)
+          : null;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(msg2 ?? 'Erreur lors du signalement du message', style: GoogleFonts.outfit()),
+          backgroundColor: AppTheme.error,
+        ),
+      );
+    }
   }
 
   void _startPolling() {
@@ -340,6 +466,18 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     _typingTimer = Timer(const Duration(seconds: 2), () {
       if (mounted) setState(() => _isTyping = false);
     });
+
+    // Prévenir l'autre participant que j'écris (limité à un appel toutes
+    // les ~2s pour ne pas spammer le backend à chaque frappe).
+    final now = DateTime.now();
+    if (_conversationId != null &&
+        (_lastTypingPing == null ||
+            now.difference(_lastTypingPing!) > const Duration(seconds: 2))) {
+      _lastTypingPing = now;
+      ApiService.instance.client
+          .patch('/api/v1/chat/conversations/$_conversationId/typing')
+          .catchError((_) {});
+    }
   }
 
   Future<void> _sendMessage() async {
@@ -703,22 +841,35 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                       horizontal: 16,
                       vertical: 12,
                     ),
-                    itemCount: _messages.length + (_isTyping ? 1 : 0),
+                    itemCount: _messages.length + (_otherIsTyping ? 1 : 0),
                     itemBuilder: (_, index) {
                       if (index == _messages.length) {
                         return _TypingIndicator(name: _otherUserName);
                       }
                       final msg = _messages[index];
+                      final prevTs = index > 0
+                          ? _messages[index - 1].timestamp
+                          : null;
+                      // Comparaison sur jour+mois+année : comparer
+                      // uniquement .day aurait confondu le 15 janvier
+                      // et le 15 février par exemple.
                       final showDate =
                           index == 0 ||
-                          _messages[index - 1].timestamp.day !=
-                              msg.timestamp.day;
+                          prevTs == null ||
+                          prevTs.day != msg.timestamp.day ||
+                          prevTs.month != msg.timestamp.month ||
+                          prevTs.year != msg.timestamp.year;
                       return Column(
                         children: [
                           if (showDate) _DateDivider(date: msg.timestamp),
                           _MessageBubble(
                             message: msg,
                             timeLabel: _formatTime(msg.timestamp),
+                            // On ne signale jamais ses propres messages
+                            // (le backend le refuse de toute façon).
+                            onReport: (!msg.isMe && !msg.isReported)
+                                ? () => _confirmAndReportMessage(msg)
+                                : null,
                           ),
                         ],
                       );
@@ -975,8 +1126,14 @@ class _DateDivider extends StatelessWidget {
   const _DateDivider({required this.date});
 
   String _label() {
+    // Comparaison sur le jour calendaire (minuit à minuit), pas sur la
+    // durée écoulée : un message d'hier 20h34 vu aujourd'hui à 08h48 ne
+    // fait que ~12h d'écart, ce qui donnait 0 jour avec .inDays et
+    // affichait donc "Aujourd'hui" au lieu de "Hier".
     final now = DateTime.now();
-    final diff = now.difference(date).inDays;
+    final today = DateTime(now.year, now.month, now.day);
+    final messageDay = DateTime(date.year, date.month, date.day);
+    final diff = today.difference(messageDay).inDays;
     if (diff == 0) return 'Aujourd\'hui';
     if (diff == 1) return 'Hier';
     return '${date.day}/${date.month}/${date.year}';
@@ -1010,8 +1167,13 @@ class _DateDivider extends StatelessWidget {
 class _MessageBubble extends StatelessWidget {
   final _ChatMessage message;
   final String timeLabel;
+  final VoidCallback? onReport;
 
-  const _MessageBubble({required this.message, required this.timeLabel});
+  const _MessageBubble({
+    required this.message,
+    required this.timeLabel,
+    this.onReport,
+  });
 
   Widget _buildStatusIcon(MessageStatus status) {
     switch (status) {
@@ -1068,71 +1230,74 @@ class _MessageBubble extends StatelessWidget {
     final isMe = message.isMe;
     return Align(
       alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        margin: EdgeInsets.only(
-          top: 2,
-          bottom: 2,
-          left: isMe ? 60 : 0,
-          right: isMe ? 0 : 60,
-        ),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: BoxDecoration(
-          color: isMe ? AppTheme.primary : Colors.white,
-          borderRadius: BorderRadius.only(
-            topLeft: const Radius.circular(16),
-            topRight: const Radius.circular(16),
-            bottomLeft: Radius.circular(isMe ? 16 : 4),
-            bottomRight: Radius.circular(isMe ? 4 : 16),
+      child: GestureDetector(
+        onLongPress: onReport,
+        child: Container(
+          margin: EdgeInsets.only(
+            top: 2,
+            bottom: 2,
+            left: isMe ? 60 : 0,
+            right: isMe ? 0 : 60,
           ),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withAlpha(8),
-              blurRadius: 4,
-              offset: const Offset(0, 2),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            color: isMe ? AppTheme.primary : Colors.white,
+            borderRadius: BorderRadius.only(
+              topLeft: const Radius.circular(16),
+              topRight: const Radius.circular(16),
+              bottomLeft: Radius.circular(isMe ? 16 : 4),
+              bottomRight: Radius.circular(isMe ? 4 : 16),
             ),
-          ],
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.end,
-          children: [
-            Text(
-              message.text,
-              style: GoogleFonts.outfit(
-                fontSize: 14,
-                color: isMe ? Colors.white : const Color(0xFF1A1A1A),
-                height: 1.4,
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withAlpha(8),
+                blurRadius: 4,
+                offset: const Offset(0, 2),
               ),
-            ),
-            const SizedBox(height: 4),
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  timeLabel,
-                  style: GoogleFonts.outfit(
-                    fontSize: 10,
-                    color: isMe
-                        ? Colors.white.withAlpha(180)
-                        : const Color(0xFF9E9E9E),
-                  ),
+            ],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Text(
+                message.text,
+                style: GoogleFonts.outfit(
+                  fontSize: 14,
+                  color: isMe ? Colors.white : const Color(0xFF1A1A1A),
+                  height: 1.4,
                 ),
-                if (isMe) ...[
-                  const SizedBox(width: 4),
-                  _buildStatusIcon(message.status),
-                  const SizedBox(width: 2),
+              ),
+              const SizedBox(height: 4),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
                   Text(
-                    _statusLabel(message.status),
+                    timeLabel,
                     style: GoogleFonts.outfit(
-                      fontSize: 9,
-                      color: message.status == MessageStatus.read
-                          ? const Color(0xFF93C5FD)
-                          : Colors.white.withAlpha(180),
+                      fontSize: 10,
+                      color: isMe
+                          ? Colors.white.withAlpha(180)
+                          : const Color(0xFF9E9E9E),
                     ),
                   ),
+                  if (isMe) ...[
+                    const SizedBox(width: 4),
+                    _buildStatusIcon(message.status),
+                    const SizedBox(width: 2),
+                    Text(
+                      _statusLabel(message.status),
+                      style: GoogleFonts.outfit(
+                        fontSize: 9,
+                        color: message.status == MessageStatus.read
+                            ? const Color(0xFF93C5FD)
+                            : Colors.white.withAlpha(180),
+                      ),
+                    ),
+                  ],
                 ],
-              ],
-            ),
-          ],
+              ),
+            ],
+          ),
         ),
       ),
     );

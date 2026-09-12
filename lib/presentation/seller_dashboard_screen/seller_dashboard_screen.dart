@@ -58,6 +58,107 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
     });
   }
 
+  static String _formatPrice(int amount) {
+    final s = amount.toString();
+    final buf = StringBuffer();
+    for (var i = 0; i < s.length; i++) {
+      if (i > 0 && (s.length - i) % 3 == 0) buf.write(' ');
+      buf.write(s[i]);
+    }
+    return buf.toString();
+  }
+
+  static String _formatShortDate(String? dateStr) {
+    if (dateStr == null) return '';
+    try {
+      final dt = DateTime.parse(dateStr);
+      return '${dt.day.toString().padLeft(2, '0')}/${dt.month.toString().padLeft(2, '0')}/${dt.year}';
+    } catch (_) {
+      return dateStr;
+    }
+  }
+
+  // Le backend renvoie le statut en français ('en attente', 'en cours',
+  // 'expedié', 'livré', 'annulé') — même mapping que buyer_dashboard_screen.
+  static OrderStatus _mapOrderStatus(String? raw) {
+    switch ((raw ?? '').toLowerCase()) {
+      case 'en cours':
+        return OrderStatus.processing;
+      case 'expedié':
+        return OrderStatus.inDelivery;
+      case 'livré':
+        return OrderStatus.completed;
+      case 'annulé':
+        return OrderStatus.cancelled;
+      default:
+        return OrderStatus.received;
+    }
+  }
+
+  // Traduit un Product du backend (prod_name, basePrice, images[], variants[]...)
+  // vers les clés attendues par _ProductCard (name, price, image, stock, views, sales, status, is_active).
+  static Map<String, dynamic> _normalizeSellerProduct(Map<String, dynamic> p) {
+    final images = (p['images'] as List?)?.whereType<Map>().toList() ?? [];
+    final imageUrl = images.isNotEmpty ? (images.first['url'] as String? ?? '') : '';
+    final variants = (p['variants'] as List?)?.whereType<Map>().toList() ?? [];
+    final stock = variants.fold<int>(
+      0,
+      (sum, v) => sum + ((v['stockQuantity'] as num?)?.toInt() ?? 0),
+    );
+    final rawStatus = (p['status'] as String? ?? '');
+    final isActive = rawStatus == 'active';
+    final rawPrice = p['basePrice'];
+    final amount = rawPrice is num
+        ? rawPrice.round()
+        : (double.tryParse(rawPrice?.toString() ?? '') ?? 0).round();
+    return {
+      'id': (p['id'] ?? '').toString(),
+      'name': p['prod_name'] as String? ?? 'Produit',
+      'price': '${_formatPrice(amount)} FCFA',
+      'image': imageUrl,
+      'stock': stock,
+      // Pas encore fourni par le backend (pas de compteur de vues côté API).
+      'views': 0,
+      'sales': (p['totalVentes'] as num?)?.toInt() ?? 0,
+      'status': isActive ? 'published' : 'draft',
+      'is_active': isActive,
+    };
+  }
+
+  // Traduit un Order du backend (items[]->variant->product, address, total...)
+  // vers les clés attendues par _SellerOrderCard (id, status, image, product, buyer, qty, date, price).
+  static Map<String, dynamic> _normalizeSellerOrder(Map<String, dynamic> o) {
+    final items = (o['items'] as List?)?.whereType<Map>().toList() ?? [];
+    final first = items.isNotEmpty ? items.first : null;
+    final variant = first?['variant'] as Map<String, dynamic>?;
+    final product = variant?['product'] as Map<String, dynamic>?;
+    final images = (product?['images'] as List?)?.whereType<Map>().toList() ?? [];
+    final imageUrl = images.isNotEmpty ? (images.first['url'] as String? ?? '') : '';
+    final address = o['address'] as Map<String, dynamic>?;
+    final qty = items.fold<int>(
+      0,
+      (s, it) => s + ((it['quantity'] as num?)?.toInt() ?? 0),
+    );
+    final rawTotal = o['total'];
+    final amount = rawTotal is num
+        ? rawTotal.round()
+        : (double.tryParse(rawTotal?.toString() ?? '') ?? 0).round();
+    return {
+      'id': (o['orderNumber'] ?? o['id'] ?? '').toString(),
+      'rawId': (o['id'] ?? '').toString(),
+      'status': _mapOrderStatus(o['status'] as String?),
+      'image': imageUrl,
+      'product': product?['prod_name'] as String? ?? 'Produit',
+      // Le backend ne renvoie pas encore le nom de l'acheteur sur cette route
+      // (pas de jointure sur order.user) : on affiche le destinataire de la
+      // livraison, déjà disponible via l'adresse jointe.
+      'buyer': address?['nom_destinataire'] as String? ?? 'Client',
+      'qty': qty,
+      'date': _formatShortDate(o['createdAt'] as String?),
+      'price': '${_formatPrice(amount)} FCFA',
+    };
+  }
+
   Future<void> _loadData() async {
     setState(() {
       _isLoading = true;
@@ -89,22 +190,28 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
       List<Map<String, dynamic>> orders = [];
 
       try {
-        final r = await ApiService.instance.client.get('/api/v1/shops/mine');
+        final r = await ApiService.instance.client.get('/api/v1/vendors/me');
         shop = Map<String, dynamic>.from(r.data as Map);
       } catch (_) {}
 
       try {
-        final r = await ApiService.instance.client.get('/api/v1/products/mine');
+        final r = await ApiService.instance.client.get('/api/v1/products/vendor/me');
         final raw = r.data;
         final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) as List : []);
-        products = list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+        products = list
+            .whereType<Map>()
+            .map((e) => _normalizeSellerProduct(Map<String, dynamic>.from(e)))
+            .toList();
       } catch (_) {}
 
       try {
-        final r = await ApiService.instance.client.get('/api/v1/orders/mine');
+        final r = await ApiService.instance.client.get('/api/v1/orders/vendor/me');
         final raw = r.data;
         final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) as List : []);
-        orders = list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+        orders = list
+            .whereType<Map>()
+            .map((e) => _normalizeSellerOrder(Map<String, dynamic>.from(e)))
+            .toList();
       } catch (_) {}
 
       if (mounted) {
@@ -175,7 +282,7 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
 
   PreferredSizeWidget _buildAppBar() {
     return PreferredSize(
-      preferredSize: const Size.fromHeight(104),
+      preferredSize: const Size.fromHeight(128),
       child: Container(
         color: AppTheme.surface,
         child: SafeArea(
@@ -200,7 +307,7 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
                           ),
                         ),
                         Text(
-                          'Boutique Cotonou Mode',
+                          _shop?['shopName'] as String? ?? 'Ma boutique',
                           style: GoogleFonts.outfit(
                             fontSize: 12,
                             fontWeight: FontWeight.w400,

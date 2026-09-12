@@ -124,13 +124,29 @@ class NestAuthService {
       final refreshToken = data['refreshToken'] as String;
       final user = Map<String, dynamic>.from(data['user'] as Map);
 
-      // Extraire le rôle principal depuis le tableau roles
+      // Extraire le rôle principal depuis le tableau roles.
+      // IMPORTANT : ne pas prendre roles.first — chaque compte a un rôle
+      // 'client' cree a l'inscription PUIS un rôle 'vendor'/'delivery_agent'
+      // ajoute plus tard (a l'approbation). L'ordre renvoye par la base n'est
+      // pas garanti, donc on priorise le rôle metier sur le rôle client de base.
       String nestRole = 'client';
       final roles = user['roles'] as List<dynamic>?;
       if (roles != null && roles.isNotEmpty) {
-        nestRole =
-            ((roles.first as Map)['role'] as String?)?.toLowerCase() ??
-            'client';
+        final roleValues = roles
+            .map((r) => ((r as Map)['role'] as String?)?.toLowerCase())
+            .whereType<String>()
+            .toSet();
+        const rolePriority = [
+          'admin',
+          'superadmin',
+          'vendor',
+          'delivery_agent',
+          'client',
+        ];
+        nestRole = rolePriority.firstWhere(
+          roleValues.contains,
+          orElse: () => 'client',
+        );
       }
 
       await Future.wait([

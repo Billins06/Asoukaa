@@ -1,12 +1,13 @@
-import 'package:feexpay_flutter/feexpay_flutter.dart';
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
-import '../../routes/app_routes.dart';
 import '../../services/nest_auth_service.dart';
 import '../../services/user_service.dart';
 import '../../services/api_service.dart';
+import '../../services/delivery_zone_service.dart';
 import '../../theme/app_theme.dart';
+import '../../routes/app_routes.dart';
 import '../../widgets/app_toast.dart';
 import '../../widgets/custom_image_widget.dart';
 
@@ -27,6 +28,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   final _notesController = TextEditingController();
 
   String _selectedCountry = 'Bénin';
+  String _selectedOperator = 'MTN';
   bool _saveAddress = true;
   bool _isPlacingOrder = false;
   bool _isLoadingProfile = true;
@@ -39,15 +41,13 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   double _subtotal = 0;
   double _promoDiscount = 0;
   double _deliveryFee = 2500;
+  List<String> _communes = [];
+  bool _deliveryFeeInitialized = false;
   double _total = 0;
 
   // Created order ID (pending state before payment)
   String? _pendingOrderId;
-
-  static const String _feexpayToken = String.fromEnvironment('FEEXPAY_API_KEY');
-  static const String _feexpayShopId = String.fromEnvironment(
-    'FEEXPAY_SHOP_ID',
-  );
+  String? _pendingOrderNumber;
 
   final List<String> _countries = [
     'Bénin',
@@ -64,6 +64,25 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   void initState() {
     super.initState();
     _loadUserProfile();
+    _loadCommunes();
+  }
+
+  Future<void> _loadCommunes() async {
+    final names = await DeliveryZoneService.instance.communeNames();
+    if (mounted) setState(() => _communes = names);
+  }
+
+  // Recalcule les frais de livraison réels pour la commune saisie
+  // (source : /api/v1/delivery-zones, paramétrée par l'admin). Le montant
+  // réellement facturé reste calculé côté serveur à la création de la
+  // commande — ceci ne sert qu'à afficher une estimation fiable avant paiement.
+  Future<void> _recomputeDeliveryFee() async {
+    final fee = await DeliveryZoneService.instance.feeForCommune(_cityController.text);
+    if (!mounted) return;
+    setState(() {
+      _deliveryFee = fee.toDouble();
+      _total = _subtotal + _deliveryFee - _promoDiscount;
+    });
   }
 
   @override
@@ -81,6 +100,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       _deliveryFee = (args['deliveryFee'] as num? ?? 2500).toDouble();
       _total = (args['total'] as num? ?? 0).toDouble();
       if (_total == 0) _total = _subtotal + _deliveryFee - _promoDiscount;
+      if (!_deliveryFeeInitialized) {
+        _deliveryFeeInitialized = true;
+        _recomputeDeliveryFee();
+      }
     }
   }
 
@@ -219,10 +242,12 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       // Étape 2 : créer la commande depuis le panier
       // Le backend lit le panier automatiquement — on envoie uniquement addressId.
       final instructions = _notesController.text.trim();
-      _pendingOrderId = await _createOrder(
+      final orderResult = await _createOrder(
         addressId: addressId,
         instructions: instructions.isNotEmpty ? instructions : null,
       );
+      _pendingOrderId = orderResult?['id'] as String?;
+      _pendingOrderNumber = orderResult?['orderNumber'] as String?;
 
       // Mettre à jour le téléphone si demandé
       if (_saveAddress) {
@@ -237,30 +262,70 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
       if (!mounted) return;
 
-      final orderId = _pendingOrderId ?? _generateTransKey();
+      if (_pendingOrderId == null) {
+        AppToast.show(
+          context,
+          message: 'Impossible de créer la commande. Réessayez.',
+          type: ToastType.error,
+        );
+        setState(() => _isPlacingOrder = false);
+        return;
+      }
 
-      final token = _feexpayToken.isNotEmpty
-          ? _feexpayToken
-          : 'fp_8Q22dR4r5omd6bBonmqjicDDzkuE3Vgg49bkWVuRvFKZbM4iG5BlcIa45lYocd2Y';
-      final shopIdFee = _feexpayShopId.isNotEmpty
-          ? _feexpayShopId
-          : '6787b9c315c7bc2e9dbb906a';
+      // Le paiement passe par notre backend (route POST /payments/initiate),
+      // qui appelle FeexPay lui-même — la clé API n'est plus embarquée dans
+      // l'appli (SDK feexpay_flutter retiré de cet écran). Une fois la demande
+      // envoyée, on affiche une boîte d'attente et on interroge
+      // GET /payments/{id}/status jusqu'à confirmation, échec ou délai
+      // dépassé, puis on redirige vers l'écran de confirmation.
+      try {
+        final payResp = await ApiService.instance.client.post(
+          '/api/v1/payments/initiate',
+          data: {
+            'orderId': _pendingOrderId,
+            'method': 'mobile_money',
+            'operator': _selectedOperator,
+            'phoneNumber': _phoneController.text.trim(),
+          },
+        );
+        final payData = payResp.data;
+        final paymentId = payData is Map ? payData['paymentId'] as String? : null;
+        final payMessage = payData is Map ? payData['message'] as String? : null;
+        if (!mounted) return;
+        AppToast.show(
+          context,
+          message: payMessage ?? 'Demande de paiement envoyée.',
+          type: ToastType.success,
+        );
 
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (context) => ChoicePage(
-            token: token,
-            id: shopIdFee,
-            amount: _total.toInt().toString(),
-            redirecturl: AppRoutes.feexpaySuccess,
-            errorredirecturl: AppRoutes.feexpayError,
-            trans_key: orderId,
-          ),
-        ),
-      ).then((_) async {
-        // FeexpayResultScreen gère la mise à jour du statut et le vidage du panier
-      });
+        if (paymentId != null) {
+          final confirmationArgs = <String, dynamic>{
+            'orderNumber': _pendingOrderNumber ?? '',
+            'firstName': _firstNameController.text.trim(),
+            'lastName': _lastNameController.text.trim(),
+            'address': _addressController.text.trim(),
+            'city': _cityController.text.trim(),
+            'country': _selectedCountry,
+            'phone': _phoneController.text.trim(),
+            'paymentMethod': '$_selectedOperator (Mobile Money)',
+            'total': _total.round(),
+          };
+          _pollPaymentStatus(paymentId, confirmationArgs);
+        }
+      } on DioException catch (e) {
+        final errData = e.response?.data;
+        final backendMessage = errData is Map ? errData['message'] : null;
+        if (!mounted) return;
+        AppToast.show(
+          context,
+          message: backendMessage is String
+              ? backendMessage
+              : (backendMessage is List && backendMessage.isNotEmpty
+                  ? backendMessage.first.toString()
+                  : 'Le paiement a échoué. Réessayez.'),
+          type: ToastType.error,
+        );
+      }
     } catch (e) {
       AppToast.show(
         context,
@@ -268,6 +333,134 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         type: ToastType.error,
       );
       setState(() => _isPlacingOrder = false);
+    }
+  }
+
+  /// Interroge GET /payments/{id}/status jusqu'à confirmation, échec ou
+  /// délai dépassé, pendant qu'une boîte d'attente non-fermable informe le
+  /// client de valider le paiement mobile money sur son téléphone.
+  Future<void> _pollPaymentStatus(
+    String paymentId,
+    Map<String, dynamic> confirmationArgs,
+  ) async {
+    const maxAttempts = 40; // ~2 minutes à 3s d'intervalle
+    const pollInterval = Duration(seconds: 3);
+    var dialogOpen = true;
+
+    if (!mounted) return;
+
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return PopScope(
+          canPop: false,
+          child: AlertDialog(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const CircularProgressIndicator(color: AppTheme.primary),
+                const SizedBox(height: 16),
+                Text(
+                  'Confirmez le paiement sur votre téléphone',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.outfit(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                    color: AppTheme.textPrimary,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Validez la demande de paiement mobile money reçue sur '
+                  'votre téléphone. Ne fermez pas l\'application.',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.outfit(
+                    fontSize: 13,
+                    color: AppTheme.textSecondary,
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: Text(
+                  'Annuler l\'attente',
+                  style: GoogleFonts.outfit(color: AppTheme.textSecondary),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    ).then((_) => dialogOpen = false);
+
+    void closeDialog() {
+      if (dialogOpen && mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
+      }
+      dialogOpen = false;
+    }
+
+    for (var attempt = 0; attempt < maxAttempts; attempt++) {
+      await Future.delayed(pollInterval);
+      if (!dialogOpen || !mounted) return;
+
+      try {
+        final statusResp = await ApiService.instance.client.get(
+          '/api/v1/payments/$paymentId/status',
+        );
+        final statusData = statusResp.data;
+        final status =
+            statusData is Map ? statusData['status']?.toString() : null;
+
+        if (status == 'success') {
+          final orderNumber = (statusData is Map
+                  ? statusData['orderNumber'] as String?
+                  : null) ??
+              confirmationArgs['orderNumber'];
+          closeDialog();
+          if (!mounted) return;
+          Navigator.of(context).pushReplacementNamed(
+            AppRoutes.orderConfirmation,
+            arguments: {...confirmationArgs, 'orderNumber': orderNumber},
+          );
+          return;
+        }
+
+        if (status == 'échoué') {
+          closeDialog();
+          if (!mounted) return;
+          AppToast.show(
+            context,
+            message:
+                'Le paiement a échoué ou a été annulé. Vous pouvez réessayer.',
+            type: ToastType.error,
+          );
+          return;
+        }
+        // Sinon toujours "en attente" — on continue le polling.
+      } catch (_) {
+        // Erreur réseau ponctuelle pendant le polling — on retente au
+        // prochain cycle plutôt que d'abandonner tout de suite.
+      }
+    }
+
+    // Délai dépassé sans confirmation ni échec explicite.
+    if (dialogOpen) {
+      closeDialog();
+      if (mounted) {
+        AppToast.show(
+          context,
+          message:
+              'Confirmation non reçue. Vérifiez le statut dans "Mes commandes".',
+          type: ToastType.info,
+        );
+      }
     }
   }
 
@@ -345,11 +538,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
       child: Row(
         children: [
-          _stepDot(1, 'Panier', true),
+          Expanded(child: _stepDot(1, 'Panier', true)),
           _stepLine(true),
-          _stepDot(2, 'Livraison', true),
+          Expanded(child: _stepDot(2, 'Livraison', true)),
           _stepLine(false),
-          _stepDot(3, 'Paiement', false),
+          Expanded(child: _stepDot(3, 'Paiement', false)),
         ],
       ),
     );
@@ -463,14 +656,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             children: [
               Expanded(child: _buildCountryDropdown()),
               const SizedBox(width: 10),
-              Expanded(
-                child: _buildTextField(
-                  controller: _cityController,
-                  label: 'Ville',
-                  icon: Icons.location_city_outlined,
-                  validator: (v) => (v == null || v.isEmpty) ? 'Requis' : null,
-                ),
-              ),
+              Expanded(child: _buildCityAutocomplete()),
             ],
           ),
           const SizedBox(height: 12),
@@ -490,6 +676,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             keyboardType: TextInputType.phone,
             validator: (v) => (v == null || v.isEmpty) ? 'Requis' : null,
           ),
+          const SizedBox(height: 12),
+          _buildOperatorDropdown(),
           const SizedBox(height: 12),
           _buildTextField(
             controller: _notesController,
@@ -621,6 +809,63 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     );
   }
 
+  Widget _buildCityAutocomplete() {
+    return Autocomplete<String>(
+      optionsBuilder: (TextEditingValue value) {
+        if (value.text.isEmpty) return _communes;
+        final q = value.text.toLowerCase();
+        return _communes.where((cm) => cm.toLowerCase().contains(q));
+      },
+      initialValue: TextEditingValue(text: _cityController.text),
+      onSelected: (String selection) {
+        _cityController.text = selection;
+        _recomputeDeliveryFee();
+      },
+      fieldViewBuilder: (context, controller, focusNode, onFieldSubmitted) {
+        return TextFormField(
+          controller: controller,
+          focusNode: focusNode,
+          onChanged: (v) {
+            _cityController.text = v;
+            _recomputeDeliveryFee();
+          },
+          validator: (v) => (v == null || v.isEmpty) ? 'Requis' : null,
+          style: GoogleFonts.outfit(fontSize: 14, color: AppTheme.textPrimary),
+          decoration: InputDecoration(
+            labelText: 'Ville',
+            prefixIcon: const Icon(
+              Icons.location_city_outlined,
+              size: 18,
+              color: AppTheme.muted,
+            ),
+            filled: true,
+            fillColor: AppTheme.surfaceVariant,
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 12,
+              vertical: 14,
+            ),
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: const BorderSide(color: AppTheme.outline),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: const BorderSide(color: AppTheme.outline),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: const BorderSide(color: AppTheme.primary, width: 2),
+            ),
+            errorBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: const BorderSide(color: AppTheme.error),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   Widget _buildTextField({
     required TextEditingController controller,
     required String label,
@@ -674,6 +919,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   Widget _buildCountryDropdown() {
     return DropdownButtonFormField<String>(
       initialValue: _selectedCountry,
+      isExpanded: true,
       onChanged: (v) => setState(() => _selectedCountry = v ?? 'Bénin'),
       style: GoogleFonts.outfit(fontSize: 14, color: AppTheme.textPrimary),
       decoration: InputDecoration(
@@ -712,6 +958,60 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               value: c,
               child: Text(
                 c,
+                style: GoogleFonts.outfit(
+                  fontSize: 14,
+                  color: AppTheme.textPrimary,
+                ),
+              ),
+            ),
+          )
+          .toList(),
+    );
+  }
+
+  Widget _buildOperatorDropdown() {
+    const operators = ['MTN', 'Moov'];
+    return DropdownButtonFormField<String>(
+      initialValue: _selectedOperator,
+      isExpanded: true,
+      onChanged: (v) => setState(() => _selectedOperator = v ?? 'MTN'),
+      style: GoogleFonts.outfit(fontSize: 14, color: AppTheme.textPrimary),
+      decoration: InputDecoration(
+        labelText: 'Opérateur Mobile Money',
+        prefixIcon: const Icon(
+          Icons.sim_card_outlined,
+          size: 18,
+          color: AppTheme.muted,
+        ),
+        filled: true,
+        fillColor: AppTheme.surfaceVariant,
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 12,
+          vertical: 14,
+        ),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: AppTheme.outline),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: AppTheme.outline),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: AppTheme.primary, width: 2),
+        ),
+        labelStyle: GoogleFonts.outfit(
+          fontSize: 13,
+          color: AppTheme.textSecondary,
+        ),
+      ),
+      items: operators
+          .map(
+            (o) => DropdownMenuItem(
+              value: o,
+              child: Text(
+                o,
                 style: GoogleFonts.outfit(
                   fontSize: 14,
                   color: AppTheme.textPrimary,
@@ -1094,7 +1394,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     );
   }
 
-  Future<String?> _createOrder({
+  Future<Map<String, dynamic>?> _createOrder({
     required String addressId,
     String? instructions,
   }) async {
@@ -1110,7 +1410,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     if (resData is Map) {
       final orders = resData['orders'];
       if (orders is List && orders.isNotEmpty) {
-        return (orders.first as Map<String, dynamic>?)?['id'] as String?;
+        return orders.first as Map<String, dynamic>?;
       }
     }
     return null;

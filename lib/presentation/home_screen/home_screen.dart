@@ -234,7 +234,21 @@ class _HomeScreenState extends State<HomeScreen>
         children: [
           AsoukaaNavigationRail(
             currentIndex: _currentNavIndex,
-            onTap: (i) => setState(() => _currentNavIndex = i),
+            // ⚠️ Le rail (affiché en tablette/desktop, largeur >= 600) ne
+            // faisait que changer l'index sélectionné visuellement, sans
+            // jamais naviguer réellement — contrairement à la barre de
+            // navigation du téléphone (_handleNavTap). "Dashboard" doit
+            // ouvrir le tableau de bord (achats/ventes selon le rôle),
+            // "Compte" doit ouvrir le profil.
+            onTap: (i) {
+              setState(() => _currentNavIndex = i);
+              switch (i) {
+                case 0:
+                  _navigateToDashboard();
+                case 1:
+                  _navigateToProfile();
+              }
+            },
           ),
           const VerticalDivider(width: 1),
           Expanded(

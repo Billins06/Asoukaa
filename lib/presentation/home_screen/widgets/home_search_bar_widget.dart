@@ -2,7 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
 
+import 'dart:async';
+
 import '../../../routes/app_routes.dart';
+import '../../../services/api_service.dart';
 
 class HomeSearchBarWidget extends StatefulWidget {
   final bool isSearchOpen;
@@ -30,6 +33,8 @@ class _HomeSearchBarWidgetState extends State<HomeSearchBarWidget>
   final TextEditingController _searchController = TextEditingController();
   final FocusNode _searchFocusNode = FocusNode();
   bool _isImageSearching = false;
+  int _unreadNotifCount = 0;
+  Timer? _unreadPollTimer;
 
   @override
   void initState() {
@@ -47,6 +52,20 @@ class _HomeSearchBarWidgetState extends State<HomeSearchBarWidget>
       curve: Curves.easeOut,
     );
     _searchController.addListener(() => setState(() {}));
+    _fetchUnreadCount();
+    _unreadPollTimer = Timer.periodic(
+      const Duration(seconds: 30),
+      (_) => _fetchUnreadCount(),
+    );
+  }
+
+  Future<void> _fetchUnreadCount() async {
+    try {
+      final res = await ApiService.instance.client
+          .get('/api/v1/notifications/unread-count');
+      final count = res.data is Map ? res.data['unreadCount'] as int? : null;
+      if (mounted) setState(() => _unreadNotifCount = count ?? 0);
+    } catch (_) {}
   }
 
   @override
@@ -72,6 +91,7 @@ class _HomeSearchBarWidgetState extends State<HomeSearchBarWidget>
     _searchAnimController.dispose();
     _searchController.dispose();
     _searchFocusNode.dispose();
+    _unreadPollTimer?.cancel();
     super.dispose();
   }
 
@@ -79,8 +99,9 @@ class _HomeSearchBarWidgetState extends State<HomeSearchBarWidget>
     Navigator.pushNamed(context, AppRoutes.cart);
   }
 
-  void _navigateToNotifications() {
-    Navigator.pushNamed(context, AppRoutes.notifications);
+  void _navigateToNotifications() async {
+    await Navigator.pushNamed(context, AppRoutes.notifications);
+    _fetchUnreadCount();
   }
 
   Future<void> _pickImageForSearch() async {
@@ -440,25 +461,41 @@ class _HomeSearchBarWidgetState extends State<HomeSearchBarWidget>
                 child: Padding(
                   padding: const EdgeInsets.all(6),
                   child: Stack(
+                    clipBehavior: Clip.none,
                     children: [
                       const Icon(
                         Icons.notifications_outlined,
                         size: 24,
                         color: Color(0xFF1A1A1A),
                       ),
-                      Positioned(
-                        top: 0,
-                        right: 0,
-                        child: Container(
-                          width: 8,
-                          height: 8,
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFFF6210),
-                            shape: BoxShape.circle,
-                            border: Border.all(color: Colors.white, width: 1.5),
+                      if (_unreadNotifCount > 0)
+                        Positioned(
+                          top: -2,
+                          right: -2,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 4),
+                            constraints: const BoxConstraints(
+                              minWidth: 15,
+                              minHeight: 15,
+                            ),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFFF6210),
+                              borderRadius: BorderRadius.circular(999),
+                              border: Border.all(color: Colors.white, width: 1.5),
+                            ),
+                            child: Center(
+                              child: Text(
+                                _unreadNotifCount > 9 ? '9+' : '$_unreadNotifCount',
+                                style: const TextStyle(
+                                  fontSize: 9,
+                                  fontWeight: FontWeight.w700,
+                                  color: Colors.white,
+                                  height: 1.2,
+                                ),
+                              ),
+                            ),
                           ),
                         ),
-                      ),
                     ],
                   ),
                 ),

@@ -208,8 +208,19 @@ class AsoukaaNavigationRail extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // ⚠️ Ce rail n'a que 2 destinations (Dashboard, Compte), mais les
+    // écrans appelants réutilisent souvent le même index que la barre
+    // de navigation du téléphone (0=Accueil, 1=Marché, 2=Messages,
+    // 3=Commandes, 4=Profil). Un index hors bornes (3 ou 4, par ex. sur
+    // BuyerDashboardScreen ou DelivererDashboardScreen) faisait planter
+    // NavigationRail (assertion sur selectedIndex >= destinations.length),
+    // ce qui cassait tout le layout tablette/desktop (contenu invisible,
+    // "RenderFlex overflowed by Infinity pixels"). On normalise ici :
+    // seul l'index "Profil" (4) sélectionne "Compte", tout le reste
+    // (y compris les valeurs déjà valides 0/1) sélectionne "Dashboard".
+    final safeIndex = currentIndex == 4 ? 1 : 0;
     return NavigationRail(
-      selectedIndex: currentIndex,
+      selectedIndex: safeIndex,
       onDestinationSelected: onTap,
       backgroundColor: Colors.white,
       indicatorColor: const Color(0xFFFFEDE3),

@@ -115,8 +115,8 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
         ? (((originalPrice - price) / originalPrice) * 100).round()
         : 0;
 
-    // Shop : NestJS = vendeur{shopName, id} ou shops{name}
-    final shopData = p['shops'] ?? p['vendeur'] ?? p['shop_info'];
+    // Shop : NestJS = vendor{shopName, id, userId, user{id}} (clé réelle du backend)
+    final shopData = p['vendor'] ?? p['shops'] ?? p['vendeur'] ?? p['shop_info'];
     final shopName = shopData is Map
         ? (shopData['shopName'] as String? ?? shopData['name'] as String? ?? '')
         : (p['shop'] as String? ?? '');
@@ -149,6 +149,7 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
 
     return {
       'id': p['id'] ?? '',
+      'variantId': p['variantId'],
       'name': p['name'] ?? '',
       'shop': shopName,
       'shopId': shopId,
@@ -159,7 +160,7 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
       'shopSales': 0,
       'shopIsOnline': true,
       'shopIsVerified': shopVerified,
-      'seller_id': p['seller_id'] ?? p['vendeurId'] ?? '',
+      'seller_id': (shopData is Map ? shopData['userId'] as String? : null) ?? p['seller_id'] ?? p['vendeurId'] ?? '',
       'price': price,
       'originalPrice': originalPrice,
       'discount': discount,
@@ -171,6 +172,11 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
       'stockLeft': p['stock_quantity'] as int? ?? p['stockQuantity'] as int? ?? 0,
       'isHot': p['is_featured'] as bool? ?? p['isFeatured'] as bool? ?? false,
       'category': p['category'] ?? '',
+      'categoryId': (p['categories'] is List && (p['categories'] as List).isNotEmpty)
+          ? ((p['categories'] as List).first is Map
+              ? ((p['categories'] as List).first['id'] ?? '')
+              : '')
+          : (p['categoryId'] ?? ''),
       'location': p['location'] ?? 'Bénin',
       'minOrder': p['min_order'] as int? ?? p['minOrder'] as int? ?? 1,
       'description': p['description'] ?? '',
@@ -178,6 +184,82 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
       'specs': specList,
       'reviews': p['reviews'] ?? [],
     };
+  }
+
+  Future<void> _addToCart() async {
+    final isLoggedIn = await NestAuthService.instance.isLoggedIn()
+        .timeout(const Duration(seconds: 3), onTimeout: () => false);
+    if (!mounted) return;
+    if (!isLoggedIn) {
+      Navigator.pushNamed(context, AppRoutes.signUpLogin);
+      return;
+    }
+    final variantId = _product['variantId'];
+    if (variantId == null || variantId.toString().isEmpty) {
+      ScaffoldMessenger.of(context).clearSnackBars();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Ce produit n\'est pas disponible à l\'achat pour le moment'),
+          backgroundColor: Color(0xFFDC2626),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+    try {
+      await ApiService.instance.client.post(
+        '/api/v1/cart/items',
+        data: {
+          'variantId': variantId,
+          'quantity': _quantity,
+        },
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).clearSnackBars();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Ajouté au panier — ${_product['name']}'),
+          backgroundColor: const Color(0xFF1A1A1A),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(10),
+          ),
+          duration: const Duration(seconds: 2),
+          action: SnackBarAction(
+            label: 'Voir panier',
+            textColor: const Color(0xFFFF6210),
+            onPressed: () => Navigator.pushNamed(context, AppRoutes.cart),
+          ),
+        ),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).clearSnackBars();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Erreur lors de l\'ajout au panier'),
+          backgroundColor: Color(0xFFDC2626),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  Future<bool> _ensureInCart() async {
+    final variantId = _product['variantId'];
+    if (variantId == null || variantId.toString().isEmpty) return false;
+    try {
+      await ApiService.instance.client.post(
+        '/api/v1/cart/items',
+        data: {
+          'variantId': variantId,
+          'quantity': _quantity,
+        },
+      );
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<void> _checkWishlistStatus() async {
@@ -412,20 +494,21 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
                 quantity: _quantity,
                 onAddToCart: () {
                   setState(() => _cartCount++);
-                  ScaffoldMessenger.of(context).clearSnackBars();
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text('Ajouté au panier — ${_product['name']}'),
-                      backgroundColor: const Color(0xFF1A1A1A),
-                      behavior: SnackBarBehavior.floating,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      duration: const Duration(seconds: 2),
-                    ),
-                  );
+                  _addToCart();
                 },
-                onBuyNow: () {
+                onBuyNow: () async {
+                  final added = await _ensureInCart();
+                  if (!mounted) return;
+                  if (!added) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Erreur lors de l\'ajout au panier'),
+                        backgroundColor: Color(0xFFDC2626),
+                        behavior: SnackBarBehavior.floating,
+                      ),
+                    );
+                    return;
+                  }
                   Navigator.pushNamed(context, '/checkout-screen');
                 },
               ),
@@ -551,8 +634,25 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
                           ProductActionBarWidget(
                             product: _product,
                             quantity: _quantity,
-                            onAddToCart: () {},
-                            onBuyNow: () {},
+                            onAddToCart: () {
+                              setState(() => _cartCount++);
+                              _addToCart();
+                            },
+                            onBuyNow: () async {
+                              final added = await _ensureInCart();
+                              if (!mounted) return;
+                              if (!added) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('Erreur lors de l\'ajout au panier'),
+                                    backgroundColor: Color(0xFFDC2626),
+                                    behavior: SnackBarBehavior.floating,
+                                  ),
+                                );
+                                return;
+                              }
+                              Navigator.pushNamed(context, '/checkout-screen');
+                            },
                             isInline: true,
                           ),
                           const SizedBox(height: 24),

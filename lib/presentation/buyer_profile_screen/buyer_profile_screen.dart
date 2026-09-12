@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../theme/app_theme.dart';
 import '../../routes/app_routes.dart';
@@ -10,6 +11,7 @@ import '../../widgets/app_toast.dart';
 import '../../widgets/loading_skeleton_widget.dart';
 import '../../services/nest_auth_service.dart';
 import '../../services/user_service.dart';
+import '../../services/delivery_zone_service.dart';
 
 class BuyerProfileScreen extends StatefulWidget {
   const BuyerProfileScreen({super.key});
@@ -34,6 +36,20 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
   String get _fullName => _profile?.fullName ?? '';
   String get _email => _profile?.email ?? '';
   String get _phone => _profile?.phone ?? '';
+
+  Future<void> _launchExternalUrl(String url) async {
+    final uri = Uri.parse(url);
+    try {
+      final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!ok && mounted) {
+        AppToast.show(context, message: 'Impossible d\'ouvrir ce lien', type: ToastType.error);
+      }
+    } catch (_) {
+      if (mounted) {
+        AppToast.show(context, message: 'Impossible d\'ouvrir ce lien', type: ToastType.error);
+      }
+    }
+  }
 
   @override
   void initState() {
@@ -1131,13 +1147,18 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
     );
   }
 
-  void _showAddAddressDialog() {
+  Future<void> _showAddAddressDialog() async {
     final labelCtrl = TextEditingController();
     final nomCtrl = TextEditingController();
     final phoneCtrl = TextEditingController();
     final quartierCtrl = TextEditingController();
     final villeCtrl = TextEditingController();
     final countryCtrl = TextEditingController(text: 'Bénin');
+    // Liste des communes pour l'auto-complétion ; simple champ libre
+    // si la récupération échoue (ex: hors-ligne).
+    final communes = await DeliveryZoneService.instance.communeNames();
+    if (!mounted) return;
+    late TextEditingController villeFieldCtrl;
 
     showModalBottomSheet(
       context: context,
@@ -1205,12 +1226,28 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
                   ),
                 ),
                 const SizedBox(height: 12),
-                TextField(
-                  controller: villeCtrl,
-                  decoration: InputDecoration(
-                    labelText: 'Ville',
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12.0)),
-                  ),
+                Autocomplete<String>(
+                  optionsBuilder: (TextEditingValue value) {
+                    if (value.text.isEmpty) return communes;
+                    final q = value.text.toLowerCase();
+                    return communes.where((cm) => cm.toLowerCase().contains(q));
+                  },
+                  onSelected: (String selection) {
+                    villeFieldCtrl.text = selection;
+                    villeCtrl.text = selection;
+                  },
+                  fieldViewBuilder: (context, controller, focusNode, onFieldSubmitted) {
+                    villeFieldCtrl = controller;
+                    return TextField(
+                      controller: controller,
+                      focusNode: focusNode,
+                      onChanged: (v) => villeCtrl.text = v,
+                      decoration: InputDecoration(
+                        labelText: 'Ville / Commune',
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12.0)),
+                      ),
+                    );
+                  },
                 ),
                 const SizedBox(height: 12),
                 TextField(
@@ -1364,6 +1401,13 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
               ),
               _buildDivider(),
               _buildNavRow(
+                icon: Icons.assignment_return_rounded,
+                label: 'Demander un remboursement',
+                onTap: () =>
+                    Navigator.pushNamed(context, AppRoutes.refundRequest),
+              ),
+              _buildDivider(),
+              _buildNavRow(
                 icon: Icons.chat_outlined,
                 label: 'Chat avec le support',
                 onTap: () =>
@@ -1373,13 +1417,13 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
               _buildNavRow(
                 icon: Icons.phone_outlined,
                 label: '+229 0164693637',
-                onTap: () {},
+                onTap: () => _launchExternalUrl('tel:+2290164693637'),
               ),
               _buildDivider(),
               _buildNavRow(
                 icon: Icons.email_outlined,
                 label: 'contact@asoukaa.com',
-                onTap: () {},
+                onTap: () => _launchExternalUrl('mailto:contact@asoukaa.com'),
               ),
             ],
           ),

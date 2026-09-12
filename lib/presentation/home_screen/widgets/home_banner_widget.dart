@@ -115,7 +115,7 @@ class _HomeBannerWidgetState extends State<HomeBannerWidget>
     return Column(
       children: [
         SizedBox(
-          height: 180,
+          height: 216,
           child: PageView.builder(
             controller: _pageController,
             onPageChanged: (i) => setState(() => _currentPage = i),
@@ -148,7 +148,7 @@ class _HomeBannerWidgetState extends State<HomeBannerWidget>
                           CustomImageWidget(
                             imageUrl: banner['imageUrl'] as String,
                             width: double.infinity,
-                            height: 180,
+                            height: 216,
                             fit: BoxFit.cover,
                             semanticLabel: banner['semanticLabel'] as String,
                           ),

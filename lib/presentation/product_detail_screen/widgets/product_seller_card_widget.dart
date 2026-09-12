@@ -132,7 +132,34 @@ class ProductSellerCardWidget extends StatelessWidget {
             children: [
               Expanded(
                 child: OutlinedButton.icon(
-                  onPressed: () => Navigator.pushNamed(context, AppRoutes.chat),
+                  onPressed: () {
+                    final sellerId = product['seller_id']?.toString() ?? '';
+                    final vendorId = product['shopId']?.toString() ?? '';
+                    if (sellerId.isEmpty || vendorId.isEmpty) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text(
+                            'Vendeur introuvable pour ce produit',
+                          ),
+                        ),
+                      );
+                      return;
+                    }
+                    Navigator.pushNamed(
+                      context,
+                      AppRoutes.chat,
+                      arguments: {
+                        'seller_id': sellerId,
+                        'vendor_id': vendorId,
+                        'seller_name': product['shop'],
+                        'seller_avatar': product['shopLogo'],
+                        'product_id': product['id'],
+                        'product_name': product['name'],
+                        'product_price': product['price'],
+                        'product_image': product['imageUrl'],
+                      },
+                    );
+                  },
                   icon: const Icon(Icons.chat_bubble_outline_rounded, size: 16),
                   label: const Text('Contacter'),
                   style: OutlinedButton.styleFrom(

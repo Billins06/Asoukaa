@@ -195,10 +195,17 @@ class _SearchResultsScreenState extends State<SearchResultsScreen>
         : (p['shop'] as String? ?? p['shopName'] as String? ?? '');
     final shopId = shopData is Map ? (shopData['id'] ?? '') : (p['shop_id'] ?? '');
 
-    final price = (p['price'] as num? ?? 0).toInt();
-    final originalPrice = (p['original_price'] as num? ??
-            p['originalPrice'] as num? ??
-            p['compareAtPrice'] as num? ??
+    // Le backend renvoie "basePrice" (pas "price"), sérialisé en chaîne
+    // de caractères par TypeORM pour les colonnes decimal — un cast direct
+    // "as num" plante ici, il faut parser la chaîne.
+    final price =
+        (double.tryParse(p['basePrice']?.toString() ?? '') ?? 0).toInt();
+    final originalPrice = (double.tryParse(
+              p['original_price']?.toString() ??
+                  p['originalPrice']?.toString() ??
+                  p['compareAtPrice']?.toString() ??
+                  '',
+            ) ??
             price)
         .toInt();
     final discount = originalPrice > price
@@ -213,15 +220,24 @@ class _SearchResultsScreenState extends State<SearchResultsScreen>
             14
         : false;
 
-    // category peut être string ou objet {name}
-    final catRaw = p['category'];
-    final category = catRaw is Map
-        ? (catRaw['name'] as String? ?? '')
-        : (catRaw as String? ?? '');
+    // Le backend renvoie "categories" (liste, relation ManyToMany) et non
+    // "category" — on prend la première catégorie associée au produit.
+    final categoriesRaw = p['categories'];
+    String category = '';
+    if (categoriesRaw is List && categoriesRaw.isNotEmpty) {
+      final first = categoriesRaw.first;
+      if (first is Map) category = first['name'] as String? ?? '';
+    } else {
+      final catRaw = p['category'];
+      category = catRaw is Map
+          ? (catRaw['name'] as String? ?? '')
+          : (catRaw as String? ?? '');
+    }
 
     return {
       'id': p['id'] ?? '',
-      'name': p['name'] ?? '',
+      // Le champ s'appelle "prod_name" côté backend (pas "name")
+      'name': p['prod_name'] ?? p['name'] ?? '',
       'shop': shopName,
       'shop_id': shopId,
       'seller_id': p['seller_id'] ?? p['vendeurId'] ?? '',

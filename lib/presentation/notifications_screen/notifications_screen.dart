@@ -7,6 +7,7 @@ import '../../theme/app_theme.dart';
 import '../../services/nest_auth_service.dart';
 import '../../services/api_service.dart';
 import '../../widgets/empty_state_widget.dart';
+import '../../routes/app_routes.dart';
 
 class NotificationsScreen extends StatefulWidget {
   const NotificationsScreen({super.key});
@@ -79,19 +80,19 @@ class _NotificationsScreenState extends State<NotificationsScreen>
         return _notifications
             .where(
               (n) =>
-                  n['notification_type'] == 'commande' ||
-                  n['notification_type'] == 'livraison',
+                  n['type'] == 'commande' ||
+                  n['type'] == 'livraison',
             )
             .toList();
       case 2:
         // Promos tab
         return _notifications
-            .where((n) => n['notification_type'] == 'promo')
+            .where((n) => n['type'] == 'promo')
             .toList();
       case 3:
         // Messages tab
         return _notifications
-            .where((n) => n['notification_type'] == 'message')
+            .where((n) => n['type'] == 'chat')
             .toList();
       default:
         return _notifications;
@@ -99,16 +100,19 @@ class _NotificationsScreenState extends State<NotificationsScreen>
   }
 
   int get _unreadCount =>
-      _notifications.where((n) => n['is_read'] == false).length;
+      _notifications.where((n) => n['isRead'] == false).length;
 
   Future<void> _markAllRead() async {
     try {
-      await ApiService.instance.client.patch('/api/v1/notifications/read-all');
+      // Le backend n'expose pas /read-all mais /mark-all-read (sans corps)
+      await ApiService.instance.client.patch(
+        '/api/v1/notifications/mark-all-read',
+      );
     } catch (_) {}
     if (mounted) {
       setState(() {
         for (final n in _notifications) {
-          n['is_read'] = true;
+          n['isRead'] = true;
         }
       });
     }
@@ -116,13 +120,34 @@ class _NotificationsScreenState extends State<NotificationsScreen>
 
   Future<void> _markRead(String id) async {
     try {
-      await ApiService.instance.client.patch('/api/v1/notifications/$id/read');
+      // Le backend n'expose pas /notifications/:id/read mais
+      // /notifications/mark-read avec { ids: [...] } dans le corps
+      await ApiService.instance.client.patch(
+        '/api/v1/notifications/mark-read',
+        data: {
+          'ids': [id],
+        },
+      );
     } catch (_) {}
     if (mounted) {
       setState(() {
         final idx = _notifications.indexWhere((n) => n['id'] == id);
-        if (idx != -1) _notifications[idx]['is_read'] = true;
+        if (idx != -1) _notifications[idx]['isRead'] = true;
       });
+    }
+  }
+
+  void _handleNotificationTap(Map<String, dynamic> notif) {
+    _markRead(notif['id'] as String);
+
+    final referenceType = notif['referenceType'] as String?;
+    final referenceId = notif['referenceId'] as String?;
+    if (referenceType == 'conversation' && referenceId != null && referenceId.isNotEmpty) {
+      Navigator.pushNamed(
+        context,
+        AppRoutes.chat,
+        arguments: {'conversation_id': referenceId},
+      );
     }
   }
 
@@ -132,7 +157,7 @@ class _NotificationsScreenState extends State<NotificationsScreen>
         return Icons.shopping_bag_outlined;
       case 'livraison':
         return Icons.local_shipping_outlined;
-      case 'message':
+      case 'chat':
         return Icons.chat_bubble_outline_rounded;
       case 'promo':
         return Icons.local_offer_outlined;
@@ -147,7 +172,7 @@ class _NotificationsScreenState extends State<NotificationsScreen>
         return const Color(0xFF3B82F6);
       case 'livraison':
         return const Color(0xFF16A34A);
-      case 'message':
+      case 'chat':
         return AppTheme.primary;
       case 'promo':
         return const Color(0xFFDC2626);
@@ -249,13 +274,13 @@ class _NotificationsScreenState extends State<NotificationsScreen>
                 itemCount: _filteredNotifs.length,
                 itemBuilder: (_, index) {
                   final notif = _filteredNotifs[index];
-                  final isRead = notif['is_read'] == true;
+                  final isRead = notif['isRead'] == true;
                   final type =
-                      notif['notification_type'] as String? ?? 'systeme';
+                      notif['type'] as String? ?? 'systeme';
                   final color = _colorForType(type);
 
                   return GestureDetector(
-                    onTap: () => _markRead(notif['id'] as String),
+                    onTap: () => _handleNotificationTap(notif),
                     child: Container(
                       margin: const EdgeInsets.symmetric(
                         horizontal: 16,
@@ -332,7 +357,7 @@ class _NotificationsScreenState extends State<NotificationsScreen>
                                 ),
                                 const SizedBox(height: 6),
                                 Text(
-                                  _formatDate(notif['created_at'] as String?),
+                                  _formatDate(notif['createdAt'] as String?),
                                   style: GoogleFonts.outfit(
                                     fontSize: 11,
                                     color: AppTheme.muted,

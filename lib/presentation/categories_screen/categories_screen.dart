@@ -242,7 +242,7 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
             case 1:
               break;
             case 2:
-              Navigator.pushNamed(context, AppRoutes.chat);
+              _navigateToMessages();
               break;
             case 3:
               _navigateToDashboard();
@@ -254,6 +254,21 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
         },
       ),
     );
+  }
+
+  Future<void> _navigateToMessages() async {
+    try {
+      final isLoggedIn = await NestAuthService.instance.isLoggedIn()
+          .timeout(const Duration(seconds: 3));
+      if (!mounted) return;
+      if (!isLoggedIn) {
+        Navigator.pushNamed(context, AppRoutes.signUpLogin);
+        return;
+      }
+      Navigator.pushNamed(context, AppRoutes.conversationsInbox);
+    } catch (_) {
+      if (mounted) Navigator.pushNamed(context, AppRoutes.signUpLogin);
+    }
   }
 
   Widget _buildCategoryGrid() {
@@ -430,6 +445,42 @@ class _ProductCard extends StatefulWidget {
 
 class _ProductCardState extends State<_ProductCard> {
   bool _isFav = false;
+  bool _isFavLoading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _checkFavStatus();
+  }
+
+  Future<void> _checkFavStatus() async {
+    final id = (widget.product['id'] ?? '').toString();
+    if (id.isEmpty) return;
+    try {
+      final res =
+          await ApiService.instance.client.get('/api/v1/wishlist/check/$id');
+      final inWishlist = res.data?['inWishlist'] as bool? ?? false;
+      if (mounted) setState(() => _isFav = inWishlist);
+    } catch (_) {}
+  }
+
+  Future<void> _toggleFav() async {
+    final id = (widget.product['id'] ?? '').toString();
+    if (id.isEmpty || _isFavLoading) return;
+    setState(() => _isFavLoading = true);
+    try {
+      if (_isFav) {
+        await ApiService.instance.client.delete('/api/v1/wishlist/$id');
+        if (mounted) setState(() { _isFav = false; _isFavLoading = false; });
+      } else {
+        await ApiService.instance.client
+            .post('/api/v1/wishlist', data: {'productId': id});
+        if (mounted) setState(() { _isFav = true; _isFavLoading = false; });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _isFavLoading = false);
+    }
+  }
 
   String _formatPrice(dynamic price) {
     final p = (price as num?)?.toInt() ?? 0;
@@ -444,7 +495,11 @@ class _ProductCardState extends State<_ProductCard> {
 
   String _getImageUrl(Map<String, dynamic> p) {
     final images = p['images'];
-    if (images is List && images.isNotEmpty) return images.first.toString();
+    if (images is List && images.isNotEmpty) {
+      final first = images.first;
+      if (first is Map && first['url'] != null) return first['url'].toString();
+      if (first is String) return first;
+    }
     if (p['image_url'] != null) return p['image_url'].toString();
     return 'https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=400';
   }
@@ -452,13 +507,14 @@ class _ProductCardState extends State<_ProductCard> {
   @override
   Widget build(BuildContext context) {
     final p = widget.product;
-    final price = (p['price'] as num?)?.toInt() ?? 0;
-    final originalPrice = (p['original_price'] as num?)?.toInt() ?? price;
+    final price = (double.tryParse(p['basePrice']?.toString() ?? '') ?? 0).toInt();
+    final originalPrice =
+        (double.tryParse(p['original_price']?.toString() ?? '') ?? price).toInt();
     final hasDiscount = originalPrice > price;
     final discount = hasDiscount
         ? (((originalPrice - price) / originalPrice) * 100).round()
         : 0;
-    final soldCount = (p['sold_count'] as num?)?.toInt() ?? 0;
+    final soldCount = (p['totalVentes'] as num?)?.toInt() ?? 0;
 
     return GestureDetector(
       onTap: widget.onTap,
@@ -489,7 +545,7 @@ class _ProductCardState extends State<_ProductCard> {
                     width: double.infinity,
                     height: 130,
                     fit: BoxFit.cover,
-                    semanticLabel: p['name']?.toString() ?? 'Produit',
+                    semanticLabel: p['prod_name']?.toString() ?? 'Produit',
                   ),
                   if (hasDiscount)
                     Positioned(
@@ -518,7 +574,7 @@ class _ProductCardState extends State<_ProductCard> {
                     top: 6,
                     right: 6,
                     child: GestureDetector(
-                      onTap: () => setState(() => _isFav = !_isFav),
+                      onTap: _isFavLoading ? null : _toggleFav,
                       child: Container(
                         width: 28,
                         height: 28,
@@ -554,7 +610,7 @@ class _ProductCardState extends State<_ProductCard> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    p['name']?.toString() ?? 'Produit',
+                    p['prod_name']?.toString() ?? 'Produit',
                     style: GoogleFonts.outfit(
                       fontSize: 11,
                       fontWeight: FontWeight.w600,

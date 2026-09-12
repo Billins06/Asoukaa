@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:dio/dio.dart';
 import 'package:pretty_qr_code/pretty_qr_code.dart';
 import 'package:sizer/sizer.dart';
 
@@ -26,7 +27,8 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
   late Animation<double> _fadeAnim;
 
   // Live order status
-  String _liveStatus = 'expedie';
+  String _liveStatus = 'en attente';
+  String? _productId;
   Timer? _statusPollTimer;
 
   // Deliverer live position
@@ -47,47 +49,40 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
 
   // Status → step index mapping
   static const Map<String, int> _statusStepMap = {
-    'en_attente': 0,
-    'confirme': 0,
-    'en_preparation': 1,
-    'expedie': 2,
-    'en_livraison': 3,
-    'livre': 4,
+    'en attente': 0,
+    'en cours': 1,
+    'expedié': 3,
+    'livré': 4,
   };
 
-  int get _currentStep => _statusStepMap[_liveStatus] ?? 2;
-  bool get _isDelivered => _liveStatus == 'livre';
+  int get _currentStep => _statusStepMap[_liveStatus] ?? 0;
+  bool get _isDelivered => _liveStatus == 'livré';
 
   final List<_TrackingStep> _steps = [
     _TrackingStep(
       icon: Icons.check_circle_rounded,
       title: 'Commande confirmée',
       subtitle: 'Votre commande a été reçue et confirmée',
-      time: 'Aujourd\'hui, 09:14',
     ),
     _TrackingStep(
       icon: Icons.inventory_2_rounded,
       title: 'En préparation',
       subtitle: 'Le vendeur prépare votre colis',
-      time: 'Aujourd\'hui, 10:30',
     ),
     _TrackingStep(
       icon: Icons.local_shipping_rounded,
       title: 'Expédiée',
       subtitle: 'Votre colis a été remis au transporteur',
-      time: 'Aujourd\'hui, 12:05',
     ),
     _TrackingStep(
       icon: Icons.route_rounded,
       title: 'En transit',
       subtitle: 'Votre colis est en route vers vous',
-      time: 'Demain, estimé',
     ),
     _TrackingStep(
       icon: Icons.home_rounded,
       title: 'Livré',
       subtitle: 'Colis livré à l\'adresse indiquée',
-      time: 'Dans 1–2 jours',
     ),
   ];
 
@@ -109,8 +104,12 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
         ModalRoute.of(context)?.settings.arguments as Map<String, dynamic>?;
     final orderId = args?['orderId'] as String?;
     final initialStatus = args?['status'] as String?;
+    _productId = args?['productId'] as String?;
     if (initialStatus != null) _liveStatus = initialStatus;
-    if (orderId != null) {
+    // didChangeDependencies peut être appelé plusieurs fois (changement de
+    // thème/locale, etc.) : on ne démarre le polling qu'une seule fois pour
+    // éviter d'empiler plusieurs Timer.periodic concurrents.
+    if (orderId != null && _statusPollTimer == null) {
       _startStatusPolling(orderId);
     }
   }
@@ -124,7 +123,11 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
   }
 
   void _startStatusPolling(String orderId) {
-    _statusPollTimer = Timer.periodic(const Duration(seconds: 15), (_) async {
+    _statusPollTimer = Timer.periodic(const Duration(seconds: 15), (timer) async {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
       try {
         final response =
             await ApiService.instance.client.get('/api/v1/orders/$orderId');
@@ -132,24 +135,32 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
         if (status != null && mounted && status != _liveStatus) {
           setState(() => _liveStatus = status);
           _showStatusNotification(status);
-          if (status == 'livre') {
-            _statusPollTimer?.cancel();
+          if (status == 'livré') {
+            timer.cancel();
             Future.delayed(const Duration(seconds: 2), () {
               if (mounted) setState(() => _showRatingView = true);
             });
           }
         }
-      } catch (_) {}
+      } catch (e) {
+        // Commande introuvable (404) ou erreur définitive : on arrête le
+        // polling plutôt que d'interroger indéfiniment un écran qui n'est
+        // peut-être plus visible (ex. resté vivant plus bas dans la pile
+        // de navigation).
+        if (e is DioException && e.response?.statusCode == 404) {
+          timer.cancel();
+        }
+      }
     });
   }
 
   void _showStatusNotification(String status) {
     final messages = {
-      'confirme': '✅ Commande confirmée',
-      'en_preparation': '📦 En cours de préparation',
-      'expedie': '🚚 Commande expédiée',
-      'en_livraison': '📍 Livreur en route',
-      'livre': '🎉 Commande livrée !',
+      'en attente': '✅ Commande confirmée',
+      'en cours': '📦 En cours de préparation',
+      'expedié': '🚚 Commande expédiée',
+      'livré': '🎉 Commande livrée !',
+      'annulé': '❌ Commande annulée',
     };
     final msg = messages[status];
     if (msg == null || !mounted) return;
@@ -159,7 +170,7 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
           msg,
           style: GoogleFonts.outfit(fontWeight: FontWeight.w600),
         ),
-        backgroundColor: status == 'livre'
+        backgroundColor: status == 'livré'
             ? AppTheme.success
             : AppTheme.primary,
         behavior: SnackBarBehavior.floating,
@@ -193,12 +204,32 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
       );
       return;
     }
+    final productId = _productId;
+    if (productId == null || productId.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Produit introuvable pour cette commande',
+            style: GoogleFonts.outfit(),
+          ),
+          backgroundColor: AppTheme.error,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
     setState(() => _isSubmittingRating = true);
     try {
+      // Le backend n'expose pas de route "/orders/:id/rating" — les avis
+      // passent par le module Reviews (POST /reviews), qui vérifie que la
+      // commande est bien livrée et appartient à l'utilisateur avant
+      // d'enregistrer l'avis (statut PENDING, en attente de modération).
       await ApiService.instance.client.post(
-        '/api/v1/orders/$orderId/rating',
+        '/api/v1/reviews',
         data: {
-          'rating': _selectedRating,
+          'productId': productId,
+          'orderId': orderId,
+          'notation': _selectedRating,
           'comment': _ratingCommentController.text.trim(),
         },
       );
@@ -208,8 +239,26 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
         _ratingSubmitted = true;
       });
       HapticFeedback.mediumImpact();
-    } catch (_) {
-      if (mounted) setState(() => _isSubmittingRating = false);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _isSubmittingRating = false);
+      String message = 'Erreur lors de l\'envoi de votre avis';
+      if (e is DioException) {
+        final data = e.response?.data;
+        final serverMessage = data is Map ? data['message'] : null;
+        if (serverMessage is String) {
+          message = serverMessage;
+        } else if (serverMessage is List && serverMessage.isNotEmpty) {
+          message = serverMessage.first.toString();
+        }
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(message, style: GoogleFonts.outfit()),
+          backgroundColor: AppTheme.error,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
     }
   }
 
@@ -287,7 +336,7 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
               SizedBox(height: 2.h),
 
               // Live GPS position card (shown when deliverer is in transit)
-              if (_liveStatus == 'en_livraison') ...[
+              if (_liveStatus == 'expedié') ...[
                 _buildGpsTrackingCard(),
                 SizedBox(height: 2.h),
               ],
@@ -372,15 +421,14 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
 
   Widget _buildStatusBanner() {
     final statusLabels = {
-      'en_attente': (
+      'en attente': (
         'En attente',
         'Votre commande est en attente de confirmation',
       ),
-      'confirme': ('Commande confirmée', 'Votre commande a été confirmée'),
-      'en_preparation': ('En préparation', 'Le vendeur prépare votre colis'),
-      'expedie': ('Colis expédié', 'Votre colis est en route vers vous'),
-      'en_livraison': ('En cours de livraison', 'Le livreur est en route'),
-      'livre': ('Commande livrée !', 'Votre colis a été livré avec succès'),
+      'en cours': ('En préparation', 'Le vendeur prépare votre colis'),
+      'expedié': ('Colis expédié', 'Votre colis est en route vers vous'),
+      'livré': ('Commande livrée !', 'Votre colis a été livré avec succès'),
+      'annulé': ('Commande annulée', 'Cette commande a été annulée'),
     };
     final label =
         statusLabels[_liveStatus] ?? ('En cours', 'Suivi en temps réel');
@@ -1134,7 +1182,11 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        step.time,
+                        isCompleted
+                            ? 'Terminée'
+                            : isActive
+                            ? 'En cours'
+                            : 'À venir',
                         style: GoogleFonts.outfit(
                           fontSize: 10,
                           fontWeight: FontWeight.w600,
@@ -1448,12 +1500,16 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
                   ),
                 ],
               ),
-              child: PrettyQrView.data(
-                data: qrData,
-                decoration: const PrettyQrDecoration(
-                  shape: PrettyQrSmoothSymbol(color: Color(0xFF1A1A2E)),
+              child: SizedBox(
+                width: 200,
+                height: 200,
+                child: PrettyQrView.data(
+                  data: qrData,
+                  decoration: const PrettyQrDecoration(
+                    shape: PrettyQrSmoothSymbol(color: Color(0xFF1A1A2E)),
+                  ),
+                  errorCorrectLevel: QrErrorCorrectLevel.M,
                 ),
-                errorCorrectLevel: QrErrorCorrectLevel.M,
               ),
             ),
           ),
@@ -1546,12 +1602,10 @@ class _TrackingStep {
   final IconData icon;
   final String title;
   final String subtitle;
-  final String time;
   const _TrackingStep({
     required this.icon,
     required this.title,
     required this.subtitle,
-    required this.time,
   });
 }
 

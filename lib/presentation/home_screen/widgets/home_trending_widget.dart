@@ -297,18 +297,35 @@ class _TrendingProductCardState extends State<_TrendingProductCard>
   }
 
   Future<void> _checkWishlist() async {
-    // Wishlist sera implémenté avec l'API NestJS
+    final id = (widget.product['id'] ?? '').toString();
+    if (id.isEmpty) return;
+    try {
+      final res =
+          await ApiService.instance.client.get('/api/v1/wishlist/check/$id');
+      final inWishlist = res.data?['inWishlist'] as bool? ?? false;
+      if (mounted) setState(() => _isInWishlist = inWishlist);
+    } catch (_) {}
   }
 
   Future<void> _toggleWishlist() async {
-    if (_wishlistLoading) return;
+    final id = (widget.product['id'] ?? '').toString();
+    if (id.isEmpty || _wishlistLoading) return;
     setState(() => _wishlistLoading = true);
-    await Future.delayed(const Duration(milliseconds: 200));
-    if (mounted) {
-      setState(() {
-        _isInWishlist = !_isInWishlist;
-        _wishlistLoading = false;
-      });
+    try {
+      if (_isInWishlist) {
+        await ApiService.instance.client.delete('/api/v1/wishlist/$id');
+        if (mounted) {
+          setState(() { _isInWishlist = false; _wishlistLoading = false; });
+        }
+      } else {
+        await ApiService.instance.client
+            .post('/api/v1/wishlist', data: {'productId': id});
+        if (mounted) {
+          setState(() { _isInWishlist = true; _wishlistLoading = false; });
+        }
+      }
+    } catch (_) {
+      if (mounted) setState(() => _wishlistLoading = false);
     }
   }
 
@@ -366,7 +383,7 @@ class _TrendingProductCardState extends State<_TrendingProductCard>
                   child: Stack(
                     children: [
                       Hero(
-                        tag: 'product-${p['id']}',
+                        tag: 'trending-product-${p['id']}',
                         child: CustomImageWidget(
                           imageUrl: p['imageUrl'] as String? ?? '',
                           width: double.infinity,

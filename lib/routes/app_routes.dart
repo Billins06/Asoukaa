@@ -29,6 +29,7 @@ import '../presentation/wishlist_screen/wishlist_screen.dart';
 import '../presentation/delivery_request_screen/delivery_request_screen.dart';
 import '../presentation/support_help_screen/support_help_screen.dart';
 import '../presentation/legal_page_screen/legal_page_screen.dart';
+import '../presentation/refund_request_screen/refund_request_screen.dart';
 import '../presentation/chat_screen/conversations_inbox_screen.dart';
 import 'package:image_picker/image_picker.dart';
 
@@ -67,6 +68,7 @@ class AppRoutes {
   static const String legalSecurity = '/legal-security-screen';
   static const String legalRefund = '/legal-refund-screen';
   static const String legalTerms = '/legal-terms-screen';
+  static const String refundRequest = '/refund-request-screen';
   static const String conversationsInbox = '/conversations-inbox';
   static const String otpVerification = '/otp-verification-screen';
 
@@ -74,20 +76,15 @@ class AppRoutes {
     initial: (context) => const AuthGate(),
     signUpLogin: (context) => const SignUpLoginScreen(),
     home: (context) => const HomeScreen(),
-    productDetail: (context) => const ProductDetailScreen(),
     buyerDashboard: (context) => const BuyerDashboardScreen(),
     sellerDashboard: (context) => const SellerDashboardScreen(),
     delivererDashboard: (context) => const DelivererDashboardScreen(),
     adminDashboard: (context) => const AdminDashboardScreen(),
-    chat: (context) => const ChatScreen(),
     cart: (context) => const CartScreen(),
     checkout: (context) => const CheckoutScreen(),
     orderConfirmation: (context) => const OrderConfirmationScreen(),
     orderTracking: (context) => const OrderTrackingScreen(),
     publierProduit: (context) => const PublierProduitScreen(),
-    boutiqueVendeur: (context) => const BoutiqueVendeurScreen(),
-    searchResults: (context) => const SearchResultsScreen(),
-    deliveryProof: (context) => const DeliveryProofScreen(),
     buyerProfile: (context) => const BuyerProfileScreen(),
     sellerProfile: (context) => const SellerProfileScreen(),
     delivererProfile: (context) => const DelivererProfileScreen(),
@@ -107,6 +104,7 @@ class AppRoutes {
     legalTerms: (context) =>
         const LegalPageScreen(pageType: LegalPageType.terms),
     conversationsInbox: (context) => const ConversationsInboxScreen(),
+    refundRequest: (context) => const RefundRequestScreen(),
   };
 
   static Route<dynamic> onGenerateRoute(RouteSettings settings) {
