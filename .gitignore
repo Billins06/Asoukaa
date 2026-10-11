@@ -4,6 +4,21 @@ env.json
 .env.local
 .env.*.local
 
+# Clés de signature Android — un keystore commité + son mot de passe permet
+# de signer un APK malveillant accepté comme mise à jour officielle.
+*.keystore
+*.jks
+key.properties
+android/key.properties
+android/app/keystore/
+
+# Réglages locaux Claude Code (contiennent des chemins et commandes machine)
+.claude/settings.local.json
+
+# Fichiers de sauvegarde d'édition (*.dart.bak_qa1, etc.)
+*.bak
+*.bak_*
+
 # Miscellaneous
 *.class
 *.log
@@ -54,3 +69,6 @@ app.*.map.json
 android/app/.cxx
 
 *.bat
+
+# Dossier de sauvegardes QA locales
+_sauvegardes_qa/
