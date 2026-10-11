@@ -1,11 +1,11 @@
 import {
   IsString,
   IsOptional,
-  IsUrl,
   MaxLength,
   ValidateIf,
   IsNotEmpty,
 } from 'class-validator';
+import { IsAppUrl } from '../../../common/validators/is-app-url.decorator';
 import { Transform } from 'class-transformer';
 
 export class SendMessageDto {
@@ -19,7 +19,7 @@ export class SendMessageDto {
 
   // URL image — optionnelle si texte envoyé
   @IsOptional()
-  @IsUrl({}, { message: 'URL image invalide' })
+  @IsAppUrl({ message: 'URL image invalide' })
   @MaxLength(500)
   imageUrl?: string;
 

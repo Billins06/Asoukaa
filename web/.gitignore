@@ -16,3 +16,18 @@ web/node_modules/
 .DS_Store
 Thumbs.db
 
+
+# --- Ajouts sécurité / Next.js ---
+# ⚠️ Les lignes backend/ plus haut sont inopérantes ici (chemins relatifs à web/)
+.next/
+out/
+coverage/
+.env
+.env.*
+!.env.example
+*.log
+*.bak*
+*.pem
+*.key
+*.tsbuildinfo
+next-env.d.ts

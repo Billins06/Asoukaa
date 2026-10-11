@@ -173,6 +173,56 @@ export class ReviewsService {
   }
 
   // ─────────────────────────────────────────────────────
+  // AVIS D'UNE BOUTIQUE (tous produits confondus, publics)
+  // ─────────────────────────────────────────────────────
+  // Il n'y a pas de vendorId sur Review : on passe par product.vendorId.
+  async getShopReviews(
+    vendorId: string,
+    page:     number = 1,
+    limit:    number = 10,
+  ) {
+    // leftJoinAndSelect (plutôt qu'un innerJoin + addSelect partiel) pour
+    // garantir que review.product est bien hydraté comme une vraie relation
+    // imbriquée — c'est le style déjà utilisé ailleurs dans ce fichier
+    // (getProductReviews plus haut n'a pas ce problème car product est déjà
+    // connu par son id ; ici on filtre PAR product.vendorId, donc le join
+    // doit rester explicite).
+    const query = this.reviewRepo
+      .createQueryBuilder('review')
+      .leftJoinAndSelect('review.product', 'product')
+      .leftJoinAndSelect('review.user', 'user')
+      .where('product.vendorId = :vendorId', { vendorId })
+      .andWhere('review.status = :status', { status: ReviewStatus.APPROVED })
+      .orderBy('review.createdAt', 'DESC')
+      .skip((page - 1) * limit)
+      .take(limit);
+
+    const [reviews, total] = await query.getManyAndCount();
+
+    // ⚠️ Masquer les données sensibles des utilisateurs, comme pour
+    // getProductReviews ci-dessus.
+    const safeReviews = reviews.map(r => {
+      if (r.user) {
+        const { passwordHash, phone, ...userSafe } = r.user as any;
+        (r as any).user = {
+          id:     userSafe.id,
+          prenom: userSafe.prenom,
+          name:   userSafe.name,
+        };
+      }
+      return r;
+    });
+
+    return {
+      data:  safeReviews,
+      total,
+      page,
+      limit,
+      pages: Math.ceil(total / limit),
+    };
+  }
+
+  // ─────────────────────────────────────────────────────
   // MES AVIS (client connecté)
   // ─────────────────────────────────────────────────────
   async getMyReviews(userId: string, page = 1, limit = 10) {

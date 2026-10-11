@@ -85,9 +85,19 @@ export class Product {
   @Column({ default: 0 })
   nbreAvis: number;
 
-  // Compteur de ventes pour le dashboard et le tri
+  // Compteur de ventes pour le dashboard et le tri.
+  // Incrementé par OrdersService.incrementProductSales() quand une commande
+  // passe au statut "livré" (quantité réellement vendue, pas le nombre de
+  // commandes). Avant, cette colonne existait mais n'était JAMAIS mise à
+  // jour : les statistiques vendeur affichaient donc toujours zéro.
   @Column({ default: 0 })
   totalVentes: number;
+
+  // Nombre de fois qu'un visiteur a ouvert la fiche de ce produit.
+  // Incrementé par ProductsService.findOnePublic() (GET /products/:id),
+  // sur le même principe best-effort que VendorProfile.visitCount.
+  @Column({ type: 'int', default: 0 })
+  nombreVues: number;
 
   // ─── Relations ─────────────────────────────────────────
 
@@ -111,9 +121,16 @@ export class Product {
   })
   variants: ProductVariant[];
 
-  @OneToMany(() => ProductTag, (tag) => tag.product, {
-    cascade: true,
-  })
+  // ⚠️ PAS de cascade ici : les tags sont gérés manuellement (delete +
+  // recreate via ProductTag/tagRepo) dans ProductsService.create() et
+  // .update(), jamais en assignant ce tableau. Avec cascade:true,
+  // ProductsService.update() chargeait ce tableau AVANT de supprimer et
+  // recréer les tags "à la main", puis productRepo.save(product) recascadait
+  // ce tableau désormais périmé (lignes déjà supprimées en base) : TypeORM
+  // tentait de les réécrire avec productId = NULL → violation de la
+  // contrainte NOT NULL et 500 sur PUT /products/:id (jamais sur la
+  // création, où product.tags n'est jamais chargé au préalable).
+  @OneToMany(() => ProductTag, (tag) => tag.product)
   tags: ProductTag[];
 
   @OneToMany(() => ProductTierPrice, (tier) => tier.product, {

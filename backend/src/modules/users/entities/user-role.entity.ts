@@ -6,6 +6,7 @@ import {
   JoinColumn,
   CreateDateColumn,
   Unique,
+  Index,
 } from 'typeorm';
 import { User } from './user.entity';
 
@@ -19,6 +20,7 @@ export enum UserRoleEnum {
 // ⚠️ Contrainte unique : un utilisateur ne peut pas avoir
 // deux fois le même rôle
 @Unique(['userId', 'role'])
+@Index(['userId'])
 @Entity('user_roles')
 export class UserRole {
 

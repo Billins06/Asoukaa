@@ -4,10 +4,13 @@ import {
   Column,
   ManyToOne,
   JoinColumn,
+  Index,
 } from 'typeorm';
 import { Order } from './order.entity';
 import { ProductVariant } from '../../products/entities/product-variant.entity';
 
+@Index(['orderId'])
+@Index(['variantId'])
 @Entity('order_items')
 export class OrderItem {
 

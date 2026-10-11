@@ -29,6 +29,7 @@ import { JwtAuthGuard }       from '../auth/guards/jwt-auth.guard';
 import { RolesGuard }         from '../auth/guards/roles.guard';
 import { Roles }              from '../auth/decorators/roles.decorator';
 import { Role }               from '../../common/enums/role.enum';
+import { clampLimit, clampPage } from '../../common/utils/pagination.util';
 
 const getIp   = (req: Request) =>
   (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim()
@@ -80,8 +81,8 @@ export class PartnersController {
     @Query('limit') limit?: number,
   ) {
     return this.partnersService.findAll(
-      Number(page)  || 1,
-      Number(limit) || 20,
+      clampPage(page),
+      clampLimit(limit, 20),
     );
   }
 

@@ -7,6 +7,7 @@ import {
   JoinColumn,
   CreateDateColumn,
   UpdateDateColumn,
+  Index,
 } from 'typeorm';
 import { Order } from '../../orders/entities/order.entity';
 import { DeliveryAgentProfile } from '../../users/entities/delivery-agent-profile.entity';
@@ -20,6 +21,10 @@ export enum DeliveryStatus {
   FAILED     = 'livraison echouée',      // échec de livraison
 }
 
+@Index(['orderId'])
+@Index(['agentId'])
+@Index(['status'])
+@Index(['agentId', 'status'])
 @Entity('deliveries')
 export class Delivery {
 
@@ -59,6 +64,15 @@ export class Delivery {
   // Adresse du client (destination)
   @Column({ type: 'text' })
   adresseLivraison: string;
+
+  // Position GPS du client, copiée depuis l'adresse au moment de la
+  // création de la commande — permet au livreur d'ouvrir directement
+  // l'itinéraire dans Maps plutôt que de chercher le texte de l'adresse.
+  @Column({ type: 'double precision', nullable: true })
+  latitude: number | null;
+
+  @Column({ type: 'double precision', nullable: true })
+  longitude: number | null;
 
   @Column({
     type: 'enum',

@@ -11,6 +11,7 @@ import { Category }           from './entities/category.entity';
 import { CreateCategoryDto }  from './dto/create-category.dto';
 import { UpdateCategoryDto }  from './dto/update-category.dto';
 import { ActivityLogService } from '../../common/services/activity-log.service';
+import { UploadService, UploadType } from '../upload/upload.service';
 import {
   ActorType,
   LogAction,
@@ -24,6 +25,8 @@ export class CategoriesService {
     private readonly categoryRepo: Repository<Category>,
 
     private readonly logService: ActivityLogService,
+
+    private readonly uploadService: UploadService,
   ) {}
 
   // ─────────────────────────────────────────────────────
@@ -64,6 +67,19 @@ export class CategoriesService {
       }
 
       level = parent.level + 1;
+    }
+
+    // 2 bis. Image : OBLIGATOIRE pour une catégorie de premier niveau (les
+    // cercles de l'accueil l'affichent), facultative pour les
+    // sous-catégories. Dans tous les cas, si elle est fournie, elle doit
+    // venir de notre propre stockage (upload de type « categories »).
+    if (level === 1 && !dto.imageUrl) {
+      throw new BadRequestException(
+        'L\'image est obligatoire pour une catégorie principale'
+      );
+    }
+    if (dto.imageUrl) {
+      this.uploadService.assertIsOwnUploadUrl(dto.imageUrl, UploadType.CATEGORY);
     }
 
     // 3. Créer la catégorie
@@ -113,7 +129,7 @@ category.isActive  = dto.isActive ?? true;
 
     return this.categoryRepo.find({
       where,
-      select: ['id', 'name', 'slug', 'parentId', 'level', 'isActive'],
+      select: ['id', 'name', 'slug', 'parentId', 'level', 'isActive', 'imageUrl'],
       order:  { level: 'ASC', sortOrder: 'ASC', name: 'ASC' },
     });
   }
@@ -187,7 +203,24 @@ category.isActive  = dto.isActive ?? true;
       );
     }
 
-    if (dto.imageUrl  !== undefined) category.imageUrl  = dto.imageUrl;
+    // Image : exigée seulement si elle est fournie. Une valeur identique à
+    // l'actuelle n'est pas revalidée (anciennes catégories, ancienne URL).
+    // Une catégorie principale ne peut pas perdre son image ; envoyer
+    // null/vide sur une catégorie qui n'en a pas ne change rien.
+    if (dto.imageUrl !== undefined) {
+      const newImage = (dto.imageUrl as string | null) || null;
+      if (newImage === null) {
+        if (category.imageUrl && category.parentId === null) {
+          throw new BadRequestException(
+            'L\'image d\'une catégorie principale ne peut pas être supprimée'
+          );
+        }
+        category.imageUrl = null;
+      } else if (newImage !== category.imageUrl) {
+        this.uploadService.assertIsOwnUploadUrl(newImage, UploadType.CATEGORY);
+        category.imageUrl = newImage;
+      }
+    }
     if (dto.sortOrder !== undefined) category.sortOrder = dto.sortOrder;
     if (dto.isActive  !== undefined) category.isActive  = dto.isActive;
 

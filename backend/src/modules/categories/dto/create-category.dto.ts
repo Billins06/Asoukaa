@@ -7,8 +7,8 @@ import {
   IsInt,
   Min,
   MaxLength,
-  IsUrl,
 } from 'class-validator';
+import { IsAppUrl } from '../../../common/validators/is-app-url.decorator';
 import { Transform } from 'class-transformer';
 
 export class CreateCategoryDto {
@@ -27,7 +27,7 @@ export class CreateCategoryDto {
   parentId?: string;
 
   @IsOptional()
-  @IsUrl({}, { message: 'URL image invalide' })
+  @IsAppUrl({ message: 'URL image invalide' })
   @MaxLength(500)
   imageUrl?: string;
 

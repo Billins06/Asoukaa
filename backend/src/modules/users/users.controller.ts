@@ -15,10 +15,13 @@ import { UpdateProfileDto }   from './dto/update-profile.dto';
 import { CreateAddressDto }   from './dto/create-address.dto';
 import { UpdateAddressDto }   from './dto/update-address.dto';
 import { ChangePasswordDto }  from './dto/change-password.dto';
+import { AdminCreateUserDto } from './dto/admin-create-user.dto';
+import { AdminUpdateUserDto } from './dto/admin-update-user.dto';
 import { JwtAuthGuard }       from '../auth/guards/jwt-auth.guard';
 import { RolesGuard }         from '../auth/guards/roles.guard';
 import { Roles }              from '../auth/decorators/roles.decorator';
 import { Role }               from '../../common/enums/role.enum';
+import { clampLimit, clampPage } from '../../common/utils/pagination.util';
 
 // Helper IP
 const getIp = (req: Request): string =>
@@ -136,8 +139,24 @@ export class UsersController {
     @Query('limit') limit: number = 20,
   ) {
     return this.usersService.getAllUsers(
-      Number(page),
-      Number(limit),
+      clampPage(page),
+      clampLimit(limit),
+    );
+  }
+
+  @ApiOperation({ summary: '[ADMIN] Créer un utilisateur' })
+  @UseGuards(RolesGuard)
+  @Roles(Role.ADMIN)
+  @Post()
+  @HttpCode(HttpStatus.CREATED)
+  adminCreateUser(
+    @Req() req: Request,
+    @Body() dto: AdminCreateUserDto,
+  ) {
+    return this.usersService.adminCreateUser(
+      dto,
+      getUser(req).id,
+      getIp(req),
     );
   }
 
@@ -147,6 +166,23 @@ export class UsersController {
   @Get(':id')
   getUserById(@Param('id', ParseUUIDPipe) id: string) {
     return this.usersService.getUserById(id);
+  }
+
+  @ApiOperation({ summary: '[ADMIN] Modifier un utilisateur' })
+  @UseGuards(RolesGuard)
+  @Roles(Role.ADMIN)
+  @Patch(':id')
+  adminUpdateUser(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Req() req: Request,
+    @Body() dto: AdminUpdateUserDto,
+  ) {
+    return this.usersService.adminUpdateUser(
+      id,
+      dto,
+      getUser(req).id,
+      getIp(req),
+    );
   }
 
   @ApiOperation({ summary: '[ADMIN] Bloquer un utilisateur' })

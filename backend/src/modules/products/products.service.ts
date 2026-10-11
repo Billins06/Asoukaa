@@ -6,7 +6,7 @@ import {
   ConflictException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Like, In } from 'typeorm';
+import { Repository, Like, In, SelectQueryBuilder } from 'typeorm';
 
 import { Product, ProductStatus }    from './entities/product.entity';
 import { ProductVariant }            from './entities/product-variant.entity';
@@ -15,6 +15,7 @@ import { ProductTag }                from './entities/product-tag.entity';
 import { ProductTierPrice }          from './entities/product-tier-price.entity';
 import { Category }                  from '../categories/entities/category.entity';
 import { VendorProfile, VendorStatus } from '../users/entities/vendor-profile.entity';
+import { toPublicVendor } from './public-vendor.util';
 
 import { CreateProductDto }   from './dto/create-product.dto';
 import { UpdateProductDto }   from './dto/update-product.dto';
@@ -165,16 +166,16 @@ export class ProductsService {
       status     = ProductStatus.ACTIVE,
     } = params;
 
-    // Optimisation : QueryBuilder pour filtres dynamiques
-    const query = this.productRepo
-      .createQueryBuilder('product')
-      .leftJoinAndSelect('product.categories', 'category')
-      .leftJoinAndSelect('product.images',     'image',
-        'image.isPrimary = true')           // uniquement l'image principale
-      .leftJoinAndSelect('product.variants',   'variant',
-        'variant.isActive = true')
-      .where('product.status = :status', { status })
+    // Optimisation : QueryBuilder pour filtres dynamiques.
+    // Jointures + règle de visibilité partagées avec la vitrine (voir
+    // createPublicListQuery) : un produit renvoyé par /vitrine doit avoir
+    // EXACTEMENT la même forme JSON qu'un élément de GET /products.
+    // Tri STABLE (createdAt puis id) : deux produits créés à la même
+    // milliseconde ne peuvent ni se doubler ni sauter d'une page à l'autre
+    // pendant le défilement infini de l'accueil.
+    const query = this.createPublicListQuery(status)
       .orderBy('product.createdAt', 'DESC')
+      .addOrderBy('product.id', 'DESC')
       .skip((page - 1) * limit)
       .take(limit);
 
@@ -189,11 +190,16 @@ export class ProductsService {
     }
 
     if (categoryId) {
+      // Un produit range uniquement dans une sous-categorie (ex: "Padel")
+      // doit quand meme remonter quand on filtre sur sa categorie parente
+      // (ex: "Sports") — sinon la categorie parente semble vide des qu'on
+      // a des produits uniquement tagges sur ses sous-categories.
+      const categoryIds = await this.resolveCategoryIdsWithDescendants(categoryId);
       query.andWhere(
         'EXISTS (SELECT 1 FROM product_categories pc '
         + 'WHERE pc."productId" = product.id '
-        + 'AND pc."categoryId" = :categoryId)',
-        { categoryId }
+        + 'AND pc."categoryId" IN (:...categoryIds))',
+        { categoryIds }
       );
     }
 
@@ -211,13 +217,213 @@ export class ProductsService {
 
     const [products, total] = await query.getManyAndCount();
 
+    // Ordre stable des prix dégressifs par quantité minimale croissante,
+    // comme dans findOne() et findByVendor().
+    for (const p of products) {
+      p.tierPrices?.sort((a, b) => a.minQuantity - b.minQuantity);
+      (p as any).vendor = this.toPublicVendor(p.vendor);
+    }
+
     return {
       data:  products,
       total,
       page,
       limit,
       pages: Math.ceil(total / limit),
+      // true = il reste au moins une page après celle-ci (défilement infini)
+      hasMore: page * limit < total,
     };
+  }
+
+  // ─────────────────────────────────────────────────────
+  // REQUÊTE DE BASE DE LA LISTE PUBLIQUE
+  // ─────────────────────────────────────────────────────
+  // Mêmes relations chargées et même règle de visibilité que GET /products.
+  // Partagée avec la vitrine (VitrineService) pour que l'appli puisse
+  // normaliser les produits des rayons avec le même code que /products.
+  createPublicListQuery(
+    status: ProductStatus = ProductStatus.ACTIVE,
+  ): SelectQueryBuilder<Product> {
+    return this.productRepo
+      .createQueryBuilder('product')
+      .leftJoinAndSelect('product.categories', 'category')
+      .leftJoinAndSelect('product.vendor',     'vendor')
+      .leftJoinAndSelect('product.images',     'image',
+        'image.isPrimary = true')           // uniquement l'image principale
+      .leftJoinAndSelect('product.variants',   'variant',
+        'variant.isActive = true')
+      // Prix dégressifs : les cartes produit côté client affichent une
+      // fourchette "meilleur palier – prix normal". Sans cette relation,
+      // l'appli n'a aucun moyen de connaître le palier le plus bas.
+      .leftJoinAndSelect('product.tierPrices', 'tierPrices')
+      .where('product.status = :status', { status })
+      // Les produits d'un vendeur bloqué / rejeté / en attente, ou dont le
+      // compte est désactivé, ne sont jamais visibles du public.
+      .andWhere(this.vendorVisibilitySql('product'), {
+        publicVendorStatus: VendorStatus.APPROVED,
+      });
+  }
+
+  // Condition SQL "le vendeur du produit est public" : boutique approuvée ET
+  // compte utilisateur actif. Écrite en sous-requête EXISTS pour fonctionner
+  // sur n'importe quelle requête qui expose un alias de produit (comptages,
+  // aperçus, rayons...), sans dépendre d'une jointure déjà présente.
+  // Paramètre à fournir : publicVendorStatus (VendorStatus.APPROVED).
+  private vendorVisibilitySql(alias: string): string {
+    return 'EXISTS (SELECT 1 FROM vendor_profiles pubvp '
+      + 'INNER JOIN users pubu ON pubu.id = pubvp."userId" '
+      + `WHERE pubvp.id = "${alias}"."vendorId" `
+      + 'AND pubvp.status = :publicVendorStatus '
+      // Boutique masquée par l'admin (shopVisible = false) : ses produits
+      // disparaissent des listes publiques. Le propriétaire garde l'accès
+      // à ses produits (findByVendor / findOneForOwner n'utilisent pas
+      // cette règle). Colonne créée par la migration 1791500000000.
+      + 'AND pubvp."shopVisible" = true '
+      + 'AND pubu."isActive" = true)';
+  }
+
+  // Voir public-vendor.util.ts (liste blanche des champs vendeur publics).
+  // Ces endpoints produits sont consultables sans connexion : on retire donc
+  // la présence (« En ligne / Vu à … ») qui, elle, n'est donnée qu'aux
+  // utilisateurs connectés (fiche boutique, chat).
+  private toPublicVendor(vendor: any): any {
+    const pub = toPublicVendor(vendor);
+    if (pub && typeof pub === 'object') {
+      delete pub.lastSeenAt;
+      delete pub.isOnline;
+    }
+    return pub;
+  }
+
+  // Ajoute à une requête quelconque la règle "produit visible
+  // publiquement" (identique à findAll) sur l'alias donné. Sert aux
+  // comptages (productCount des rayons, aperçus de l'annuaire des
+  // boutiques) sans dupliquer la règle ailleurs.
+  applyPublicVisibility<T extends object>(
+    qb:    SelectQueryBuilder<T>,
+    alias: string,
+  ): SelectQueryBuilder<T> {
+    return qb
+      .andWhere(`${alias}.status = :publicProductStatus`, {
+        publicProductStatus: ProductStatus.ACTIVE,
+      })
+      .andWhere(this.vendorVisibilitySql(alias), {
+        publicVendorStatus: VendorStatus.APPROVED,
+      });
+  }
+
+  // Parmi `ids`, ne garde que les produits visibles publiquement, en
+  // conservant l'ordre d'origine (ordre d'un rayon de la vitrine).
+  // Requête légère : seuls les ids sont lus.
+  async filterPublicVisibleIds(ids: string[]): Promise<string[]> {
+    if (!ids.length) return [];
+    const qb = this.productRepo
+      .createQueryBuilder('product')
+      .select('product.id', 'id')
+      .where('product.id IN (:...ids)', { ids });
+    this.applyPublicVisibility(qb, 'product');
+    const rows: { id: string }[] = await qb.getRawMany();
+    const visible = new Set(rows.map((r) => r.id));
+    return ids.filter((id) => visible.has(id));
+  }
+
+  // Produits visibles publiquement, chargés EXACTEMENT comme dans
+  // findAll(), renvoyés dans l'ordre de `ids` (les invisibles sont omis).
+  async findPublicByIds(ids: string[]): Promise<Product[]> {
+    if (!ids.length) return [];
+    const products = await this.createPublicListQuery()
+      .andWhere('product.id IN (:...ids)', { ids })
+      .getMany();
+
+    // Même tri des prix dégressifs que findAll().
+    for (const p of products) {
+      p.tierPrices?.sort((a, b) => a.minQuantity - b.minQuantity);
+      (p as any).vendor = this.toPublicVendor(p.vendor);
+    }
+
+    const byId = new Map(products.map((p) => [p.id, p]));
+    return ids
+      .map((id) => byId.get(id))
+      .filter((p): p is Product => !!p);
+  }
+
+  // ─────────────────────────────────────────────────────
+  // Résout un id de catégorie + tous ses descendants (sous-catégories,
+  // sous-sous-catégories...). Le filtre categoryId doit couvrir toute la
+  // branche de l'arbre, pas seulement la catégorie exacte choisie.
+  // ─────────────────────────────────────────────────────
+  // Public : réutilisé par l'annuaire des boutiques (VendorsService,
+  // filtre categoryId de GET /vendors/directory).
+  async resolveCategoryIdsWithDescendants(
+    categoryId: string,
+  ): Promise<string[]> {
+    const ids: string[] = [categoryId];
+    let frontier: string[] = [categoryId];
+
+    // Profondeur max 3 niveaux (cf. Category.level), mais on boucle tant
+    // qu'on trouve des enfants, par sécurité si la limite change un jour.
+    while (frontier.length > 0) {
+      const children = await this.categoryRepo.find({
+        where: { parentId: In(frontier) },
+        select: ['id'],
+      });
+      if (children.length === 0) break;
+      const childIds = children.map((c) => c.id);
+      ids.push(...childIds);
+      frontier = childIds;
+    }
+
+    return ids;
+  }
+
+  // ─────────────────────────────────────────────────────
+  // DÉTAILS D'UN PRODUIT — VUE PUBLIQUE (compte la visite)
+  // ─────────────────────────────────────────────────────
+  // Séparée de findOne() car celle-ci est aussi appelée en interne (après
+  // création/modification d'un produit) : compter ces appels-là gonflerait
+  // artificiellement les vues du vendeur.
+  async findOnePublic(id: string) {
+    const product = await this.findOne(id);
+
+    // Brouillon ou produit désactivé, vendeur non approuvé ou compte
+    // désactivé : pour le public, c'est comme si le produit n'existait pas.
+    // (Le vendeur propriétaire passe par findOneForOwner pour modifier.)
+    // Un produit en rupture de stock reste consultable.
+    if (
+      product.status === ProductStatus.DRAFT
+      || product.status === ProductStatus.INACTIVE
+      || product.vendor?.status !== VendorStatus.APPROVED
+      || (product.vendor?.user as any)?.isActive === false
+      || (product.vendor as any)?.shopVisible === false
+    ) {
+      throw new NotFoundException('Produit introuvable');
+    }
+
+    // Best-effort : un compteur de vues qui échoue ne doit jamais empêcher
+    // l'affichage de la fiche produit (même principe que visitCount côté
+    // boutique, voir VendorsService.getPublicShop).
+    try {
+      await this.productRepo.increment({ id }, 'nombreVues', 1);
+      (product as any).nombreVues = (product.nombreVues ?? 0) + 1;
+    } catch {
+      // On renvoie quand même le produit, avec le compteur non incrémenté.
+    }
+
+    (product as any).vendor = this.toPublicVendor(product.vendor);
+    return product;
+  }
+
+  // ─────────────────────────────────────────────────────
+  // DÉTAILS D'UN PRODUIT — VUE DU VENDEUR PROPRIÉTAIRE
+  // ─────────────────────────────────────────────────────
+  // Sert à l'écran de modification : renvoie le produit quel que soit son
+  // statut (brouillon compris), mais seulement à son propriétaire. Ne compte
+  // pas de visite.
+  async findOneForOwner(id: string, userId: string) {
+    const product = await this.findOne(id);
+    await this.checkOwnership(product, userId);
+    (product as any).vendor = this.toPublicVendor(product.vendor);
+    return product;
   }
 
   // ─────────────────────────────────────────────────────
@@ -238,6 +444,15 @@ export class ProductsService {
     });
 
     if (!product) throw new NotFoundException('Produit introuvable');
+
+    // Ordre stable pour la fiche produit : galerie (image principale puis
+    // sortOrder) et prix dégressifs par quantité minimale croissante.
+    // TypeORM ne garantit aucun ordre sur les relations chargées ainsi.
+    product.images?.sort(
+      (a, b) =>
+        Number(b.isPrimary) - Number(a.isPrimary) || a.sortOrder - b.sortOrder,
+    );
+    product.tierPrices?.sort((a, b) => a.minQuantity - b.minQuantity);
 
     // ⚠️ Ne pas exposer les données du vendeur sensibles
     if (product.vendor?.user) {
@@ -541,20 +756,53 @@ export class ProductsService {
 
     await this.checkOwnership(product, userId);
 
+    // ⚠️ Le corps est un TABLEAU : le ValidationPipe global ne valide pas
+    // les éléments d'un tableau (CreateTierPriceDto n'est donc pas appliqué)
+    // → contrôle manuel des valeurs ici.
+    if (!Array.isArray(tiers)) {
+      throw new BadRequestException('Liste de paliers de prix invalide');
+    }
+    for (const tier of tiers) {
+      const min   = Number(tier?.minQuantity);
+      const price = Number(tier?.price);
+      if (!Number.isInteger(min) || min < 1 || !Number.isFinite(price) || price <= 0) {
+        throw new BadRequestException(
+          'Chaque palier doit avoir une quantité minimale (entier >= 1) et un prix positif'
+        );
+      }
+    }
+
     // ⚠️ Vérifier la cohérence des paliers
     // Chaque minQuantity doit être > maxQuantity du palier précédent
-    const sorted = [...tiers].sort(
-      (a, b) => a.minQuantity - b.minQuantity
-    );
+    const sorted = [...tiers]
+      .map(t => ({
+        minQuantity: Number(t.minQuantity),
+        maxQuantity:
+          t.maxQuantity === undefined || t.maxQuantity === null
+            ? undefined
+            : Number(t.maxQuantity),
+        price:       Number(t.price),
+      }))
+      .sort((a, b) => a.minQuantity - b.minQuantity);
 
     for (let i = 0; i < sorted.length - 1; i++) {
       const current = sorted[i];
       const next    = sorted[i + 1];
 
-      if (current.maxQuantity === undefined || current.maxQuantity === null) {
+      if (next.minQuantity === current.minQuantity) {
         throw new BadRequestException(
-          'Seul le dernier palier peut avoir une quantité maximale illimitée'
+          'Deux paliers de prix ne peuvent pas avoir la même quantité minimale'
         );
+      }
+
+      // L'app (publier_produit_screen) n'envoie que minQuantity + price :
+      // avant, tout envoi de 2 paliers ou plus était rejeté ici ("Seul le
+      // dernier palier peut avoir une quantité maximale illimitée") et
+      // l'erreur, avalée côté app, faisait qu'AUCUN palier n'était
+      // enregistré. Un palier intermédiaire sans maximum s'arrête donc
+      // simplement juste avant le palier suivant.
+      if (current.maxQuantity === undefined) {
+        current.maxQuantity = next.minQuantity - 1;
       }
 
       if (next.minQuantity <= current.maxQuantity) {
@@ -618,8 +866,9 @@ export class ProductsService {
 
     const query = this.productRepo
       .createQueryBuilder('product')
-      .leftJoinAndSelect('product.images',   'image', 'image.isPrimary = true')
-      .leftJoinAndSelect('product.variants', 'variant')
+      .leftJoinAndSelect('product.images',     'image', 'image.isPrimary = true')
+      .leftJoinAndSelect('product.variants',   'variant')
+      .leftJoinAndSelect('product.tierPrices', 'tierPrices')
       .where('product.vendorId = :vendorId', { vendorId: vendor.id })
       .orderBy('product.createdAt', 'DESC')
       .skip((page - 1) * limit)
@@ -630,6 +879,12 @@ export class ProductsService {
     }
 
     const [products, total] = await query.getManyAndCount();
+
+    // Ordre stable des prix dégressifs par quantité minimale croissante,
+    // comme dans findOne().
+    for (const p of products) {
+      p.tierPrices?.sort((a, b) => a.minQuantity - b.minQuantity);
+    }
 
     return {
       data:  products,

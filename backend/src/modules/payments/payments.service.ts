@@ -6,9 +6,10 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
-import { MailerService } from '@nestjs-modules/mailer';
+import { Repository, DataSource, In } from 'typeorm';
+import { MailService } from '../mail/mail.service';
 import { ConfigService } from '@nestjs/config';
+import { randomUUID } from 'crypto';
 
 import { Payment, PaymentStatus, PaymentMethod, PaymentOperator } from './entities/payment.entity';
 import { Commission, CommissionStatus }           from './entities/commission.entity';
@@ -21,6 +22,7 @@ import { User }                                   from '../users/entities/user.e
 import { InitiatePaymentDto } from './dto/initiate-payment.dto';
 import { RequestRefundDto }   from './dto/request-refund.dto';
 import { ActivityLogService } from '../../common/services/activity-log.service';
+import { stripSecrets } from '../../common/utils/strip-secrets.util';
 import {
   ActorType,
   LogAction,
@@ -56,7 +58,7 @@ export class PaymentsService {
     private readonly userRepo: Repository<User>,
 
     private readonly dataSource:    DataSource,
-    private readonly mailerService: MailerService,
+    private readonly mailService:   MailService,
     private readonly logService:    ActivityLogService,
     private readonly configService: ConfigService,
   ) {}
@@ -69,6 +71,13 @@ export class PaymentsService {
     dto:    InitiatePaymentDto,
     ip:     string,
   ) {
+    // Panier réparti sur plusieurs boutiques : plusieurs commandes créées
+    // ensemble (une par boutique, voir OrdersService.createFromCart), mais
+    // le client ne doit payer qu'une seule fois.
+    if (dto.orderIds && dto.orderIds.length > 0) {
+      return this.initiateGroupPayment(userId, dto, ip);
+    }
+
     // 1. Récupérer la commande
     const order = await this.orderRepo.findOne({
       where:     { id: dto.orderId, userId },
@@ -124,7 +133,7 @@ export class PaymentsService {
     //    commande (orderId est unique en base : on ne peut pas en
     //    insérer une deuxième).
     const payment         = existingPayment ?? this.paymentRepo.create();
-    payment.orderId       = dto.orderId;
+    payment.orderId       = dto.orderId!;
     payment.method        = dto.method;
     payment.operator      = dto.operator ?? null;
     payment.status        = PaymentStatus.PENDING;
@@ -200,6 +209,168 @@ export class PaymentsService {
       method:    payment.method,
       operator:  payment.operator,
       // En production : redirectUrl ou ussdPrompt ici
+    };
+  }
+
+  // ─────────────────────────────────────────────────────
+  // PANIER MULTI-BOUTIQUES — UN SEUL PAIEMENT POUR PLUSIEURS COMMANDES
+  // Même schéma que initiatePayment() (commande unique) mais appliqué à
+  // un groupe de commandes créées ensemble par OrdersService.createFromCart
+  // (une commande par boutique). On crée une ligne Payment par commande
+  // (orderId reste unique en base — impossible de n'en créer qu'une seule
+  // pour plusieurs commandes), mais toutes partagent le même groupRef et
+  // le même providerRef FeexPay : un seul montant est réellement demandé
+  // au client. checkPaymentStatus() confirmera ensuite TOUTES les lignes
+  // du groupe d'un coup dès que FeexPay confirme.
+  // ─────────────────────────────────────────────────────
+  private async initiateGroupPayment(
+    userId: string,
+    dto:    InitiatePaymentDto,
+    ip:     string,
+  ) {
+    const orderIds = dto.orderIds!;
+
+    const orders = await this.orderRepo.find({
+      where:     { id: In(orderIds), userId },
+      relations: ['items', 'items.variant'],
+    });
+
+    if (orders.length !== orderIds.length) {
+      throw new NotFoundException(
+        'Une ou plusieurs commandes de ce paiement sont introuvables'
+      );
+    }
+
+    for (const order of orders) {
+      if (order.status !== OrderStatus.PENDING) {
+        throw new BadRequestException(
+          `La commande ${order.orderNumber} ne peut plus être payée`
+        );
+      }
+    }
+
+    const existingPayments = await this.paymentRepo.find({
+      where: { orderId: In(orderIds) },
+    });
+
+    for (const existing of existingPayments) {
+      if (existing.status === PaymentStatus.SUCCESS) {
+        throw new BadRequestException(
+          'Une des commandes de ce paiement est déjà payée'
+        );
+      }
+      if (existing.status === PaymentStatus.PENDING) {
+        throw new BadRequestException(
+          'Un paiement est déjà en cours pour une des commandes'
+        );
+      }
+    }
+
+    // Vérifier le stock une dernière fois avant le paiement
+    for (const order of orders) {
+      for (const item of order.items) {
+        const variant = item.variant;
+        if (variant.stockQuantity < item.quantity) {
+          if (variant.stockQuantity === 0) {
+            throw new BadRequestException(
+              `"${variant.sku}" n'est plus disponible. `
+              + `Veuillez retirer cet article de votre commande.`
+            );
+          }
+          throw new BadRequestException(
+            `Stock insuffisant pour la référence "${variant.sku}". `
+            + `Il reste ${variant.stockQuantity} unité(s).`
+          );
+        }
+      }
+    }
+
+    const totalAmount = orders.reduce((sum, o) => sum + Number(o.total), 0);
+    const groupRef     = randomUUID();
+
+    const existingByOrderId = new Map(
+      existingPayments.map(p => [p.orderId, p]),
+    );
+
+    const payments = orders.map(order => {
+      const payment    = existingByOrderId.get(order.id) ?? this.paymentRepo.create();
+      payment.orderId  = order.id;
+      payment.method   = dto.method;
+      payment.operator = dto.operator ?? null;
+      payment.status   = PaymentStatus.PENDING;
+      payment.montant  = order.total;
+      payment.groupRef = groupRef;
+      return payment;
+    });
+
+    await this.paymentRepo.save(payments);
+
+    void Promise.all(
+      payments.map(payment =>
+        this.logService.log({
+          actorId:    userId,
+          actorType:  ActorType.CLIENT,
+          action:     LogAction.PAYMENT_FAILED, // mis à jour à la confirmation
+          entityType: 'payment',
+          entityId:   payment.id,
+          newValue:   { method: dto.method, amount: payment.montant, groupRef },
+          ipAddress:  ip,
+        }),
+      ),
+    );
+
+    const primaryPayment = payments[0];
+
+    if (dto.method === PaymentMethod.MOBILE_MONEY) {
+      const reseau =
+        dto.operator === PaymentOperator.MTN  ? 'MTN'  :
+        dto.operator === PaymentOperator.MOOV ? 'MOOV' : null;
+
+      if (!reseau) {
+        await this.paymentRepo.update({ groupRef }, { status: PaymentStatus.FAILED });
+        throw new BadRequestException(
+          `L'opérateur "${dto.operator}" n'est pas encore pris en charge `
+          + `via FeexPay (seuls MTN et Moov le sont pour le moment).`
+        );
+      }
+
+      const user = await this.userRepo.findOne({ where: { id: userId } });
+
+      try {
+        const providerRef = await this.callFeexPayRequestToPay({
+          phoneNumber: dto.phoneNumber!,
+          amount:      totalAmount,
+          reseau,
+          firstName:   user?.prenom ?? 'Client',
+          email:       user?.email ?? '',
+          customId:    groupRef,
+          description: `${orders.length} commandes (`
+            + `${orders.map(o => o.orderNumber).join(', ')})`,
+        });
+
+        await this.paymentRepo.update({ groupRef }, { providerRef });
+      } catch (err) {
+        await this.paymentRepo.update({ groupRef }, { status: PaymentStatus.FAILED });
+        throw err;
+      }
+
+      return {
+        message:         'Demande envoyée. Confirmez le paiement sur votre téléphone.',
+        paymentId:       primaryPayment.id,
+        groupPaymentIds: payments.map(p => p.id),
+        amount:          totalAmount,
+        method:          dto.method,
+        operator:        dto.operator,
+      };
+    }
+
+    return {
+      message:         'Paiement initié avec succès',
+      paymentId:       primaryPayment.id,
+      groupPaymentIds: payments.map(p => p.id),
+      amount:          totalAmount,
+      method:          dto.method,
+      operator:        dto.operator,
     };
   }
 
@@ -320,13 +491,13 @@ export class PaymentsService {
       data = null;
     }
 
-    // Log systématique (succès ET échec) pour voir la vraie forme de la
-    // réponse FeexPay tant qu'elle n'a pas été observée en conditions réelles.
-    console.log(
-      '[FeexPay] Statut HTTP :', response.status,
-      '| Content-Type :', response.headers.get('content-type'),
-      '| Corps brut (texte) :', rawText,
-      '| Corps parsé (JSON) :', JSON.stringify(data),
+    // ⚠️ logger.debug et non console.log : la réponse brute contient le
+    // numéro de téléphone du client et les références de transaction.
+    // debug n'est pas émis avec les niveaux de log de production.
+    this.logger.debug(
+      `[FeexPay] Statut HTTP : ${response.status}`
+      + ` | Content-Type : ${response.headers.get('content-type')}`
+      + ` | Corps brut : ${rawText}`,
     );
 
     if (!response.ok) {
@@ -403,9 +574,8 @@ export class PaymentsService {
     } catch {
       data = null;
     }
-    console.log(
-      '[FeexPay] Statut — HTTP :', response.status,
-      '| Corps brut :', rawText,
+    this.logger.debug(
+      `[FeexPay] Statut — HTTP : ${response.status} | Corps brut : ${rawText}`,
     );
 
     if (!response.ok) {
@@ -426,20 +596,82 @@ export class PaymentsService {
     const feexStatus = (data?.status ?? data?.statut ?? '').toString().toUpperCase();
 
     if (['SUCCESSFUL', 'SUCCESS', 'APPROVED'].includes(feexStatus)) {
-      return this.confirmPayment(paymentId, payment.providerRef, ip);
+      return this.confirmPaymentOrGroup(payment, ip);
     }
 
     if (['FAILED', 'CANCELLED', 'CANCELED', 'ERROR'].includes(feexStatus)) {
-      return this.failPayment(paymentId, ip);
+      return this.failPaymentOrGroup(payment, ip);
     }
 
     return { status: payment.status }; // toujours en attente
   }
 
   // ─────────────────────────────────────────────────────
-  // CONFIRMER UN PAIEMENT (callback opérateur)
+  // Confirme un paiement, ET tous ses "frères" de même groupRef s'il en a
+  // (panier multi-boutiques réglé en un seul paiement — voir
+  // initiateGroupPayment). Chaque commande garde sa propre logique de
+  // confirmation (stock, commission, email) via confirmPayment(), on
+  // l'applique juste à tout le groupe d'un coup.
   // ─────────────────────────────────────────────────────
-  async confirmPayment(
+  private async confirmPaymentOrGroup(payment: Payment, ip: string) {
+    if (!payment.groupRef) {
+      return this.confirmPayment(payment.id, payment.providerRef, ip);
+    }
+
+    const siblings = await this.paymentRepo.find({
+      where: { groupRef: payment.groupRef, status: PaymentStatus.PENDING },
+    });
+
+    const results: Array<{ message: string; orderNumber: string; status: PaymentStatus }> = [];
+    for (const sibling of siblings) {
+      results.push(
+        await this.confirmPayment(sibling.id, payment.providerRef, ip),
+      );
+    }
+
+    return {
+      message: `${results.length} commande(s) confirmée(s)`,
+      status:  PaymentStatus.SUCCESS,
+      orders:  results.map(r => r.orderNumber),
+    };
+  }
+
+  // ─────────────────────────────────────────────────────
+  // Symétrique de confirmPaymentOrGroup() pour un échec.
+  // ─────────────────────────────────────────────────────
+  private async failPaymentOrGroup(payment: Payment, ip: string) {
+    if (!payment.groupRef) {
+      return this.failPayment(payment.id, ip);
+    }
+
+    const siblings = await this.paymentRepo.find({
+      where: { groupRef: payment.groupRef, status: PaymentStatus.PENDING },
+    });
+
+    for (const sibling of siblings) {
+      await this.failPayment(sibling.id, ip);
+    }
+
+    return { message: 'Paiement marqué comme échoué' };
+  }
+
+  // ⚠️ confirmCodPayment() (le vendeur marquait lui-même une commande
+  // "payée en espèces") a été retirée : un vendeur ne doit plus pouvoir
+  // marquer unilatéralement une commande comme payée. Les commandes
+  // initiées par un vendeur ne créent plus de paiement "cash_on_delivery"
+  // (voir OrdersService.createVendorInitiated) — le client paie via le
+  // flux Mobile Money normal (initiatePayment ci-dessus), confirmé comme
+  // n'importe quel autre paiement par confirmPayment() ci-dessous.
+
+  // ─────────────────────────────────────────────────────
+  // CONFIRMER UN PAIEMENT
+  // ⚠️ PRIVÉE : jamais exposée en HTTP directement. Appelée par
+  // checkPaymentStatus() après confirmation FeexPay (Mobile Money) — seul
+  // chemin restant depuis la suppression de confirmCodPayment() (voir
+  // commentaire ci-dessus : les commandes initiées par un vendeur ne créent
+  // plus de paiement "cash_on_delivery").
+  // ─────────────────────────────────────────────────────
+  private async confirmPayment(
     paymentId:   string,
     providerRef: string,
     ip:          string,
@@ -476,7 +708,33 @@ export class PaymentsService {
       await manager.save(order);
 
       // 3. Décrémenter le stock de chaque variante
+      // ⚠️ Verrou pessimiste (SELECT ... FOR UPDATE) sur chaque variante :
+      // le stock n'est pas réservé à la création de la commande, donc N
+      // clients peuvent commander le dernier exemplaire. Sans ce verrou,
+      // deux paiements confirmés en parallèle lisaient le même stock et le
+      // décrémentaient tous les deux → stock négatif et survente.
+      // Le verrou sérialise les confirmations concurrentes ; la vérification
+      // qui suit fait échouer (et annule) celle qui arrive trop tard.
       for (const item of order.items) {
+        const variant = await manager.findOne(ProductVariant, {
+          where: { id: item.variantId },
+          lock: { mode: 'pessimistic_write' },
+        });
+
+        if (!variant) {
+          throw new NotFoundException(
+            `Variante ${item.variantId} introuvable`,
+          );
+        }
+
+        if (variant.stockQuantity < item.quantity) {
+          throw new BadRequestException(
+            `Stock insuffisant pour la référence "${variant.sku}" : `
+            + `${variant.stockQuantity} unité(s) restante(s) pour `
+            + `${item.quantity} commandée(s). Le paiement n'a pas été validé.`
+          );
+        }
+
         await manager.decrement(
           ProductVariant,
           { id: item.variantId },
@@ -485,18 +743,13 @@ export class PaymentsService {
         );
 
         // Vérifier si le stock est sous le seuil d'alerte
-        const variant = await manager.findOne(ProductVariant, {
-          where: { id: item.variantId },
-        });
-
-        if (
-          variant &&
-          variant.stockQuantity <= variant.lowStockAlert
-        ) {
+        // (on recalcule sans relire : le verrou garantit la valeur)
+        const remaining = variant.stockQuantity - item.quantity;
+        if (remaining <= variant.lowStockAlert) {
           // ⚠️ Notifier le vendeur (sera géré dans le module notifications)
-          console.log(
+          this.logger.warn(
             `[STOCK ALERT] Variante ${variant.sku} : `
-            + `${variant.stockQuantity} unité(s) restante(s)`
+            + `${remaining} unité(s) restante(s)`
           );
         }
       }
@@ -508,17 +761,13 @@ export class PaymentsService {
     // 5. Envoyer email de confirmation au client (best-effort)
     const user = payment.order.user;
     try {
-      await this.mailerService.sendMail({
-      to:      user.email,
-      subject: `✅ Paiement confirmé — Commande ${payment.order.orderNumber}`,
-      html: `
-        <p>Bonjour ${user.prenom},</p>
-        <p>Votre paiement de <strong>${payment.montant} FCFA</strong> 
-           a été confirmé pour la commande 
-           <strong>${payment.order.orderNumber}</strong>.</p>
-        <p>Votre commande est maintenant en préparation.</p>
-      `,
-      });
+      await this.mailService.sendPaymentConfirmed(
+        user.email,
+        user.prenom,
+        payment.order.orderNumber,
+        Number(payment.montant),
+        payment.order.id,
+      );
     } catch (error) {
       this.logger.error(`Échec envoi mail confirmation paiement → ${user.email}`, error?.message);
     }
@@ -540,9 +789,41 @@ export class PaymentsService {
   }
 
   // ─────────────────────────────────────────────────────
+  // ANNULER SON PROPRE PAIEMENT BLOQUÉ EN ATTENTE (pour pouvoir réessayer)
+  // ─────────────────────────────────────────────────────
+  async cancelMyPendingPayment(paymentId: string, userId: string, ip: string) {
+    const payment = await this.paymentRepo.findOne({
+      where:     { id: paymentId },
+      relations: ['order'],
+    });
+
+    if (!payment) throw new NotFoundException('Paiement introuvable');
+    if (payment.order.userId !== userId) {
+      throw new ForbiddenException('Accès refusé');
+    }
+
+    if (payment.status !== PaymentStatus.PENDING) {
+      throw new BadRequestException('Ce paiement ne peut plus être annulé');
+    }
+
+    payment.status = PaymentStatus.FAILED;
+    await this.paymentRepo.save(payment);
+
+    await this.logService.log({
+      actorType:  ActorType.CLIENT,
+      action:     LogAction.PAYMENT_FAILED,
+      entityType: 'payment',
+      entityId:   paymentId,
+      ipAddress:  ip,
+    });
+
+    return { message: 'Paiement annulé, vous pouvez réessayer.' };
+  }
+
+  // ─────────────────────────────────────────────────────
   // ÉCHEC D'UN PAIEMENT
   // ─────────────────────────────────────────────────────
-  async failPayment(paymentId: string, ip: string) {
+  private async failPayment(paymentId: string, ip: string) {
     const payment = await this.paymentRepo.findOne({
       where: { id: paymentId },
     });
@@ -717,31 +998,19 @@ export class PaymentsService {
     // Notifier le client (best-effort)
     try {
       if (action === 'approve') {
-        await this.mailerService.sendMail({
-          to:      refund.order.user.email,
-          subject: '✅ Remboursement approuvé',
-          html: `
-            <p>Bonjour ${refund.order.user.prenom},</p>
-            <p>Votre demande de remboursement de 
-               <strong>${refund.montantRemb} FCFA</strong> 
-               pour la commande 
-               <strong>${refund.order.orderNumber}</strong> 
-               a été approuvée.</p>
-            <p>Le montant sera crédité sous 3 à 5 jours ouvrables.</p>
-          `,
-        });
+        await this.mailService.sendRefundApproved(
+          refund.order.user.email,
+          refund.order.user.prenom,
+          refund.order.orderNumber,
+          Number(refund.montantRemb),
+          refund.order.id,
+        );
       } else {
-        await this.mailerService.sendMail({
-          to:      refund.order.user.email,
-          subject: 'Demande de remboursement',
-          html: `
-            <p>Bonjour ${refund.order.user.prenom},</p>
-            <p>Votre demande de remboursement pour la commande 
-               <strong>${refund.order.orderNumber}</strong> 
-               n'a pas pu être approuvée.</p>
-            <p>Pour plus d'informations, contactez notre support.</p>
-          `,
-        });
+        await this.mailService.sendRefundRejected(
+          refund.order.user.email,
+          refund.order.user.prenom,
+          refund.order.orderNumber,
+        );
       }
     } catch (error) {
       this.logger.error(`Échec envoi mail remboursement → ${refund.order.user.email}`, error?.message);
@@ -812,7 +1081,7 @@ export class PaymentsService {
     const [payments, total] = await query.getManyAndCount();
 
     return {
-      data:  payments,
+      data:  stripSecrets(payments),
       total,
       page,
       limit,

@@ -1,11 +1,17 @@
 import {
+  ArrayMaxSize,
+  ArrayMinSize,
   Equals,
+  IsArray,
   IsBoolean,
   IsNotEmpty,
+  IsOptional,
   IsString,
+  IsUUID,
   MaxLength,
 } from 'class-validator';
 import { Transform } from 'class-transformer';
+import { IsAppUrl } from '../../../common/validators/is-app-url.decorator';
 
 export class SubmitVendorProfileDto {
   @IsNotEmpty({ message: "Le nom de la boutique est obligatoire" })
@@ -16,34 +22,49 @@ export class SubmitVendorProfileDto {
 
   @IsNotEmpty({ message: "L'adresse de la boutique est obligatoire" })
   @IsString()
+  @MaxLength(500)
   @Transform(({ value }) => value?.trim())
   shopAddress: string;
 
-  @IsNotEmpty({ message: "Le type d'activite est obligatoire" })
+  // Ancien champ texte libre : encore accepté pour les anciennes versions
+  // de l'appli (utilisé seulement si categoryIds est absent). Le service
+  // exige l'un ou l'autre.
+  @IsOptional()
   @IsString()
   @MaxLength(100)
-  @Transform(({ value }) => value?.trim())
-  activityType: string;
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  activityType?: string;
+
+  // Catégories de la plateforme (1 à 5), simple étiquette de la boutique.
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(1, { message: 'Choisissez au moins une catégorie' })
+  @ArrayMaxSize(5, { message: 'Vous pouvez choisir 5 catégories au maximum' })
+  @IsUUID('all', { each: true, message: 'Chaque catégorie doit être un identifiant valide' })
+  categoryIds?: string[];
 
   @IsNotEmpty({ message: 'La description est obligatoire' })
   @IsString()
+  @MaxLength(2000)
   @Transform(({ value }) => value?.trim())
   description: string;
 
-  @IsNotEmpty({ message: "La piece d'identite est obligatoire" })
-  @IsString()
+  @IsOptional()
+  @IsAppUrl({ message: 'URL de la pièce d\'identité invalide' })
   @MaxLength(500)
-  idDocumentUrl: string;
+  idDocumentUrl?: string;
 
-  @IsNotEmpty({ message: 'Le selfie est obligatoire' })
-  @IsString()
+  @IsOptional()
+  @IsAppUrl({ message: 'URL du selfie invalide' })
   @MaxLength(500)
-  selfieUrl: string;
+  selfieUrl?: string;
 
-  @IsNotEmpty({ message: 'Les produits exemples sont obligatoires' })
-  @IsString({ each: true })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(5, { message: 'Maximum 5 photos de produits' })
+  @IsAppUrl({ each: true, message: 'URL de photo produit invalide' })
   @MaxLength(500, { each: true })
-  sampleProductUrls: string[];
+  sampleProductUrls?: string[];
 
   @IsBoolean()
   @Equals(true, { message: "Vous devez accepter les conditions d'utilisation" })

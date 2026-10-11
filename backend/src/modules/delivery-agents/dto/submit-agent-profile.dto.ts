@@ -3,6 +3,7 @@ import {
   IsBoolean,
   IsEnum,
   IsNotEmpty,
+  IsOptional,
   IsString,
   Matches,
   MaxLength,
@@ -39,20 +40,20 @@ export class SubmitAgentProfileDto {
   @Transform(({ value }) => value?.trim())
   preciseAddress: string;
 
-  @IsNotEmpty({ message: "La piece d'identite est obligatoire" })
+  @IsOptional()
   @IsString()
   @MaxLength(500)
-  idDocumentUrl: string;
+  idDocumentUrl?: string;
 
-  @IsNotEmpty({ message: 'Le selfie est obligatoire' })
+  @IsOptional()
   @IsString()
   @MaxLength(500)
-  selfieUrl: string;
+  selfieUrl?: string;
 
-  @IsNotEmpty({ message: "La photo de l'engin est obligatoire" })
+  @IsOptional()
   @IsString()
   @MaxLength(500)
-  vehiclePhotoUrl: string;
+  vehiclePhotoUrl?: string;
 
   @IsNotEmpty({ message: 'Le numero de plaque est obligatoire' })
   @IsString()

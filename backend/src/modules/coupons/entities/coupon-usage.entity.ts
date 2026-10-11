@@ -6,6 +6,7 @@ import {
   JoinColumn,
   CreateDateColumn,
   Unique,
+  Index,
 } from 'typeorm';
 import { Coupon } from './coupon.entity';
 import { User } from '../../users/entities/user.entity';
@@ -13,6 +14,9 @@ import { Order } from '../../orders/entities/order.entity';
 
 // Un client ne peut utiliser un coupon qu'une seule fois
 @Unique(['couponId', 'userId'])
+@Index(['couponId'])
+@Index(['userId'])
+@Index(['couponId', 'userId'])
 @Entity('coupon_usages')
 export class CouponUsage {
 

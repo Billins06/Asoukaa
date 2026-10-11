@@ -1,0 +1,3 @@
+import { adminInvitationTemplate } from './src/modules/mail/templates/admin-invitation.template';
+const a = adminInvitationTemplate('A', 'admin', 'https://x.bj/set?t=1&u="><b>');
+console.log(a.match(/<a href="[^"]*"/)![0]);

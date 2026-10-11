@@ -6,6 +6,7 @@ import {
   JoinColumn,
   CreateDateColumn,
   Unique,
+  Index,
 } from 'typeorm';
 import { User } from '../../users/entities/user.entity';
 import { Product } from '../../products/entities/product.entity';
@@ -13,6 +14,8 @@ import { Product } from '../../products/entities/product.entity';
 // Pas de doublons — un produit ne peut être
 // qu'une seule fois dans la wishlist d'un utilisateur
 @Unique(['userId', 'productId'])
+@Index(['userId'])
+@Index(['productId'])
 @Entity('wishlists')
 export class Wishlist {
 

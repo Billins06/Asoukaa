@@ -12,6 +12,8 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
+import { JwtService } from '@nestjs/jwt';
 import type { Request } from 'express';
 
 import { AuthService }           from './auth.service';
@@ -29,6 +31,20 @@ import { Roles }                 from './decorators/roles.decorator';
 import { AdminRole, AdminAccount } from './entities/admin-account.entity';
 import { Role }                  from '../../common/enums/role.enum';
 import { TokenBlacklistService } from '../../common/services/token-blacklist.service';
+import { clampLimit, clampPage } from '../../common/utils/pagination.util';
+
+// 🛡️ Limites anti-brute-force sur les routes sensibles.
+// Le ThrottlerGuard global (APP_GUARD dans AppModule) autorise 100 req/min ;
+// ces limites-ci sont beaucoup plus strictes.
+// - AUTH_THROTTLE   : login / register (5 tentatives par minute et par IP)
+// - OTP_THROTTLE    : vérification de code (5 par minute — combiné à la
+//   limite de 5 tentatives par code côté AuthService, un code à 6 chiffres
+//   devient impossible à forcer)
+// - RESEND_THROTTLE : envoi d'email (3 par 5 min — évite aussi de servir
+//   de relais de spam via forgot-password / resend-otp)
+const AUTH_THROTTLE = { default: { limit: 5, ttl: 60_000 } };
+const OTP_THROTTLE = { default: { limit: 5, ttl: 60_000 } };
+const RESEND_THROTTLE = { default: { limit: 3, ttl: 300_000 } };
 
 // Helper pour récupérer l'IP de la requête
 const getIp = (req: Request): string =>
@@ -42,11 +58,13 @@ export class AuthController {
   constructor(
     private readonly authService: AuthService,
     private readonly tokenBlacklist: TokenBlacklistService,
+    private readonly jwtService: JwtService,
   ) {}
 
   // ─── Routes utilisateurs ─────────────────────────────────
 
   @ApiOperation({ summary: 'Inscription utilisateur' })
+  @Throttle(AUTH_THROTTLE)
   @Post('register')
   @HttpCode(HttpStatus.CREATED)
   register(@Body() dto: RegisterDto, @Req() req: Request) {
@@ -54,6 +72,7 @@ export class AuthController {
   }
 
   @ApiOperation({ summary: 'Vérification OTP' })
+  @Throttle(OTP_THROTTLE)
   @Post('verify-otp')
   @HttpCode(HttpStatus.OK)
   verifyOtp(@Body() dto: VerifyOtpDto) {
@@ -61,6 +80,7 @@ export class AuthController {
   }
 
   @ApiOperation({ summary: 'Renvoyer OTP' })
+  @Throttle(RESEND_THROTTLE)
   @Post('resend-otp')
   @HttpCode(HttpStatus.OK)
   resendOtp(@Body() dto: ResendOtpDto) {
@@ -68,6 +88,7 @@ export class AuthController {
   }
 
   @ApiOperation({ summary: 'Connexion utilisateur' })
+  @Throttle(AUTH_THROTTLE)
   @Post('login')
   @HttpCode(HttpStatus.OK)
   login(@Body() dto: LoginDto, @Req() req: Request) {
@@ -75,6 +96,7 @@ export class AuthController {
   }
 
   @ApiOperation({ summary: 'Mot de passe oublié' })
+  @Throttle(RESEND_THROTTLE)
   @Post('forgot-password')
   @HttpCode(HttpStatus.OK)
   forgotPassword(@Body() dto: ForgotPasswordDto) {
@@ -82,6 +104,7 @@ export class AuthController {
   }
 
   @ApiOperation({ summary: 'Réinitialiser le mot de passe' })
+  @Throttle(OTP_THROTTLE)
   @Post('reset-password')
   @HttpCode(HttpStatus.OK)
   resetPassword(@Body() dto: ResetPasswordDto) {
@@ -91,6 +114,7 @@ export class AuthController {
   // ─── Routes admin ─────────────────────────────────────────
 
   @ApiOperation({ summary: 'Connexion admin/superadmin' })
+  @Throttle(AUTH_THROTTLE)
   @Post('admin/login')
   @HttpCode(HttpStatus.OK)
   loginAdmin(@Body() dto: LoginDto, @Req() req: Request) {
@@ -115,6 +139,7 @@ export class AuthController {
   }
 
   @ApiOperation({ summary: 'Définir le mot de passe admin (après invitation)' })
+  @Throttle(AUTH_THROTTLE)
   @Post('admin/set-password')
   @HttpCode(HttpStatus.OK)
   setAdminPassword(
@@ -148,7 +173,15 @@ export class AuthController {
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
       const token = authHeader.substring(7);
-      this.tokenBlacklist.revokeToken(token);
+
+      // On transmet l'expiration réelle du JWT pour que la blacklist puisse
+      // purger l'entrée d'elle-même une fois le token périmé (sinon elle
+      // grossit indéfiniment). decode() ne vérifie pas la signature, mais
+      // JwtAuthGuard vient déjà de la valider juste avant.
+      const decoded = this.jwtService.decode(token) as { exp?: number } | null;
+      const expiresAt = decoded?.exp ? decoded.exp * 1000 : undefined;
+
+      this.tokenBlacklist.revokeToken(token, expiresAt);
     }
     return { message: 'Déconnecté avec succès' };
   }
@@ -160,7 +193,7 @@ export class AuthController {
   @Roles(Role.SUPERADMIN)
   @HttpCode(HttpStatus.OK)
   getAllAdmins(@Query('page') page?: number, @Query('limit') limit?: number) {
-    return this.authService.getAllAdmins(page, limit);
+    return this.authService.getAllAdmins(clampPage(page), clampLimit(limit));
   }
 
   @ApiOperation({ summary: 'Récupérer un admin par ID (SUPERADMIN uniquement)' })
@@ -185,22 +218,9 @@ export class AuthController {
     return this.authService.deactivateAdmin(id, superAdminId, ip);
   }
 
-  @Get('debug-token')
-  @HttpCode(HttpStatus.OK)
-  debugToken(@Req() req: Request) {
-    const authHeader = req.headers.authorization;
-    const token = authHeader?.replace('Bearer ', '');
-    const parts = token?.split('.') || [];
-
-    return {
-      headerFound: !!authHeader,
-      tokenFound: !!token,
-      tokenLength: token?.length ?? 0,
-      parts: parts.length,
-      isValid: parts.length === 3,
-      tokenPreview: token?.substring(0, 50),
-      parts_lengths: parts.map((p: string) => p.length),
-    };
-  }
+  // ⚠️ GET /auth/debug-token SUPPRIMÉ : cette route publique renvoyait les
+  // 50 premiers caractères du JWT présenté (header + début du payload en
+  // base64) à qui la demandait, sans aucune authentification.
+  // Pour déboguer un token en local, utiliser jwt.io ou les logs.
 }
 

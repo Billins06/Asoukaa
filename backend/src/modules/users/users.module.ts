@@ -8,6 +8,13 @@ import { Address }         from './entities/address.entity';
 import { VendorProfile }   from './entities/vendor-profile.entity';
 import { DeliveryAgentProfile } from './entities/delivery-agent-profile.entity';
 import { CommonModule }    from '../../common/common.module';
+import { UploadModule }    from '../upload/upload.module';
+import { EmailChange }     from './email-change/email-change.entity';
+import { EmailChangeService } from './email-change/email-change.service';
+import {
+  EmailChangeController,
+  EmailChangeRevertController,
+} from './email-change/email-change.controller';
 
 @Module({
   imports: [
@@ -17,11 +24,15 @@ import { CommonModule }    from '../../common/common.module';
       Address,
       VendorProfile,
       DeliveryAgentProfile,
+      EmailChange,
     ]),
     CommonModule,
+    // UploadService : contrôle de l'URL d'avatar dans updateProfile.
+    // UploadModule n'importe pas UsersModule → pas de dépendance circulaire.
+    UploadModule,
   ],
-  controllers: [UsersController],
-  providers:   [UsersService],
+  controllers: [UsersController, EmailChangeController, EmailChangeRevertController],
+  providers:   [UsersService, EmailChangeService],
   exports:     [UsersService, TypeOrmModule],
 })
 export class UsersModule {}

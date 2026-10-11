@@ -1,9 +1,13 @@
 import {
+  ArrayMaxSize,
+  ArrayMinSize,
+  IsArray,
   IsString,
   IsOptional,
+  IsUUID,
   MaxLength,
-  IsUrl,
 } from 'class-validator';
+import { IsAppUrl } from '../../../common/validators/is-app-url.decorator';
 import { Transform } from 'class-transformer';
 
 // Mise à jour de la boutique APRÈS validation
@@ -27,6 +31,14 @@ export class UpdateShopDto {
   @Transform(({ value }) => value?.trim())
   activityType?: string;
 
+  // Catégories de la plateforme (1 à 5) ; prioritaire sur activityType.
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(1, { message: 'Choisissez au moins une catégorie' })
+  @ArrayMaxSize(5, { message: 'Vous pouvez choisir 5 catégories au maximum' })
+  @IsUUID('all', { each: true, message: 'Chaque catégorie doit être un identifiant valide' })
+  categoryIds?: string[];
+
   @IsOptional()
   @IsString()
   @Transform(({ value }) => value?.trim())
@@ -36,12 +48,12 @@ export class UpdateShopDto {
   // Le service doit vérifier que status === 'approved'
   // avant d'autoriser la modification de ces champs
   @IsOptional()
-  @IsUrl({}, { message: 'URL logo invalide' })
+  @IsAppUrl({ message: 'URL logo invalide' })
   @MaxLength(500)
   logoUrl?: string;
 
   @IsOptional()
-  @IsUrl({}, { message: 'URL bannière invalide' })
+  @IsAppUrl({ message: 'URL bannière invalide' })
   @MaxLength(500)
   bannerUrl?: string;
 }

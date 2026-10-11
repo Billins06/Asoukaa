@@ -30,6 +30,7 @@ export enum PaymentStatus {
   REFUNDED  = 'remboursé',  // remboursé
 }
 
+@Index(['status'])
 @Entity('payments')
 export class Payment {
 
@@ -79,6 +80,19 @@ export class Payment {
 
   @Column({ type: 'decimal', precision: 12, scale: 2 })
   montant: number;
+
+  // Panier réparti sur plusieurs boutiques -> une commande par boutique,
+  // mais UN SEUL paiement pour le client. On crée quand même une ligne
+  // Payment par commande (orderId reste unique en base), mais toutes les
+  // lignes issues du même paiement client partagent ce groupRef pour
+  // pouvoir toutes les confirmer/échouer ensemble.
+  // ⚠️ `type: 'varchar'` explicite : avec le type TS `string | null`,
+  // TypeScript émet `design:type = Object` et TypeORM ne peut plus déduire
+  // le type de colonne → DataTypeNotSupportedError au démarrage.
+  // Tout champ `X | null` doit déclarer son type SQL.
+  @Index()
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  groupRef: string | null;
 
   // Rempli uniquement quand status = 'success'
   @Column({ nullable: true, type: 'timestamp' })

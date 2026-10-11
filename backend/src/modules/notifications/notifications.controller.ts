@@ -23,6 +23,7 @@ import type { Request } from 'express';
 import { NotificationsService }       from './notifications.service';
 import { MarkNotificationsReadDto }   from './dto/mark-read.dto';
 import { JwtAuthGuard }               from '../auth/guards/jwt-auth.guard';
+import { clampLimit, clampPage } from '../../common/utils/pagination.util';
 
 const getUser = (req: Request): any => (req as any).user;
 
@@ -47,8 +48,8 @@ export class NotificationsController {
     return this.notificationsService.getMyNotifications(
       getUser(req).id,
       unread === 'true',
-      Number(page)  || 1,
-      Number(limit) || 20,
+      clampPage(page),
+      clampLimit(limit, 20),
     );
   }
 

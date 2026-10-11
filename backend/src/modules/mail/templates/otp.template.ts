@@ -1,57 +1,19 @@
-export const otpTemplate = (prenom: string, code: string): string => `
-<!DOCTYPE html>
-<html lang="fr">
-<head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Vérification Asoukaa</title>
-</head>
-<body style="margin:0;padding:0;background:#f4f4f4;font-family:Arial,sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0">
-    <tr>
-      <td align="center" style="padding:40px 0;">
-        <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
-          
-          <!-- HEADER -->
-          <tr>
-            <td style="background:#FF6B00;padding:32px;text-align:center;">
-              <h1 style="color:#ffffff;margin:0;font-size:28px;font-weight:700;">Asoukaa</h1>
-            </td>
-          </tr>
+import { renderEmailLayout, escapeHtml } from './base-layout.template';
 
-          <!-- BODY -->
-          <tr>
-            <td style="padding:40px 32px;">
-              <h2 style="color:#1a1a1a;margin:0 0 16px;">Bonjour ${prenom},</h2>
-              <p style="color:#555;font-size:15px;line-height:1.6;margin:0 0 24px;">
-                Voici votre code de vérification pour activer votre compte Asoukaa.
-                Ce code est valable <strong> 03 minutes</strong>.
-              </p>
+export const otpTemplate = (prenom: string, code: string): string => {
+  const body = `
+    <div style="margin:20px 0 0;padding:28px;background:#EEECFC;border:1.5px dashed #4338CA;border-radius:16px;text-align:center;">
+      <span style="font-size:38px;font-weight:800;letter-spacing:12px;color:#4338CA;">${code}</span>
+      <p style="margin:12px 0 0;font-size:13px;color:#6B6B72;">Ce code expire dans <strong style="color:#3A3A40;">03 minutes</strong></p>
+    </div>
+    <div style="margin:18px 0 24px;padding:16px 18px;border:1px solid #ECEAE6;border-radius:14px;">
+      <p style="margin:0;font-size:13px;color:#8B8B93;line-height:1.55;">Ne partagez jamais ce code. L'équipe Asoukaa ne vous le demandera jamais, ni par téléphone ni par email.</p>
+    </div>`;
 
-              <!-- CODE OTP -->
-              <div style="background:#f8f8f8;border:2px dashed #FF6B00;border-radius:12px;padding:24px;text-align:center;margin:0 0 24px;">
-                <span style="font-size:42px;font-weight:700;letter-spacing:12px;color:#FF6B00;">${code}</span>
-              </div>
-
-              <p style="color:#888;font-size:13px;line-height:1.5;margin:0;">
-                ⚠️ Ne partagez jamais ce code. L'équipe Asoukaa ne vous le demandera jamais.
-              </p>
-            </td>
-          </tr>
-
-          <!-- FOOTER -->
-          <tr>
-            <td style="background:#f8f8f8;padding:20px 32px;text-align:center;border-top:1px solid #eee;">
-              <p style="color:#aaa;font-size:12px;margin:0;">
-                © ${new Date().getFullYear()} Asoukaa — Tous droits réservés
-              </p>
-            </td>
-          </tr>
-
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>
-`;
+  return renderEmailLayout({
+    category: 'compte',
+    title: 'Vérifiez votre adresse email',
+    intro: `Bonjour <strong style="color:#3A3A40;">${escapeHtml(prenom)}</strong>, voici votre code de vérification pour activer votre compte Asoukaa.`,
+    body,
+  });
+};

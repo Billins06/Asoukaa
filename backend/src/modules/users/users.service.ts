@@ -10,16 +10,19 @@ import { Repository }       from 'typeorm';
 import * as bcrypt          from 'bcrypt';
 
 import { User }           from './entities/user.entity';
-import { UserRole }       from './entities/user-role.entity';
+import { UserRole, UserRoleEnum } from './entities/user-role.entity';
 import { Address }        from './entities/address.entity';
 import { VendorProfile }  from './entities/vendor-profile.entity';
 import { DeliveryAgentProfile } from './entities/delivery-agent-profile.entity';
 
 import { UpdateProfileDto }  from './dto/update-profile.dto';
+import { AdminCreateUserDto } from './dto/admin-create-user.dto';
+import { AdminUpdateUserDto } from './dto/admin-update-user.dto';
 import { CreateAddressDto }  from './dto/create-address.dto';
 import { UpdateAddressDto }  from './dto/update-address.dto';
 
 import { ActivityLogService } from '../../common/services/activity-log.service';
+import { UploadService, UploadType } from '../upload/upload.service';
 import {
   ActorType,
   LogAction,
@@ -45,6 +48,8 @@ export class UsersService {
     private readonly agentRepo: Repository<DeliveryAgentProfile>,
 
     private readonly logService: ActivityLogService,
+
+    private readonly uploadService: UploadService,
   ) {}
 
   // ─────────────────────────────────────────────────────
@@ -78,12 +83,29 @@ export class UsersService {
       where: { userId },
     });
 
-    // ⚠️ Ne jamais retourner passwordHash
-    const { passwordHash, ...userSafe } = user;
+    // ⚠️ Ne jamais retourner passwordHash, ni les champs de sécurité internes
+    // (révocation des sessions, alerte d'e-mail annulé : affaire de l'admin).
+    const {
+      passwordHash,
+      tokensValidAfter,
+      securityAlertAt,
+      securityAlertReason,
+      ...userSafe
+    } = user;
+
+    // ⚠️ paymentDetails est chiffré et n'a rien à faire côté appli (même
+    // règle que VendorsService : on n'expose que « est-ce configuré »).
+    // Les documents (idDocumentUrl, selfieUrl...) restent visibles : le
+    // propriétaire les consulte dans son espace vendeur.
+    let vendorSafe: Record<string, any> | null = null;
+    if (vendorProfile) {
+      const { paymentDetails, ...rest } = vendorProfile;
+      vendorSafe = { ...rest, hasPaymentConfigured: !!paymentDetails };
+    }
 
     return {
       ...userSafe,
-      vendorProfile: vendorProfile ?? null,
+      vendorProfile: vendorSafe,
       agentProfile:  agentProfile  ?? null,
     };
   }
@@ -109,6 +131,14 @@ export class UsersService {
       }
     }
 
+    // Avatar : une URL non vide doit provenir de NOTRE stockage d'avatars.
+    // Sans ce contrôle, n'importe quelle URL externe (pixel espion, contenu
+    // malveillant) serait affichée dans l'appli des autres utilisateurs
+    // (chat, avis, commandes). Échec → 400, avant toute modification.
+    if (dto.avatarUrl) {
+      this.uploadService.assertIsOwnUploadUrl(dto.avatarUrl, UploadType.AVATAR);
+    }
+
     // Sauvegarder les anciennes valeurs pour le log
     const oldValue = {
       prenom: user.prenom,
@@ -120,7 +150,11 @@ export class UsersService {
     if (dto.prenom)    user.prenom    = dto.prenom;
     if (dto.name)      user.name      = dto.name;
     if (dto.phone)     user.phone     = dto.phone;
-    if (dto.avatarUrl) user.avatarUrl = dto.avatarUrl;
+    // avatarUrl : une URL = nouvelle photo ; null (ou chaîne vide, convertie
+    // en null par le DTO) = suppression de la photo ; absent = inchangé.
+    if (dto.avatarUrl !== undefined) {
+      user.avatarUrl = (dto.avatarUrl ? dto.avatarUrl : null) as unknown as string;
+    }
 
     await this.userRepo.save(user);
 
@@ -139,7 +173,13 @@ export class UsersService {
       ipAddress: ip,
     });
 
-    const { passwordHash, ...userSafe } = user;
+    const {
+      passwordHash,
+      tokensValidAfter,
+      securityAlertAt,
+      securityAlertReason,
+      ...userSafe
+    } = user;
     return userSafe;
   }
 
@@ -265,7 +305,31 @@ export class UsersService {
       throw new NotFoundException('Adresse introuvable');
     }
 
-    await this.addressRepo.remove(address);
+    try {
+      await this.addressRepo.remove(address);
+    } catch (err: any) {
+      // Code Postgres 23503 = violation de contrainte de clé étrangère.
+      // Order.address a onDelete: 'RESTRICT' : si une commande existe déjà
+      // avec cette adresse, Postgres refuse la suppression. Sans ce catch,
+      // l'exception brute remontait telle quelle et NestJS renvoyait un
+      // 500 "Erreur interne du serveur" au lieu d'un message compréhensible.
+      //
+      // Vérification élargie (code ET message) : selon la façon dont
+      // l'erreur remonte (QueryFailedError direct ou emballée dans
+      // driverError), la propriété .code n'est pas toujours au même
+      // endroit — on ne veut pas rater ce cas et relaisser passer un 500.
+      const code = err?.code ?? err?.driverError?.code;
+      const isForeignKeyViolation =
+        code === '23503' ||
+        (typeof err?.message === 'string' &&
+          err.message.toLowerCase().includes('foreign key constraint'));
+      if (isForeignKeyViolation) {
+        throw new BadRequestException(
+          "Cette adresse est utilisée par une ou plusieurs commandes et ne peut pas être supprimée.",
+        );
+      }
+      throw err;
+    }
 
     // Si c'était l'adresse par défaut → mettre la première disponible en default
     if (address.isDefault) {
@@ -367,6 +431,10 @@ export class UsersService {
     }
 
     user.isActive = false;
+    // Coupe aussi les sessions déjà ouvertes : tout jeton émis avant cet
+    // instant est refusé (JwtStrategy). Au déblocage, les NOUVEAUX jetons
+    // (émis après cette date) fonctionnent normalement : rien à remettre à zéro.
+    user.tokensValidAfter = new Date();
     await this.userRepo.save(user);
 
     await this.logService.log({
@@ -413,5 +481,124 @@ export class UsersService {
     });
 
     return { message: 'Utilisateur débloqué avec succès' };
+  }
+
+  // ─────────────────────────────────────────────────────
+  // ADMIN — CRÉER UN UTILISATEUR
+  // ─────────────────────────────────────────────────────
+  async adminCreateUser(
+    dto:     AdminCreateUserDto,
+    adminId: string,
+    ip:      string,
+  ) {
+    const emailExists = await this.userRepo.findOne({ where: { email: dto.email } });
+    if (emailExists) {
+      throw new ConflictException('Cet email est déjà utilisé');
+    }
+
+    const phoneExists = await this.userRepo.findOne({ where: { phone: dto.phone } });
+    if (phoneExists) {
+      throw new ConflictException('Ce numéro de téléphone est déjà utilisé');
+    }
+
+    const passwordHash = await bcrypt.hash(dto.password, 12);
+
+    const user = this.userRepo.create({
+      prenom:       dto.prenom,
+      name:         dto.name,
+      email:        dto.email,
+      phone:        dto.phone,
+      passwordHash,
+      // Créé par un admin : on considère le compte d'emblée vérifié,
+      // pas besoin de repasser par l'OTP d'inscription.
+      isVerified: true,
+      isActive:   true,
+    });
+    await this.userRepo.save(user);
+
+    const role = this.userRoleRepo.create({
+      userId: user.id,
+      role:   dto.role ?? UserRoleEnum.CLIENT,
+    });
+    await this.userRoleRepo.save(role);
+
+    await this.logService.log({
+      actorId:    adminId,
+      actorType:  ActorType.ADMIN,
+      action:     LogAction.USER_CREATED_BY_ADMIN,
+      entityType: 'user',
+      entityId:   user.id,
+      newValue: {
+        prenom: user.prenom,
+        name:   user.name,
+        email:  user.email,
+        phone:  user.phone,
+        role:   role.role,
+      },
+      ipAddress: ip,
+    });
+
+    const { passwordHash: _omit, ...userSafe } = user;
+    return { ...userSafe, roles: [role] };
+  }
+
+  // ─────────────────────────────────────────────────────
+  // ADMIN — MODIFIER UN UTILISATEUR
+  // ─────────────────────────────────────────────────────
+  async adminUpdateUser(
+    userId:  string,
+    dto:     AdminUpdateUserDto,
+    adminId: string,
+    ip:      string,
+  ) {
+    const user = await this.userRepo.findOne({ where: { id: userId } });
+    if (!user) throw new NotFoundException('Utilisateur introuvable');
+
+    if (dto.email && dto.email !== user.email) {
+      const emailExists = await this.userRepo.findOne({ where: { email: dto.email } });
+      if (emailExists) {
+        throw new ConflictException('Cet email est déjà utilisé');
+      }
+    }
+
+    if (dto.phone && dto.phone !== user.phone) {
+      const phoneExists = await this.userRepo.findOne({ where: { phone: dto.phone } });
+      if (phoneExists) {
+        throw new ConflictException('Ce numéro de téléphone est déjà utilisé');
+      }
+    }
+
+    const oldValue = {
+      prenom: user.prenom,
+      name:   user.name,
+      email:  user.email,
+      phone:  user.phone,
+    };
+
+    if (dto.prenom !== undefined) user.prenom = dto.prenom;
+    if (dto.name   !== undefined) user.name   = dto.name;
+    if (dto.email  !== undefined) user.email  = dto.email;
+    if (dto.phone  !== undefined) user.phone  = dto.phone;
+
+    await this.userRepo.save(user);
+
+    await this.logService.log({
+      actorId:    adminId,
+      actorType:  ActorType.ADMIN,
+      action:     LogAction.USER_UPDATED_BY_ADMIN,
+      entityType: 'user',
+      entityId:   userId,
+      oldValue,
+      newValue: {
+        prenom: user.prenom,
+        name:   user.name,
+        email:  user.email,
+        phone:  user.phone,
+      },
+      ipAddress: ip,
+    });
+
+    const { passwordHash, ...userSafe } = user;
+    return userSafe;
   }
 }

@@ -39,3 +39,15 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# --- Ajouts sécurité ---
+# Le motif .env*.local ci-dessus ne couvrait PAS un simple .env
+.env
+.env.*
+!.env.example
+*.bak*
+*.log
+google-services.json
+GoogleService-Info.plist
+key.properties
+local.properties

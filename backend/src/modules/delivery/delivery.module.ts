@@ -5,23 +5,37 @@ import { DeliveryController }       from './delivery.controller';
 import { DeliveryService }          from './delivery.service';
 import { Delivery }                 from './entities/delivery.entity';
 import { IndependentDelivery }      from './entities/independent-delivery.entity';
+import { DeliveryProof }            from './entities/delivery-proof.entity';
+import { DeliveryEarning }          from './entities/delivery-earning.entity';
 import { Order }                    from '../orders/entities/order.entity';
+import { OrderItem }                from '../orders/entities/order-item.entity';
+import { Product }                  from '../products/entities/product.entity';
 import { DeliveryAgentProfile }     from '../users/entities/delivery-agent-profile.entity';
 import { VendorProfile }            from '../users/entities/vendor-profile.entity';
 import { User }                     from '../users/entities/user.entity';
 import { CommonModule }             from '../../common/common.module';
+import { UploadModule }             from '../upload/upload.module';
+import { DeliveryEarningsModule }   from '../delivery-earnings/delivery-earnings.module';
+import { NotificationsModule }      from '../notifications/notifications.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([
       Delivery,
       IndependentDelivery,
+      DeliveryProof,
+      DeliveryEarning,
       Order,
+      OrderItem,
+      Product,
       DeliveryAgentProfile,
       VendorProfile,
       User,
     ]),
     CommonModule,
+    UploadModule,
+    DeliveryEarningsModule,
+    NotificationsModule,
   ],
   controllers: [DeliveryController],
   providers:   [DeliveryService],

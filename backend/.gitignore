@@ -13,12 +13,16 @@ dist/
 node_modules/
 *.log
 
-# Autres fchiers à ne pas commiter
-backend/BACKUP_STRATEGY
-backend/COMPLETION_REPORT
-backend/FILES_MODIFIED
-backend/FIXES_SUMMARY
-backend/ISSUES_RESOLVED
-backend/QUICK_START_SEEDING
-backend/SECURITY_IMPROVEMENTS_PLAN_C
-backend/SEEDERS_SUMMARY
+# Documents de travail internes (ne pas versionner)
+# ⚠️ Chemins relatifs à backend/ et extension .md obligatoire
+BACKUP_STRATEGY.md
+COMPLETION_REPORT.md
+FILES_MODIFIED.md
+FIXES_SUMMARY.md
+ISSUES_RESOLVED.md
+QUICK_START_SEEDING.md
+SECURITY_IMPROVEMENTS_PLAN_C.md
+SEEDERS_SUMMARY.md
+
+# Sauvegardes de travail (.bak, .bak_qa1, .bak_feexpay3, ...)
+*.bak*

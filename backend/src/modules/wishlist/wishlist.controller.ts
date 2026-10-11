@@ -23,6 +23,7 @@ import type { Request } from 'express';
 import { WishlistService }    from './wishlist.service';
 import { AddToWishlistDto }   from './dto/add-to-wishlist.dto';
 import { JwtAuthGuard }       from '../auth/guards/jwt-auth.guard';
+import { clampLimit, clampPage } from '../../common/utils/pagination.util';
 
 const getUser = (req: Request): any => (req as any).user;
 
@@ -54,8 +55,8 @@ export class WishlistController {
   ) {
     return this.wishlistService.getMyWishlist(
       getUser(req).id,
-      Number(page)  || 1,
-      Number(limit) || 20,
+      clampPage(page),
+      clampLimit(limit, 20),
     );
   }
 

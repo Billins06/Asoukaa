@@ -1,3 +1,5 @@
+import { VendorStatus } from '../users/entities/vendor-profile.entity';
+import { toPublicVendor } from '../products/public-vendor.util';
 import {
   Injectable,
   NotFoundException,
@@ -79,15 +81,42 @@ export class WishlistService {
         'image.isPrimary = true',
       )
       .leftJoinAndSelect('product.vendor', 'vendor')
+      .leftJoin('vendor.user', 'vendorUser')
+      // Prix dégressifs : la carte produit de la liste de souhaits affiche
+      // la fourchette "meilleur palier – prix normal" comme les autres
+      // cartes côté client.
+      .leftJoinAndSelect('product.tierPrices', 'tierPrices')
       .where('wishlist.userId = :userId', { userId })
       .andWhere('product.status = :status', {
         status: ProductStatus.ACTIVE,
       })
+      // Les produits d'un vendeur bloqué / non approuvé / désactivé ne
+      // sont plus visibles (même règle que la liste publique des produits).
+      .andWhere('vendor.status = :vendorApproved', {
+        vendorApproved: VendorStatus.APPROVED,
+      })
+      .andWhere('vendorUser.isActive = true')
+      // Boutique masquée par son vendeur (« Boutique visible » désactivé) :
+      // ses produits n'apparaissent plus (ils reviennent si elle redevient
+      // visible).
+      .andWhere('vendor.shopVisible = true')
       .orderBy('wishlist.createdAt', 'DESC')
       .skip((page - 1) * limit)
       .take(limit);
 
     const [items, total] = await query.getManyAndCount();
+
+    // Ordre stable des prix dégressifs par quantité minimale croissante,
+    // comme dans ProductsService.findOne()/findAll().
+    for (const it of items) {
+      (it.product as any)?.tierPrices?.sort(
+        (a: any, b: any) => a.minQuantity - b.minQuantity,
+      );
+      // Seule la fiche publique du vendeur part vers l'appli.
+      if (it.product) {
+        (it.product as any).vendor = toPublicVendor((it.product as any).vendor);
+      }
+    }
 
     return {
       data:  items,

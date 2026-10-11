@@ -8,7 +8,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository }       from 'typeorm';
-import { MailerService }    from '@nestjs-modules/mailer';
+import { MailService }      from '../mail/mail.service';
 
 import {
   DeliveryAgentProfile,
@@ -16,8 +16,10 @@ import {
 } from '../users/entities/delivery-agent-profile.entity';
 import { UserRole, UserRoleEnum } from '../users/entities/user-role.entity';
 import { User }                   from '../users/entities/user.entity';
+import { DeliveryEarning, DeliveryEarningStatus } from '../delivery/entities/delivery-earning.entity';
 
 import { SubmitAgentProfileDto }      from './dto/submit-agent-profile.dto';
+import { CompleteAgentDocumentsDto }  from './dto/complete-agent-documents.dto';
 import { UpdateAgentAvailabilityDto } from './dto/update-availability.dto';
 import {
   ReviewAgentDto,
@@ -25,6 +27,7 @@ import {
 } from './dto/review-agent.dto';
 
 import { ActivityLogService } from '../../common/services/activity-log.service';
+import { stripSecrets } from '../../common/utils/strip-secrets.util';
 import {
   ActorType,
   LogAction,
@@ -44,7 +47,10 @@ export class DeliveryAgentsService {
     @InjectRepository(User)
     private readonly userRepo: Repository<User>,
 
-    private readonly mailerService: MailerService,
+    @InjectRepository(DeliveryEarning)
+    private readonly earningRepo: Repository<DeliveryEarning>,
+
+    private readonly mailService:   MailService,
     private readonly logService:    ActivityLogService,
   ) {}
 
@@ -116,6 +122,21 @@ export class DeliveryAgentsService {
       ipAddress:  ip,
     });
 
+    // Email "demande reçue, en cours de traitement" — best-effort, comme
+    // pour VendorsService.submitProfile (même correctif, même raison :
+    // rien n'était envoyé alors que le message ci-dessous le promet).
+    try {
+      const submitter = await this.userRepo.findOne({ where: { id: userId } });
+      if (submitter) {
+        await this.mailService.sendAgentSubmitted(submitter.email, submitter.prenom);
+      }
+    } catch (error) {
+      this.logger.error(
+        `Échec envoi mail de soumission livreur → userId=${userId}`,
+        error?.message,
+      );
+    }
+
     return {
       message: 'Demande soumise avec succès. '
              + 'Vous serez notifié par email après validation.',
@@ -136,9 +157,9 @@ export class DeliveryAgentsService {
     existing.ville                  = dto.ville;
     existing.quartier               = dto.quartier;
     existing.preciseAddress         = dto.preciseAddress;
-    existing.idDocumentUrl          = dto.idDocumentUrl;
-    existing.selfieUrl              = dto.selfieUrl;
-    existing.vehiclePhotoUrl        = dto.vehiclePhotoUrl;
+    existing.idDocumentUrl          = dto.idDocumentUrl ?? existing.idDocumentUrl;
+    existing.selfieUrl              = dto.selfieUrl ?? existing.selfieUrl;
+    existing.vehiclePhotoUrl        = dto.vehiclePhotoUrl ?? existing.vehiclePhotoUrl;
     existing.licensePlate           = dto.licensePlate;
     existing.termsAccepted          = dto.termsAccepted;
     existing.fraudPenaltiesAccepted = dto.fraudPenaltiesAccepted;
@@ -157,10 +178,59 @@ export class DeliveryAgentsService {
       ipAddress:  ip,
     });
 
+    // Même email "en cours de traitement" que pour une première soumission
+    // — voir submitProfile() ci-dessus.
+    try {
+      const submitter = await this.userRepo.findOne({ where: { id: existing.userId } });
+      if (submitter) {
+        await this.mailService.sendAgentSubmitted(submitter.email, submitter.prenom);
+      }
+    } catch (error) {
+      this.logger.error(
+        `Échec envoi mail de re-soumission livreur → userId=${existing.userId}`,
+        error?.message,
+      );
+    }
+
     return {
       message: 'Demande re-soumise avec succès. Vous serez notifié par email.',
       agentId: existing.id,
     };
+  }
+
+  // ─────────────────────────────────────────────────────
+  // COMPLÉTER LES DOCUMENTS MANQUANTS (dossier EN ATTENTE)
+  // ─────────────────────────────────────────────────────
+  async completeDocuments(
+    userId: string,
+    dto:    CompleteAgentDocumentsDto,
+    ip:     string,
+  ) {
+    const agent = await this.agentRepo.findOne({ where: { userId } });
+    if (!agent) throw new NotFoundException('Profil livreur introuvable');
+
+    if (agent.status !== AgentStatus.PENDING) {
+      throw new BadRequestException(
+        "Cette action n'est possible que pour un dossier en attente de validation"
+      );
+    }
+
+    if (dto.idDocumentUrl)   agent.idDocumentUrl = dto.idDocumentUrl;
+    if (dto.selfieUrl)       agent.selfieUrl = dto.selfieUrl;
+    if (dto.vehiclePhotoUrl) agent.vehiclePhotoUrl = dto.vehiclePhotoUrl;
+
+    await this.agentRepo.save(agent);
+
+    await this.logService.log({
+      actorId:    userId,
+      actorType:  ActorType.CLIENT,
+      action:     LogAction.AGENT_SUBMITTED,
+      entityType: 'delivery_agent_profile',
+      entityId:   agent.id,
+      ipAddress:  ip,
+    });
+
+    return { message: 'Documents mis à jour.' };
   }
 
   // ─────────────────────────────────────────────────────
@@ -178,6 +248,44 @@ export class DeliveryAgentsService {
     }
 
     return agent;
+  }
+
+  // ─────────────────────────────────────────────────────
+  // VOIR SES GAINS (solde, historique des livraisons payées)
+  // ─────────────────────────────────────────────────────
+  async getMyEarnings(userId: string) {
+    const agent = await this.agentRepo.findOne({ where: { userId } });
+    if (!agent) {
+      throw new NotFoundException(
+        'Aucun profil livreur trouvé. Soumettez une demande d\'abord.'
+      );
+    }
+
+    const earnings = await this.earningRepo.find({
+      where: { agentId: agent.id },
+      relations: ['delivery', 'delivery.order'],
+      order: { createdAt: 'DESC' },
+    });
+
+    const pendingAmount = earnings
+      .filter(e => e.status === DeliveryEarningStatus.PENDING)
+      .reduce((sum, e) => sum + Number(e.montantLivreur), 0);
+    const paidAmount = earnings
+      .filter(e => e.status === DeliveryEarningStatus.PAID)
+      .reduce((sum, e) => sum + Number(e.montantLivreur), 0);
+
+    return {
+      soldeDisponible: pendingAmount,
+      enAttente:       pendingAmount,
+      totalRecu:       paidAmount,
+      historique: earnings.slice(0, 30).map(e => ({
+        id:          e.id,
+        orderNumber: e.delivery?.order?.orderNumber ?? '—',
+        montant:     Number(e.montantLivreur),
+        statut:      e.status,
+        date:        e.paidAt ?? e.createdAt,
+      })),
+    };
   }
 
   // ─────────────────────────────────────────────────────
@@ -258,6 +366,7 @@ export class DeliveryAgentsService {
         'agent.noteMoyenne',
         'agent.tauxDeReussite',
         'agent.totalLivraisons',
+        'agent.createdAt',
         'user.id',
         'user.prenom',
         'user.name',
@@ -294,7 +403,9 @@ export class DeliveryAgentsService {
 
     if (!agent) throw new NotFoundException('Profil livreur introuvable');
 
-    return agent;
+    // Route admin : retire le hash du mot de passe du compte livreur et
+    // les secrets de l'admin relecteur (reviewedBy).
+    return stripSecrets(agent);
   }
 
   // ─────────────────────────────────────────────────────
@@ -322,6 +433,12 @@ export class DeliveryAgentsService {
     const oldStatus = agent.status;
 
     if (dto.action === AgentReviewAction.APPROVE) {
+      if (!agent.idDocumentUrl || !agent.selfieUrl || !agent.vehiclePhotoUrl) {
+        throw new BadRequestException(
+          "Impossible d'approuver : il manque des documents (pièce d'identité, selfie ou photo du véhicule)"
+        );
+      }
+
       agent.status     = AgentStatus.APPROVED;
       agent.motifRefus = null;
 
@@ -358,37 +475,23 @@ export class DeliveryAgentsService {
     await this.agentRepo.save(agent);
 
     // Email de notification — best-effort.
+    //
+    // ⚠️ Même correctif que VendorsService.reviewVendor : ces deux emails
+    // étaient envoyés en HTML brut fait main au lieu de passer par
+    // MailService (agentApprovedTemplate/agentRejectedTemplate existaient
+    // déjà mais n'étaient jamais appelés depuis ici).
     try {
       if (dto.action === AgentReviewAction.APPROVE) {
-        await this.mailerService.sendMail({
-          to:      agent.user.email,
-          subject: '🎉 Votre compte livreur Asoukaa a été validé !',
-          html: `
-            <p>Bonjour ${agent.user.prenom},</p>
-            <p>Félicitations ! Votre profil livreur a été validé.</p>
-            <p>Vous pouvez maintenant :</p>
-            <ul>
-              <li>Activer votre disponibilité depuis l'application</li>
-              <li>Commencer à recevoir des demandes de livraison</li>
-            </ul>
-            <p>Bienvenue dans l'équipe Asoukaa !</p>
-          `,
-        });
+        await this.mailService.sendAgentApproved(
+          agent.user.email,
+          agent.user.prenom,
+        );
       } else {
-        await this.mailerService.sendMail({
-          to:      agent.user.email,
-          subject: 'Votre demande livreur Asoukaa',
-          html: `
-            <p>Bonjour ${agent.user.prenom},</p>
-            <p>Votre demande de compte livreur n'a pas pu être validée 
-               pour la raison suivante :</p>
-            <blockquote style="border-left:3px solid #ccc; padding-left:12px;">
-              ${dto.rejectionReason}
-            </blockquote>
-            <p>Vous pouvez corriger ces éléments et re-soumettre 
-               votre demande depuis l'application.</p>
-          `,
-        });
+        await this.mailService.sendAgentRejected(
+          agent.user.email,
+          agent.user.prenom,
+          dto.rejectionReason ?? '',
+        );
       }
     } catch (error) {
       this.logger.error(
@@ -456,15 +559,10 @@ export class DeliveryAgentsService {
 
     // Notifier par email (best-effort)
     try {
-      await this.mailerService.sendMail({
-        to:      agent.user.email,
-        subject: 'Votre compte livreur Asoukaa a été suspendu',
-        html: `
-          <p>Bonjour ${agent.user.prenom},</p>
-          <p>Votre compte livreur a été suspendu par notre équipe.</p>
-          <p>Pour plus d'informations, contactez notre support.</p>
-        `,
-      });
+      await this.mailService.sendAgentBlocked(
+        agent.user.email,
+        agent.user.prenom,
+      );
     } catch (error) {
       this.logger.error(
         `Échec envoi mail de blocage livreur → ${agent.user.email}`,
@@ -484,6 +582,69 @@ export class DeliveryAgentsService {
     });
 
     return { message: 'Livreur bloqué avec succès' };
+  }
+
+  // ─────────────────────────────────────────────────────
+  // ADMIN — DÉBLOQUER UN LIVREUR
+  // ─────────────────────────────────────────────────────
+  async unblockAgent(
+    agentId: string,
+    adminId: string,
+    ip:      string,
+  ) {
+    const agent = await this.agentRepo.findOne({
+      where:     { id: agentId },
+      relations: ['user'],
+    });
+
+    if (!agent) throw new NotFoundException('Profil livreur introuvable');
+
+    if (agent.status !== AgentStatus.BLOCKED) {
+      throw new BadRequestException("Ce livreur n'est pas bloqué");
+    }
+
+    const oldStatus = agent.status;
+
+    // Un livreur ne pouvait être bloqué que s'il avait déjà été approuvé —
+    // le débloquer le restaure donc dans l'état APPROUVÉ. Il reste
+    // indisponible (isAvailableNow=false) jusqu'à ce qu'il se remette
+    // lui-même en ligne.
+    agent.status       = AgentStatus.APPROVED;
+    agent.reviewedById = adminId;
+    agent.reviewedAt   = new Date();
+
+    // Réactiver le rôle DELIVERY_AGENT
+    await this.userRoleRepo.update(
+      { userId: agent.userId, role: UserRoleEnum.DELIVERY_AGENT },
+      { isActive: true },
+    );
+
+    await this.agentRepo.save(agent);
+
+    try {
+      await this.mailService.sendAgentUnblocked(
+        agent.user.email,
+        agent.user.prenom,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Échec envoi mail de déblocage livreur → ${agent.user.email}`,
+        error?.message,
+      );
+    }
+
+    await this.logService.log({
+      actorId:    adminId,
+      actorType:  ActorType.ADMIN,
+      action:     LogAction.AGENT_UNBLOCKED,
+      entityType: 'delivery_agent_profile',
+      entityId:   agentId,
+      oldValue:   { status: oldStatus },
+      newValue:   { status: AgentStatus.APPROVED },
+      ipAddress:  ip,
+    });
+
+    return { message: 'Livreur débloqué avec succès' };
   }
 
   // ─────────────────────────────────────────────────────

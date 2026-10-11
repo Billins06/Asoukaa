@@ -1,8 +1,9 @@
 // src/app.module.ts
 import { Module } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { ThrottlerModule } from '@nestjs/throttler';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { AuthModule } from './modules/auth/auth.module';
 import { CartModule } from './modules/cart/cart.module';
 import { CategoriesModule } from './modules/categories/categories.module';
@@ -26,6 +27,11 @@ import { MailModule } from './modules/mail/mail.module';
 import { UploadModule } from './modules/upload/upload.module';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ActivityLogsModule } from './modules/activity-logs/activity-logs.module';
+import { VendorWithdrawalsModule } from './modules/vendor-withdrawals/vendor-withdrawals.module';
+import { VitrineModule } from './modules/vitrine/vitrine.module';
+import { SupportTicketsModule } from './modules/support-tickets/support-tickets.module';
+import { CommonModule } from './common/common.module';
+import { PresenceModule } from './modules/presence/presence.module';
 
 @Module({
   imports: [
@@ -33,17 +39,25 @@ import { ActivityLogsModule } from './modules/activity-logs/activity-logs.module
       isGlobal: true,
       envFilePath: '.env',
     }),
-    // 🛡️ Rate limiting (5 requêtes par 60 secondes par IP)
+    // 🛡️ Rate limiting global : 100 requêtes / minute / IP.
+    // ⚠️ Cette limite globale est volontairement large (navigation
+    // catalogue, images, polling du statut de paiement). Les routes
+    // sensibles (login, OTP, mot de passe oublié) sont bridées beaucoup
+    // plus sévèrement via @Throttle() sur AuthController.
+    // ⚠️ Le ThrottlerGuard DOIT être enregistré comme APP_GUARD
+    // (voir `providers` plus bas) : sans ça, ThrottlerModule.forRoot()
+    // ne fait strictement rien.
     ThrottlerModule.forRoot([
       {
         ttl: 60000,
-        limit: 5,
+        limit: 100,
       },
     ]),
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
       useFactory: (config: ConfigService) => {
         const isDevelopment = config.get<string>('NODE_ENV') === 'development';
+        const isProduction = config.get<string>('NODE_ENV') === 'production';
 
         return {
           type: 'postgres',
@@ -53,13 +67,35 @@ import { ActivityLogsModule } from './modules/activity-logs/activity-logs.module
           password: config.getOrThrow<string>('DB_PASSWORD'),
           database: config.getOrThrow<string>('DB_NAME'),
           entities: [__dirname + '/**/*.entity{.ts,.js}'],
-          synchronize: config.get<string>('DB_SYNCHRONIZE') === 'true',
+          // ⚠️ JAMAIS de synchronize en production : TypeORM peut
+          // supprimer des colonnes pour aligner le schéma sur les
+          // entités → perte de commandes et de paiements.
+          // En production, le schéma évolue UNIQUEMENT par migrations
+          // (npm run typeorm:generate puis npm run typeorm:run).
+          synchronize:
+            !isProduction && config.get<string>('DB_SYNCHRONIZE') === 'true',
           logging:
             config.get<string>('DB_LOGGING') === 'true' || isDevelopment,
+          // Supabase / Postgres managé exige TLS en production.
+          // ⚠️ rejectUnauthorized:false accepte un certificat non vérifié :
+          // c'est ce qu'exigent la plupart des hébergeurs managés (Supabase,
+          // Render, Railway) qui présentent un certificat auto-signé, mais ça
+          // n'empêche pas un MITM actif. Si votre hébergeur fournit le
+          // certificat racine, poser DB_SSL_CA dans .env pour le vérifier.
+          ssl: isProduction
+            ? {
+                rejectUnauthorized: !!config.get<string>('DB_SSL_CA'),
+                ca: config.get<string>('DB_SSL_CA'),
+              }
+            : false,
         };
       },
       inject: [ConfigService],
     }),
+    // ⚠️ CommonModule est @Global : importé une fois ici, ses providers
+    // (ActivityLogService, EncryptionService, TokenBlacklistService) sont
+    // résolvables dans tous les modules — nécessaire pour JwtAuthGuard.
+    CommonModule,
     AuthModule,
     UsersModule,
     ProductsModule,
@@ -83,6 +119,18 @@ import { ActivityLogsModule } from './modules/activity-logs/activity-logs.module
     UploadModule,
     ScheduleModule.forRoot(),     // ⚠️ activer le système de cron
     ActivityLogsModule,
+    VendorWithdrawalsModule,
+    VitrineModule,
+    SupportTicketsModule,
+    PresenceModule,
+  ],
+  providers: [
+    // 🛡️ Applique le rate limiting à TOUTES les routes.
+    // Sans cet APP_GUARD, ThrottlerModule.forRoot() est inopérant.
+    {
+      provide: APP_GUARD,
+      useClass: ThrottlerGuard,
+    },
   ],
 })
 export class AppModule {}

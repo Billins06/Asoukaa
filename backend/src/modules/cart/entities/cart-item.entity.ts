@@ -6,11 +6,14 @@ import {
   JoinColumn,
   CreateDateColumn,
   Unique,
+  Index,
 } from 'typeorm';
 import { Cart }           from './cart.entity';
 import { ProductVariant } from '../../products/entities/product-variant.entity';
 
 @Unique(['cartId', 'variantId'])
+@Index(['cartId'])
+@Index(['variantId'])
 @Entity('cart_items')
 export class CartItem {
 

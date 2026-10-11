@@ -5,9 +5,11 @@ import {
   ManyToOne,
   JoinColumn,
   CreateDateColumn,
+  Index,
 } from 'typeorm';
 import { User } from './user.entity';
 
+@Index(['userId'])
 @Entity('addresses')
 export class Address {
 
@@ -42,6 +44,16 @@ export class Address {
 
   @Column({ length: 100, default: 'Bénin' })
   country: string;
+
+  // Position GPS partagée par le client (bouton "Partager ma
+  // localisation" au paiement) — optionnelle, permet au livreur de
+  // retrouver le client précisément plutôt que de se fier uniquement
+  // au texte de l'adresse.
+  @Column({ type: 'double precision', nullable: true })
+  latitude: number | null;
+
+  @Column({ type: 'double precision', nullable: true })
+  longitude: number | null;
 
   // Une seule adresse peut être marquée comme principale
   // ⚠️ PRODUCTION : quand on met isDefault = true sur une adresse,

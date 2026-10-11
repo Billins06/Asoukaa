@@ -1,35 +1,21 @@
-import { Module } from '@nestjs/common';
-import { ConfigModule, ConfigService } from '@nestjs/config';
-import { MailerModule } from '@nestjs-modules/mailer';
+import { Global, Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ActivityLog } from './entities/activity-log.entity';
 import { ActivityLogService } from './services/activity-log.service';
 import { EncryptionService } from './services/encryption.service';
 import { TokenBlacklistService } from './services/token-blacklist.service';
 
+// ⚠️ @Global : JwtAuthGuard dépend désormais de TokenBlacklistService pour
+// vérifier la révocation des tokens, et ce guard est utilisé dans les 22
+// modules — dont plusieurs n'importaient pas CommonModule (cart, chat,
+// dashboard, notifications, upload, wishlist...). Sans @Global, Nest ne
+// peut pas résoudre la dépendance du guard dans ces modules-là.
+@Global()
 @Module({
   imports: [
     TypeOrmModule.forFeature([ActivityLog]),
-    MailerModule.forRootAsync({
-      imports: [ConfigModule],
-      useFactory: (config: ConfigService) => ({
-        transport: {
-          host: config.getOrThrow<string>('MAIL_HOST'),
-          port: Number(config.getOrThrow<string>('MAIL_PORT')),
-          secure: config.get<string>('MAIL_SECURE') === 'true',
-          auth: {
-            user: config.getOrThrow<string>('MAIL_USER'),
-            pass: config.get<string>('MAIL_PASSWORD') ?? '',
-          },
-        },
-        defaults: {
-          from: config.getOrThrow<string>('MAIL_FROM'),
-        },
-      }),
-      inject: [ConfigService],
-    }),
   ],
   providers: [ActivityLogService, EncryptionService, TokenBlacklistService],
-  exports: [ActivityLogService, EncryptionService, TokenBlacklistService, MailerModule],
+  exports: [ActivityLogService, EncryptionService, TokenBlacklistService],
 })
 export class CommonModule {}

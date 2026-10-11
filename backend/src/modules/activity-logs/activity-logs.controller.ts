@@ -19,10 +19,12 @@ import {
 
 import { ActivityLogsService }  from './activity-logs.service';
 import { ActivityLogQueryDto }  from '../../common/dto/activity-log-query.dto';
+import { PurgeLogsDto }         from './dto/purge-logs.dto';
 import { JwtAuthGuard }         from '../auth/guards/jwt-auth.guard';
 import { RolesGuard }           from '../auth/guards/roles.guard';
 import { Roles }                from '../auth/decorators/roles.decorator';
 import { Role }                 from '../../common/enums/role.enum';
+import { clampLimit, clampPage } from '../../common/utils/pagination.util';
 
 @ApiTags('Activity Logs')
 @ApiBearerAuth()
@@ -53,8 +55,8 @@ export class ActivityLogsController {
     @Query('limit') limit?: number,
   ) {
     return this.activityLogsService.getLoginFailures(
-      Number(page)  || 1,
-      Number(limit) || 50,
+      clampPage(page),
+      clampLimit(limit, 50),
     );
   }
 
@@ -69,8 +71,8 @@ export class ActivityLogsController {
   ) {
     return this.activityLogsService.findByActor(
       actorId,
-      Number(page)  || 1,
-      Number(limit) || 20,
+      clampPage(page),
+      clampLimit(limit, 20),
     );
   }
 
@@ -87,8 +89,8 @@ export class ActivityLogsController {
     return this.activityLogsService.findByEntity(
       entityType,
       entityId,
-      Number(page)  || 1,
-      Number(limit) || 50,
+      clampPage(page),
+      clampLimit(limit, 50),
     );
   }
 
@@ -98,10 +100,14 @@ export class ActivityLogsController {
     return this.activityLogsService.findOne(id);
   }
 
-  @ApiOperation({ summary: '[ADMIN] Purge manuelle des logs' })
+  // ⚠️ Destructif et irréversible : réservé au SUPERADMIN. Le @Roles de
+  // la méthode remplace celui de la classe (Reflector.getAllAndOverride),
+  // et RolesGuard compare par niveau (superadmin 100 > admin 90).
+  @ApiOperation({ summary: '[SUPERADMIN] Purge manuelle des logs' })
+  @Roles(Role.SUPERADMIN)
   @Delete('purge')
   @HttpCode(HttpStatus.OK)
-  manualPurge(@Body() body: { beforeDate: string }) {
+  manualPurge(@Body() body: PurgeLogsDto) {
     return this.activityLogsService.manualPurge(new Date(body.beforeDate));
   }
 }

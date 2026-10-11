@@ -29,6 +29,7 @@ import { JwtAuthGuard }           from '../auth/guards/jwt-auth.guard';
 import { RolesGuard }             from '../auth/guards/roles.guard';
 import { Roles }                  from '../auth/decorators/roles.decorator';
 import { Role }                   from '../../common/enums/role.enum';
+import { clampLimit, clampPage } from '../../common/utils/pagination.util';
 
 const getIp   = (req: Request) =>
   (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim()
@@ -88,8 +89,8 @@ export class FournisseursController {
       ville,
       currency,
       isActive: isActive !== undefined ? isActive === 'true' : undefined,
-      page:  Number(page)  || 1,
-      limit: Number(limit) || 20,
+      page:  clampPage(page),
+      limit: clampLimit(limit, 20),
     });
   }
 

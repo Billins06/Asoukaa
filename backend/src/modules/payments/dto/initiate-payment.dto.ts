@@ -4,6 +4,8 @@ import {
   IsUUID,
   IsOptional,
   IsString,
+  IsArray,
+  ArrayMinSize,
   ValidateIf,
   Matches,
   MaxLength,
@@ -15,9 +17,20 @@ import {
 
 export class InitiatePaymentDto {
 
-  @IsNotEmpty()
+  // Cas normal : une seule commande (une boutique).
+  @ValidateIf(o => !o.orderIds || o.orderIds.length === 0)
+  @IsNotEmpty({ message: 'ID commande invalide' })
   @IsUUID('4', { message: 'ID commande invalide' })
-  orderId: string;
+  orderId?: string;
+
+  // Cas panier multi-boutiques : plusieurs commandes créées ensemble
+  // (une par boutique) mais un seul paiement client. Fourni à la place
+  // de orderId.
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(2, { message: 'orderIds doit contenir au moins 2 commandes' })
+  @IsUUID('4', { each: true, message: 'ID commande invalide dans orderIds' })
+  orderIds?: string[];
 
   @IsNotEmpty()
   @IsEnum(PaymentMethod, { message: 'Méthode de paiement invalide' })

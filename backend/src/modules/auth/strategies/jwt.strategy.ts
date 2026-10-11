@@ -12,6 +12,8 @@ interface JwtPayload {
   email: string;
   type?: 'user' | 'admin';
   role?: string;
+  // « issued at » (secondes) : ajouté automatiquement par jsonwebtoken
+  iat?: number;
 }
 
 @Injectable()
@@ -51,6 +53,30 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     const user = await this.usersService.findById(payload.sub);
     if (!user) {
       throw new UnauthorizedException('Utilisateur introuvable');
+    }
+
+    // Compte bloqué (admin, ou précaution après un « Ce n'est pas moi ») :
+    // le jeton, pourtant encore valide, ne donne plus aucun accès. Sans cette
+    // ligne, un utilisateur bloqué gardait toute sa session jusqu'à
+    // l'expiration du jeton (seul le login contrôlait isActive).
+    if (!user.isActive) {
+      throw new UnauthorizedException('Compte bloqué');
+    }
+
+    // Révocation globale : après un « Ce n'est pas moi » sur un changement
+    // d'e-mail, tous les jetons émis avant `tokensValidAfter` sont refusés
+    // (le jeton garde sa validité cryptographique, c'est nous qui le
+    // refusons). Un jeton sans `iat` est refusé par prudence.
+    if (user.tokensValidAfter) {
+      const issuedAtMs = (payload.iat ?? 0) * 1000;
+      // `iat` est arrondi à la seconde : on arrondit aussi la date de
+      // révocation, pour ne pas refuser un jeton émis dans la même seconde
+      // (nouvelle connexion juste après un déblocage, par exemple).
+      const validAfterMs =
+        Math.floor(user.tokensValidAfter.getTime() / 1000) * 1000;
+      if (issuedAtMs < validAfterMs) {
+        throw new UnauthorizedException('Session expirée, reconnectez-vous');
+      }
     }
     return user;
   }

@@ -7,6 +7,7 @@ import {
   CreateDateColumn,
   UpdateDateColumn,
   Unique,
+  Index,
 } from 'typeorm';
 import { User } from '../../users/entities/user.entity';
 import { Product } from '../../products/entities/product.entity';
@@ -23,6 +24,9 @@ export enum ReviewStatus {
 // car un client peut acheter le même produit plusieurs fois
 // mais ne peut laisser qu'un seul avis au total
 @Unique(['userId', 'productId'])
+@Index(['productId'])
+@Index(['userId'])
+@Index(['status'])
 @Entity('reviews')
 export class Review {
 

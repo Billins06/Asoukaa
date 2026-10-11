@@ -7,8 +7,8 @@ import {
   IsInt,
   Min,
   MaxLength,
-  IsUrl,
 } from 'class-validator';
+import { IsAppUrl } from '../../../common/validators/is-app-url.decorator';
 import { Transform, Type } from 'class-transformer';
 
 export class CreateVariantDto {
@@ -54,7 +54,7 @@ export class CreateVariantDto {
   lowStockAlert?: number;
 
   @IsOptional()
-  @IsUrl({}, { message: 'URL image variante invalide' })
+  @IsAppUrl({ message: 'URL image variante invalide' })
   @MaxLength(500)
   imageUrl?: string;
 }

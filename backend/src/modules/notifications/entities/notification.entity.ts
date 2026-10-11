@@ -19,6 +19,7 @@ export enum NotificationType {
   VALIDATION = 'validation', // validation vendeur/livreur
   SYSTEM     = 'system',     // notification système générale
   CHAT       = 'chat',       // nouveau message reçu
+  TICKET     = 'ticket',     // réponse de l'équipe à un ticket de support
 }
 
 @Entity('notifications')

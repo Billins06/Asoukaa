@@ -78,14 +78,18 @@ export class DeliveryAgentProfile {
 
   // ─── Documents de vérification ─────────────────────────
 
-  @Column({ length: 500 })
-  idDocumentUrl: string;
+  // ⚠️ `type: 'varchar'` OBLIGATOIRE : avec le type TS `string | null`,
+  // TypeScript émet `design:type = Object` et TypeORM ne peut plus déduire
+  // le type SQL → DataTypeNotSupportedError au démarrage.
+  // Toute colonne `X | null` SANS relation doit déclarer son type SQL.
+  @Column({ type: 'varchar', length: 500, nullable: true })
+  idDocumentUrl: string | null;
 
-  @Column({ length: 500 })
-  selfieUrl: string;
+  @Column({ type: 'varchar', length: 500, nullable: true })
+  selfieUrl: string | null;
 
-  @Column({ length: 500 })
-  vehiclePhotoUrl: string;
+  @Column({ type: 'varchar', length: 500, nullable: true })
+  vehiclePhotoUrl: string | null;
 
   @Column({ length: 50 })
   licensePlate: string;
@@ -133,6 +137,14 @@ export class DeliveryAgentProfile {
   // Nombre total de livraisons effectuées
   @Column({ default: 0 })
   totalLivraisons: number;
+
+  // ─── Rémunération ───────────────────────────────────────
+  // Pourcentage des frais de livraison que CE livreur garde pour lui
+  // (le reste va à la plateforme). Individualisable par livreur — nul
+  // tant que l'admin n'a rien fixé : DeliveryEarningsService applique
+  // alors un taux par défaut (voir DEFAULT_AGENT_EARNINGS_RATE).
+  @Column({ type: 'decimal', precision: 5, scale: 2, nullable: true })
+  earningsRate: number | null;
 
   @CreateDateColumn()
   createdAt: Date;

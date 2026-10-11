@@ -4,9 +4,11 @@ import {
   Column,
   ManyToOne,
   JoinColumn,
+  Index,
 } from 'typeorm';
 import { Product } from './product.entity';
 
+@Index(['productId'])
 @Entity('product_images')
 export class ProductImage {
 

@@ -1,3 +1,5 @@
+import { VendorStatus } from '../users/entities/vendor-profile.entity';
+import { toPublicVendor } from '../products/public-vendor.util';
 import {
   Injectable,
   NotFoundException,
@@ -11,6 +13,7 @@ import { CartItem }        from './entities/cart-item.entity';
 import { ProductVariant }  from '../products/entities/product-variant.entity';
 import { AddToCartDto }    from './dto/add-to-cart.dto';
 import { UpdateCartItemDto } from './dto/update-cart-item.dto';
+import { resolveTierUnitPrice } from '../../common/utils/tier-pricing.util';
 
 @Injectable()
 export class CartService {
@@ -39,6 +42,9 @@ export class CartService {
         'items.variant.product.images',
         'items.variant.product.vendor',
         'items.variant.product.vendor.user',
+        // Paliers de prix dégressifs : nécessaires pour recalculer le prix
+        // unitaire attendu selon la quantité (voir tier-pricing.util.ts)
+        'items.variant.product.tierPrices',
       ],
     });
 
@@ -62,7 +68,13 @@ export class CartService {
     let hasChanges = false;
 
     for (const item of cart.items) {
-      const currentPrice = Number(item.variant.price);
+      // Prix attendu = prix dégressif applicable à la quantité du panier
+      // (ou prix normal de la variante s'il n'y a pas de palier atteint)
+      const currentPrice = resolveTierUnitPrice(
+        item.variant.price,
+        item.variant.product?.tierPrices,
+        item.quantity,
+      );
       const savedPrice   = Number(item.unitPrice);
 
       if (currentPrice !== savedPrice) {
@@ -75,11 +87,11 @@ export class CartService {
         item.priceChanged = false;
       }
 
-      // ⚠️ Ne pas exposer les données du vendeur sensibles
-      const vendorUser = (item.variant?.product as any)?.vendor?.user;
-      if (vendorUser) {
-        const { passwordHash, ...userSafe } = vendorUser;
-        (item.variant.product as any).vendor.user = userSafe;
+      // ⚠️ Ne pas exposer les données sensibles du vendeur (documents,
+      // paiement, e-mail...) : seule la fiche publique part vers l'appli.
+      const prod = item.variant?.product as any;
+      if (prod?.vendor) {
+        prod.vendor = toPublicVendor(prod.vendor);
       }
     }
 
@@ -104,11 +116,27 @@ export class CartService {
     // 1. Vérifier que la variante existe et est active
     const variant = await this.variantRepo.findOne({
       where:     { id: dto.variantId, isActive: true },
-      relations: ['product'],
+      relations: ['product', 'product.tierPrices', 'product.vendor', 'product.vendor.user'],
     });
 
     if (!variant) {
       throw new NotFoundException('Produit introuvable ou indisponible');
+    }
+
+    // Produit d'un vendeur bloqué / non approuvé / désactivé : indisponible
+    const vendorOfProduct = variant.product?.vendor;
+    if (
+      !vendorOfProduct
+      || vendorOfProduct.status !== VendorStatus.APPROVED
+      || vendorOfProduct.user?.isActive === false
+    ) {
+      throw new NotFoundException('Produit introuvable ou indisponible');
+    }
+
+    // Boutique masquée par son vendeur (« Boutique visible » désactivé) :
+    // plus de nouveaux articles au panier.
+    if (vendorOfProduct.shopVisible === false) {
+      throw new BadRequestException('Cette boutique est momentanément indisponible');
     }
 
     // 2. Vérifier que le produit est actif
@@ -142,7 +170,12 @@ export class CartService {
       }
 
       existingItem.quantity     = newQuantity;
-      existingItem.unitPrice    = Number(variant.price);
+      // Prix dégressif recalculé sur la NOUVELLE quantité totale
+      existingItem.unitPrice    = resolveTierUnitPrice(
+        variant.price,
+        variant.product?.tierPrices,
+        newQuantity,
+      );
       existingItem.priceChanged = false;
       await this.cartItemRepo.save(existingItem);
     } else {
@@ -151,7 +184,11 @@ export class CartService {
       item.cartId         = cart.id;
       item.variantId      = dto.variantId;
       item.quantity       = dto.quantity;
-      item.unitPrice      = Number(variant.price);
+      item.unitPrice      = resolveTierUnitPrice(
+        variant.price,
+        variant.product?.tierPrices,
+        dto.quantity,
+      );
       item.priceChanged   = false;
       await this.cartItemRepo.save(item);
     }
@@ -175,7 +212,7 @@ export class CartService {
 
     const item = await this.cartItemRepo.findOne({
       where:     { id: itemId, cartId: cart.id },
-      relations: ['variant'],
+      relations: ['variant', 'variant.product', 'variant.product.tierPrices'],
     });
 
     if (!item) throw new NotFoundException('Article introuvable dans le panier');
@@ -187,7 +224,14 @@ export class CartService {
       );
     }
 
-    item.quantity = dto.quantity;
+    item.quantity  = dto.quantity;
+    // Changer la quantité peut faire franchir (ou quitter) un palier de prix
+    // dégressif : on recalcule le prix unitaire côté serveur.
+    item.unitPrice = resolveTierUnitPrice(
+      item.variant.price,
+      item.variant.product?.tierPrices,
+      dto.quantity,
+    );
     await this.cartItemRepo.save(item);
 
     return this.getMyCart(userId);

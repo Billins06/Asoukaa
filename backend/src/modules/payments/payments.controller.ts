@@ -29,6 +29,7 @@ import { JwtAuthGuard }       from '../auth/guards/jwt-auth.guard';
 import { RolesGuard }         from '../auth/guards/roles.guard';
 import { Roles }              from '../auth/decorators/roles.decorator';
 import { Role }               from '../../common/enums/role.enum';
+import { clampLimit, clampPage } from '../../common/utils/pagination.util';
 
 const getIp   = (req: Request) =>
   (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim()
@@ -70,8 +71,8 @@ export class PaymentsController {
   ) {
     return this.paymentsService.getMyPayments(
       getUser(req).id,
-      Number(page)  || 1,
-      Number(limit) || 10,
+      clampPage(page),
+      clampLimit(limit, 10),
     );
   }
 
@@ -87,6 +88,29 @@ export class PaymentsController {
       getIp(req),
     );
   }
+
+  @ApiOperation({ summary: 'Annuler mon paiement bloqué en attente (pour pouvoir réessayer)' })
+  @Patch(':id/cancel')
+  @HttpCode(HttpStatus.OK)
+  cancelPending(
+    @Req() req: Request,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.paymentsService.cancelMyPendingPayment(
+      id,
+      getUser(req).id,
+      getIp(req),
+    );
+  }
+
+  // ⚠️ Route "confirm-cod" (vendeur marque une commande payée en
+  // espèces) retirée : un vendeur ne peut plus marquer unilatéralement
+  // une commande comme payée. Les commandes initiées par un vendeur
+  // (POST /orders/vendor-initiated) n'ont désormais plus de paiement
+  // "cash_on_delivery" créé à la création — c'est le CLIENT qui paie
+  // ensuite via le flux Mobile Money normal (POST /payments/initiate,
+  // ci-dessus). Voir PaymentsService (confirmCodPayment supprimée) et
+  // OrdersService.createVendorInitiated.
 
   @ApiOperation({ summary: 'Demander un remboursement' })
   @Post('refund')
@@ -113,43 +137,26 @@ export class PaymentsController {
   ) {
     return this.paymentsService.getMyRefunds(
       getUser(req).id,
-      Number(page)  || 1,
-      Number(limit) || 10,
+      clampPage(page),
+      clampLimit(limit, 10),
     );
   }
 
-  // ─── Callbacks opérateur (sans auth JWT) ──────────────
-  // ⚠️ Ces routes sont appelées par l'opérateur de paiement
-  // Pas de JwtAuthGuard ici — sécurisées par signature HMAC
-  // en production
-
-  @ApiOperation({ summary: 'Callback confirmation paiement (opérateur)' })
-  @Post('callback/confirm/:paymentId')
-  @HttpCode(HttpStatus.OK)
-  confirmPayment(
-    @Param('paymentId', ParseUUIDPipe) paymentId: string,
-    @Body() body: { providerRef: string },
-    @Req() req: Request,
-  ) {
-    return this.paymentsService.confirmPayment(
-      paymentId,
-      body.providerRef,
-      getIp(req),
-    );
-  }
-
-  @ApiOperation({ summary: 'Callback échec paiement (opérateur)' })
-  @Post('callback/fail/:paymentId')
-  @HttpCode(HttpStatus.OK)
-  failPayment(
-    @Param('paymentId', ParseUUIDPipe) paymentId: string,
-    @Req() req: Request,
-  ) {
-    return this.paymentsService.failPayment(
-      paymentId,
-      getIp(req),
-    );
-  }
+  // ─── Callbacks opérateur ──────────────────────────────
+  // ⚠️ SUPPRIMÉS — ces deux routes (POST callback/confirm/:paymentId et
+  // POST callback/fail/:paymentId) étaient exposées SANS authentification
+  // et sans vérification de signature : n'importe quel client connaissant
+  // son propre paymentId (retourné par POST /payments/initiate) pouvait
+  // marquer sa commande comme payée sans jamais payer.
+  //
+  // La confirmation passe désormais UNIQUEMENT par GET /payments/:id/status,
+  // qui interroge réellement FeexPay avant de valider (voir
+  // PaymentsService.checkPaymentStatus).
+  //
+  // Si un vrai webhook FeexPay est branché plus tard, il devra :
+  //   1. vérifier une signature HMAC de l'opérateur sur le corps brut ;
+  //   2. re-interroger l'API statut de FeexPay avant d'accepter ;
+  //   3. ne jamais faire confiance au seul contenu du callback.
 
   // ─── Routes Admin ─────────────────────────────────────
 
@@ -167,8 +174,8 @@ export class PaymentsController {
   ) {
     return this.paymentsService.getAllPayments(
       status,
-      Number(page)  || 1,
-      Number(limit) || 20,
+      clampPage(page),
+      clampLimit(limit, 20),
     );
   }
 
@@ -186,8 +193,8 @@ export class PaymentsController {
   ) {
     return this.paymentsService.getAllRefunds(
       status,
-      Number(page)  || 1,
-      Number(limit) || 20,
+      clampPage(page),
+      clampLimit(limit, 20),
     );
   }
 

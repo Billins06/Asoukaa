@@ -11,6 +11,7 @@ import {
   Req,
   UseGuards,
   ParseUUIDPipe,
+  BadRequestException,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
@@ -21,6 +22,7 @@ import {
   ApiQuery,
 } from '@nestjs/swagger';
 import type { Request } from 'express';
+import { isUUID } from 'class-validator';
 
 import { ProductsService }    from './products.service';
 import { CreateProductDto }   from './dto/create-product.dto';
@@ -33,6 +35,7 @@ import { JwtAuthGuard }       from '../auth/guards/jwt-auth.guard';
 import { RolesGuard }         from '../auth/guards/roles.guard';
 import { Roles }              from '../auth/decorators/roles.decorator';
 import { Role }               from '../../common/enums/role.enum';
+import { clampLimit, clampPage } from '../../common/utils/pagination.util';
 
 const getIp   = (req: Request) =>
   (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim()
@@ -65,9 +68,27 @@ export class ProductsController {
     @Query('minPrice')   minPrice?:   number,
     @Query('maxPrice')   maxPrice?:   number,
   ) {
+    // 400 (et non 500 sur un cast Postgres) pour un id mal formé.
+    if (categoryId && !isUUID(categoryId)) {
+      throw new BadRequestException('categoryId doit être un UUID');
+    }
+    if (vendorId && !isUUID(vendorId)) {
+      throw new BadRequestException('vendorId doit être un UUID');
+    }
+    if (
+      (minPrice && !Number.isFinite(Number(minPrice))) ||
+      (maxPrice && !Number.isFinite(Number(maxPrice)))
+    ) {
+      throw new BadRequestException('minPrice et maxPrice doivent être des nombres');
+    }
     return this.productsService.findAll({
-      page:       Number(page)     || 1,
-      limit:      Number(limit)    || 20,
+      page:       clampPage(page),
+      // Défilement infini : 50 produits max par page (défaut 20). Exception
+      // de compatibilité : avec vendorId (page boutique, qui demande 100),
+      // le plafond historique de clampLimit (100) reste en vigueur.
+      limit:      vendorId
+        ? clampLimit(limit, 20)
+        : Math.min(clampLimit(limit, 20), 50),
       search,
       categoryId,
       vendorId,
@@ -79,7 +100,8 @@ export class ProductsController {
   @ApiOperation({ summary: 'Détails d\'un produit' })
   @Get(':id')
   findOne(@Param('id', ParseUUIDPipe) id: string) {
-    return this.productsService.findOne(id);
+    // Vue publique : incrémente le compteur de vues du produit.
+    return this.productsService.findOnePublic(id);
   }
 
   // ─── Routes Vendeur ───────────────────────────────────
@@ -100,9 +122,20 @@ export class ProductsController {
     return this.productsService.findByVendor(
       getUser(req).id,
       status,
-      Number(page)  || 1,
-      Number(limit) || 20,
+      clampPage(page),
+      clampLimit(limit, 20),
     );
+  }
+
+  @ApiOperation({ summary: 'Un de mes produits (tous statuts, pour modification)' })
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @Get('vendor/me/:id')
+  findMyProduct(
+    @Req() req: Request,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.productsService.findOneForOwner(id, getUser(req).id);
   }
 
   @ApiOperation({ summary: 'Créer un produit' })

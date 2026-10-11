@@ -6,6 +6,7 @@ import { DeliveryAgentsService }    from './delivery-agents.service';
 import { DeliveryAgentProfile }     from '../users/entities/delivery-agent-profile.entity';
 import { UserRole }                 from '../users/entities/user-role.entity';
 import { User }                     from '../users/entities/user.entity';
+import { DeliveryEarning }          from '../delivery/entities/delivery-earning.entity';
 import { CommonModule }             from '../../common/common.module';
 
 @Module({
@@ -14,6 +15,7 @@ import { CommonModule }             from '../../common/common.module';
       DeliveryAgentProfile,
       UserRole,
       User,
+      DeliveryEarning,
     ]),
     CommonModule,
   ],

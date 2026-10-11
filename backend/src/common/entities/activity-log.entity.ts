@@ -30,9 +30,19 @@ export enum LogAction {
   ADMIN_LOGIN             = 'Connexion administrateur',
   ADMIN_LOGIN_FAILED      = 'Échec de connexion administrateur',
 
+  // Changement d'e-mail (identifiant de connexion) — voir EmailChangeService.
+  // ⚠️ Ces valeurs vivent aussi dans l'enum Postgres activity_logs_action_enum :
+  // la migration AddEmailChange les y ajoute (ALTER TYPE ... ADD VALUE).
+  EMAIL_CHANGE_REQUESTED  = "Demande de changement d'e-mail",
+  EMAIL_CHANGE_CONFIRMED  = 'Adresse e-mail modifiée',
+  // Gravité élevée : le propriétaire dit ne PAS être à l'origine du changement
+  EMAIL_CHANGE_REVERTED   = 'E-mail annulé — compte potentiellement compromis',
+
   // Gestion utilisateurs
   USER_BLOCKED            = 'Utilisateur bloqué',
   USER_UNBLOCKED          = 'Utilisateur débloqué',
+  USER_CREATED_BY_ADMIN   = 'Utilisateur créé par admin',
+  USER_UPDATED_BY_ADMIN   = 'Utilisateur modifié par admin',
   ADMIN_CREATED           = 'Administrateur créé',
   ADMIN_DEACTIVATED       = 'Administrateur désactivé',
 
@@ -41,10 +51,12 @@ export enum LogAction {
   VENDOR_APPROVED         = 'Vendeur approuvé',
   VENDOR_REJECTED         = 'Vendeur rejeté',
   VENDOR_BLOCKED          = 'Vendeur bloqué',
+  VENDOR_UNBLOCKED        = 'Vendeur débloqué',
   AGENT_SUBMITTED         = 'Demande livreur soumise',
   AGENT_APPROVED          = 'Livreur approuvé',
   AGENT_REJECTED          = 'Livreur rejeté',
   AGENT_BLOCKED           = 'Livreur bloqué',
+  AGENT_UNBLOCKED         = 'Livreur débloqué',
 
   // Produits
   PRODUCT_CREATED         = 'Produit créé',
@@ -59,6 +71,14 @@ export enum LogAction {
   ORDER_CREATED           = 'Commande créée',
   ORDER_STATUS_CHANGED    = 'Statut de la commande modifié',
   ORDER_CANCELLED         = 'Commande annulée',
+  ORDER_DISPUTE_OPENED    = 'Litige ouvert sur une commande',
+  // Alerte système : commande payée toujours pas confirmée par le vendeur après
+  // ORDER_ADMIN_ALERT_HOURS. ⚠️ Valeur aussi ajoutée à activity_logs_action_enum
+  // par la migration 1791600000000-AddOrderConfirmationReminders.
+  ORDER_CONFIRMATION_OVERDUE = 'Commande non confirmée par le vendeur (alerte)',
+
+  // Preuves de livraison (Cas A/B/C — voir DeliveryProof)
+  DELIVERY_PROOF_SUBMITTED = 'Preuve de livraison soumise',
 
   // Paiements
   PAYMENT_SUCCESS         = 'Paiement réussi',
@@ -95,6 +115,12 @@ export enum LogAction {
 
   // Commission
   COMMISSION_RATE_CHANGED = 'Taux de commission modifié',
+
+  // Tickets de support — ces valeurs vivent aussi dans l'enum Postgres
+  // activity_logs_action_enum (migration AddSupportTickets).
+  SUPPORT_TICKET_REPLIED         = 'Réponse à un ticket support',
+  SUPPORT_TICKET_STATUS_CHANGED  = "Statut d'un ticket support modifié",
+  SUPPORT_TICKET_ASSIGNED        = 'Ticket support assigné',
 }
 
 @Entity('activity_logs')

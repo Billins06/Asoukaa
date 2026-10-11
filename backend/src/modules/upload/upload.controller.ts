@@ -1,7 +1,10 @@
 import {
   Controller,
   Post,
+  Get,
   Param,
+  Req,
+  Res,
   UseGuards,
   UseInterceptors,
   UploadedFile,
@@ -9,7 +12,11 @@ import {
   HttpCode,
   HttpStatus,
   BadRequestException,
+  NotFoundException,
+  ForbiddenException,
 } from '@nestjs/common';
+import type { Request, Response } from 'express';
+import { existsSync } from 'fs';
 import {
   FileInterceptor,
   FilesInterceptor,
@@ -24,6 +31,16 @@ import {
 
 import { UploadService, UploadType } from './upload.service';
 import { JwtAuthGuard }              from '../auth/guards/jwt-auth.guard';
+import { Role }                      from '../../common/enums/role.enum';
+
+// Seuls les comptes du back-office (AdminAccount) portent un champ scalaire
+// `role` ('admin' | 'superadmin') — voir RolesGuard.extractRoles. Les
+// utilisateurs (client/vendeur/livreur) ont une relation `roles` qui ne
+// contient jamais ces valeurs.
+const isAdminPrincipal = (req: Request): boolean => {
+  const role = (req as any).user?.role;
+  return role === Role.ADMIN || role === Role.SUPERADMIN;
+};
 
 @ApiTags('Upload')
 @ApiBearerAuth()
@@ -50,6 +67,7 @@ export class UploadController {
   uploadFile(
     @Param('type') type: string,
     @UploadedFile() file: Express.Multer.File,
+    @Req() req: Request,
   ) {
     // Vérifier que le type est valide
     if (!Object.values(UploadType).includes(type as UploadType)) {
@@ -57,6 +75,7 @@ export class UploadController {
         `Type d'upload invalide. Valeurs acceptées : ${Object.values(UploadType).join(', ')}`
       );
     }
+    this.assertAllowedForUser(type, req);
 
     return this.uploadService.uploadFile(file, type as UploadType);
   }
@@ -82,13 +101,48 @@ export class UploadController {
   uploadMultiple(
     @Param('type') type: string,
     @UploadedFiles() files: Express.Multer.File[],
+    @Req() req: Request,
   ) {
     if (!Object.values(UploadType).includes(type as UploadType)) {
       throw new BadRequestException(
         `Type d'upload invalide. Valeurs acceptées : ${Object.values(UploadType).join(', ')}`
       );
     }
+    this.assertAllowedForUser(type, req);
 
     return this.uploadService.uploadMultiple(files, type as UploadType);
+  }
+
+  // Types réservés au back-office (vitrine, catégories) : refusés à tout
+  // compte qui n'est pas ADMIN/SUPERADMIN. Les autres types sont inchangés.
+  private assertAllowedForUser(type: string, req: Request): void {
+    if (this.uploadService.isAdminOnlyType(type) && !isAdminPrincipal(req)) {
+      throw new ForbiddenException(
+        'Ce type d\'upload est réservé aux administrateurs'
+      );
+    }
+  }
+
+  // ─── Lecture d'un fichier privé stocké en local (dev) ─────────────────
+  // Uniquement utile quand STORAGE_DRIVER=local : les fichiers "publics"
+  // sont servis directement en statique (voir main.ts), mais les
+  // documents/selfies (KYC) doivent rester derrière l'authentification —
+  // d'où cette route dédiée au lieu d'une URL publique.
+
+  @ApiOperation({ summary: 'Récupérer un fichier privé (stockage local, dev)' })
+  @Get('file/:type/:filename')
+  getPrivateFile(
+    @Param('type') type: string,
+    @Param('filename') filename: string,
+    @Res() res: Response,
+  ) {
+    if (!this.uploadService.isPrivateType(type)) {
+      throw new BadRequestException('Ce type de fichier n\'est pas servi par cette route');
+    }
+    const filePath = this.uploadService.resolveLocalFilePath(type, filename);
+    if (!existsSync(filePath)) {
+      throw new NotFoundException('Fichier introuvable');
+    }
+    return res.sendFile(filePath);
   }
 }

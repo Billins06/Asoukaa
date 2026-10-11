@@ -3,7 +3,7 @@ import { MulterModule } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
 
 import { UploadController } from './upload.controller';
-import { UploadService }    from './upload.service';
+import { UploadService, DEFAULT_MAX_VIDEO_FILE_SIZE } from './upload.service';
 
 @Module({
   imports: [
@@ -14,7 +14,14 @@ import { UploadService }    from './upload.service';
       // avant qu'on ait pu le vérifier.
       storage: memoryStorage(),
       limits: {
-        fileSize: 5 * 1024 * 1024, // 5 MB
+        // Plafond global Multer : doit être >= la plus grande limite
+        // par type gérée dans UploadService (actuellement les vidéos
+        // produit, DEFAULT_MAX_VIDEO_FILE_SIZE = 50 MB). Multer rejette
+        // le fichier AVANT que UploadService puisse appliquer ses
+        // propres limites par type ; c'est donc un plafond global "large
+        // ouverture", pas la vraie limite (images/documents restent
+        // plafonnés à MAX_FILE_SIZE = 5 MB dans UploadService.uploadFile).
+        fileSize: DEFAULT_MAX_VIDEO_FILE_SIZE,
       },
     }),
   ],

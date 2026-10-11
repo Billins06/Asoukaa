@@ -7,10 +7,12 @@ import {
   OneToOne,
   PrimaryGeneratedColumn,
   UpdateDateColumn,
+  Index,
 } from 'typeorm';
 import { User } from '../../users/entities/user.entity';
 import { CartItem } from './cart-item.entity';
 
+@Index(['userId'])
 @Entity('carts')
 export class Cart {
   @PrimaryGeneratedColumn('uuid')

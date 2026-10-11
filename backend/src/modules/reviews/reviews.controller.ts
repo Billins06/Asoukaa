@@ -28,6 +28,7 @@ import { JwtAuthGuard }       from '../auth/guards/jwt-auth.guard';
 import { RolesGuard }         from '../auth/guards/roles.guard';
 import { Roles }              from '../auth/decorators/roles.decorator';
 import { Role }               from '../../common/enums/role.enum';
+import { clampLimit, clampPage } from '../../common/utils/pagination.util';
 
 const getIp   = (req: Request) =>
   (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim()
@@ -53,8 +54,24 @@ export class ReviewsController {
   ) {
     return this.reviewsService.getProductReviews(
       productId,
-      Number(page)  || 1,
-      Number(limit) || 10,
+      clampPage(page),
+      clampLimit(limit, 10),
+    );
+  }
+
+  @ApiOperation({ summary: 'Avis d\'une boutique, tous produits confondus (publics)' })
+  @ApiQuery({ name: 'page',  required: false })
+  @ApiQuery({ name: 'limit', required: false })
+  @Get('shop/:vendorId')
+  getShopReviews(
+    @Param('vendorId', ParseUUIDPipe) vendorId: string,
+    @Query('page')  page?:  number,
+    @Query('limit') limit?: number,
+  ) {
+    return this.reviewsService.getShopReviews(
+      vendorId,
+      clampPage(page),
+      clampLimit(limit, 10),
     );
   }
 
@@ -89,8 +106,8 @@ export class ReviewsController {
   ) {
     return this.reviewsService.getMyReviews(
       getUser(req).id,
-      Number(page)  || 1,
-      Number(limit) || 10,
+      clampPage(page),
+      clampLimit(limit, 10),
     );
   }
 
@@ -108,8 +125,8 @@ export class ReviewsController {
     @Query('limit') limit?: number,
   ) {
     return this.reviewsService.getPendingReviews(
-      Number(page)  || 1,
-      Number(limit) || 20,
+      clampPage(page),
+      clampLimit(limit, 20),
     );
   }
 
@@ -128,8 +145,8 @@ export class ReviewsController {
   ) {
     return this.reviewsService.getAllReviews(
       status,
-      Number(page)  || 1,
-      Number(limit) || 20,
+      clampPage(page),
+      clampLimit(limit, 20),
     );
   }
 

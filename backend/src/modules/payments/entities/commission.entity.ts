@@ -7,6 +7,7 @@ import {
   JoinColumn,
   CreateDateColumn,
   UpdateDateColumn,
+  Index,
 } from 'typeorm';
 import { Order } from '../../orders/entities/order.entity';
 import { VendorProfile } from '../../users/entities/vendor-profile.entity';
@@ -17,6 +18,9 @@ export enum CommissionStatus {
   PAID    = 'payé',    // montant reversé au vendeur
 }
 
+@Index(['vendorId'])
+@Index(['status'])
+@Index(['createdAt'])
 @Entity('commissions')
 export class Commission {
 

@@ -3,6 +3,7 @@ import {
   IsNotEmpty,
   IsOptional,
   IsBoolean,
+  IsNumber,
   MaxLength,
   Matches,
 } from 'class-validator';
@@ -45,4 +46,13 @@ export class CreateAddressDto {
   @IsOptional()
   @IsBoolean()
   isDefault?: boolean;
+
+  // Position GPS optionnelle (bouton "Partager ma localisation")
+  @IsOptional()
+  @IsNumber()
+  latitude?: number;
+
+  @IsOptional()
+  @IsNumber()
+  longitude?: number;
 }

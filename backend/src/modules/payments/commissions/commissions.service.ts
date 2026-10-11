@@ -4,6 +4,7 @@ import { Repository, FindOptionsWhere, FindManyOptions } from 'typeorm';
 import { Commission, CommissionStatus } from '../entities/commission.entity';
 import { ActivityLogService } from 'src/common/services/activity-log.service';
 import { ActorType, LogAction, LogResult } from 'src/common/entities/activity-log.entity';
+import { stripSecrets } from '../../../common/utils/strip-secrets.util';
 
 export interface CommissionFilters {
   vendorId?: string;
@@ -38,7 +39,7 @@ export class CommissionsService {
     const [commissions, total] = await this.commissionRepo.findAndCount(options);
 
     return {
-      data: commissions,
+      data: stripSecrets(commissions),
       pagination: {
         total,
         page,
@@ -48,7 +49,7 @@ export class CommissionsService {
     };
   }
 
-  async getById(id: string) {
+  private async findOrFail(id: string) {
     const commission = await this.commissionRepo.findOne({
       where: { id },
       relations: ['order', 'vendor', 'vendor.user', 'processedBy'],
@@ -61,12 +62,19 @@ export class CommissionsService {
     return commission;
   }
 
+  // Version destinée à l'API (route admin) : sans champs secrets des comptes
+  // chargés en relation (user, processedBy...). Les méthodes internes qui
+  // modifient puis ENREGISTRENT l'entité utilisent findOrFail (entité brute).
+  async getById(id: string) {
+    return stripSecrets(await this.findOrFail(id));
+  }
+
   async markAsPaid(
     commissionId: string,
     processedById: string,
     ipAddress?: string,
   ) {
-    const commission = await this.getById(commissionId);
+    const commission = await this.findOrFail(commissionId);
 
     if (commission.status === CommissionStatus.PAID) {
       throw new BadRequestException('Commission already marked as paid');
@@ -89,7 +97,7 @@ export class CommissionsService {
       ipAddress,
     });
 
-    return updated;
+    return stripSecrets(updated);
   }
 
   async getStatistics() {

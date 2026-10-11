@@ -23,13 +23,17 @@ import type { Request } from 'express';
 import { DeliveryService }               from './delivery.service';
 import { AssignDeliveryAgentDto }        from './dto/assign-agent.dto';
 import { UpdateDeliveryStatusDto }       from './dto/update-delivery-status.dto';
+import { UpdateIndependentDeliveryStatusDto } from './dto/update-independent-delivery-status.dto';
 import { CreateIndependentDeliveryDto }  from './dto/create-independent-delivery.dto';
+import { SubmitPickupProofDto }          from './dto/submit-pickup-proof.dto';
+import { SubmitHandoffProofDto }         from './dto/submit-handoff-proof.dto';
 import { DeliveryStatus }                from './entities/delivery.entity';
 import { IndependentDeliveryStatus }     from './entities/independent-delivery.entity';
 import { JwtAuthGuard }                  from '../auth/guards/jwt-auth.guard';
 import { RolesGuard }                    from '../auth/guards/roles.guard';
 import { Roles }                         from '../auth/decorators/roles.decorator';
 import { Role }                          from '../../common/enums/role.enum';
+import { clampLimit, clampPage } from '../../common/utils/pagination.util';
 
 const getIp   = (req: Request) =>
   (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim()
@@ -46,6 +50,18 @@ export class DeliveryController {
 
   // ─── Type A — Routes Vendeur ──────────────────────────
 
+  @ApiOperation({ summary: 'Récupérer la fiche de livraison d\'une commande' })
+  @Get('order/:orderId')
+  getDeliveryForOrder(
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+    @Req() req: Request,
+  ) {
+    return this.deliveryService.getDeliveryForOrder(
+      orderId,
+      getUser(req).id,
+    );
+  }
+
   @ApiOperation({ summary: 'Affecter un livreur à une livraison' })
   @Patch(':id/assign')
   @HttpCode(HttpStatus.OK)
@@ -58,6 +74,20 @@ export class DeliveryController {
       id,
       getUser(req).id,
       dto,
+      getIp(req),
+    );
+  }
+
+  @ApiOperation({ summary: 'Cas A — démarrer la livraison (actif seulement après la preuve de ramassage du livreur)' })
+  @Post(':id/start-transit')
+  @HttpCode(HttpStatus.OK)
+  startTransit(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Req() req: Request,
+  ) {
+    return this.deliveryService.startTransit(
+      id,
+      getUser(req).id,
       getIp(req),
     );
   }
@@ -78,12 +108,12 @@ export class DeliveryController {
     return this.deliveryService.getMyDeliveries(
       getUser(req).id,
       status,
-      Number(page)  || 1,
-      Number(limit) || 20,
+      clampPage(page),
+      clampLimit(limit, 20),
     );
   }
 
-  @ApiOperation({ summary: 'Mettre à jour le statut d\'une livraison' })
+  @ApiOperation({ summary: 'Signaler un échec de livraison' })
   @Patch(':id/status')
   @HttpCode(HttpStatus.OK)
   updateStatus(
@@ -92,6 +122,38 @@ export class DeliveryController {
     @Body() dto: UpdateDeliveryStatusDto,
   ) {
     return this.deliveryService.updateDeliveryStatus(
+      id,
+      getUser(req).id,
+      dto,
+      getIp(req),
+    );
+  }
+
+  @ApiOperation({ summary: 'Cas A — preuve de ramassage chez le vendeur (photo + état)' })
+  @Post(':id/pickup-proof')
+  @HttpCode(HttpStatus.OK)
+  submitPickupProof(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Req() req: Request,
+    @Body() dto: SubmitPickupProofDto,
+  ) {
+    return this.deliveryService.submitPickupProof(
+      id,
+      getUser(req).id,
+      dto,
+      getIp(req),
+    );
+  }
+
+  @ApiOperation({ summary: 'Cas A — preuve de remise finale au client (scan QR + GPS + signature)' })
+  @Post(':id/handoff-proof')
+  @HttpCode(HttpStatus.OK)
+  submitHandoffProof(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Req() req: Request,
+    @Body() dto: SubmitHandoffProofDto,
+  ) {
+    return this.deliveryService.submitHandoffProof(
       id,
       getUser(req).id,
       dto,
@@ -117,8 +179,16 @@ export class DeliveryController {
 
   @ApiOperation({ summary: 'Demandes de livraison disponibles (livreur)' })
   @Get('independent/available')
-  getPendingIndependent() {
-    return this.deliveryService.getPendingIndependentDeliveries();
+  getPendingIndependent(@Req() req: Request) {
+    return this.deliveryService.getPendingIndependentDeliveries(
+      getUser(req).id,
+    );
+  }
+
+  @ApiOperation({ summary: 'Mes courses express acceptées (livreur)' })
+  @Get('independent/mine')
+  getMyIndependentDeliveries(@Req() req: Request) {
+    return this.deliveryService.getMyIndependentDeliveries(getUser(req).id);
   }
 
   @ApiOperation({ summary: 'Accepter une livraison indépendante' })
@@ -141,7 +211,7 @@ export class DeliveryController {
   updateIndependentStatus(
     @Param('id', ParseUUIDPipe) id: string,
     @Req() req: Request,
-    @Body() body: { status: IndependentDeliveryStatus },
+    @Body() body: UpdateIndependentDeliveryStatusDto,
   ) {
     return this.deliveryService.updateIndependentStatus(
       id,
@@ -167,8 +237,8 @@ export class DeliveryController {
   ) {
     return this.deliveryService.getAllDeliveries(
       status,
-      Number(page)  || 1,
-      Number(limit) || 20,
+      clampPage(page),
+      clampLimit(limit, 20),
     );
   }
 }

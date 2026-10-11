@@ -3,9 +3,10 @@ import {
   IsNotEmpty,
   IsOptional,
   MaxLength,
-  IsUrl,
   IsBoolean,
+  IsUrl,
 } from 'class-validator';
+import { IsAppUrl } from '../../../common/validators/is-app-url.decorator';
 import { Transform } from 'class-transformer';
 
 export class CreatePartnerDto {
@@ -17,10 +18,14 @@ export class CreatePartnerDto {
   part_name: string;
 
   @IsOptional()
-  @IsUrl({}, { message: 'URL logo invalide' })
+  @IsAppUrl({ message: 'URL logo invalide' })
   @MaxLength(500)
   part_logoUrl?: string;
 
+  // part_websiteUrl est un site externe saisi par un admin (jamais une URL
+  // renvoyee par le service d'upload de l'appli) : @IsAppUrl (qui accepte
+  // exprès les URL sans TLD type localhost) n'a pas lieu d'etre ici, on
+  // garde la validation stricte habituelle.
   @IsOptional()
   @IsUrl({}, { message: 'URL site web invalide' })
   @MaxLength(500)

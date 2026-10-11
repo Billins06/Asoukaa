@@ -16,6 +16,7 @@ import { AdminAccount }        from '../auth/entities/admin-account.entity';
 import { CreateCouponDto }   from './dto/create-coupon.dto';
 import { ApplyCouponDto }    from './dto/apply-coupon.dto';
 import { ActivityLogService } from '../../common/services/activity-log.service';
+import { stripSecrets } from '../../common/utils/strip-secrets.util';
 import {
   ActorType,
   LogAction,
@@ -299,7 +300,9 @@ export class CouponsService {
     const [coupons, total] = await query.getManyAndCount();
 
     return {
-      data:  coupons,
+      // createdByAdmin / createdByVendor sont chargés en entier : on retire
+      // les champs secrets (hash, jeton d'invitation...) avant de répondre.
+      data:  stripSecrets(coupons),
       total,
       page,
       limit,
@@ -323,7 +326,7 @@ export class CouponsService {
       where: { couponId },
     });
 
-    return { ...coupon, usageCount };
+    return { ...stripSecrets(coupon), usageCount };
   }
 
   // ─────────────────────────────────────────────────────

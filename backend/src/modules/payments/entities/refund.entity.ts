@@ -7,6 +7,7 @@ import {
   JoinColumn,
   CreateDateColumn,
   UpdateDateColumn,
+  Index,
 } from 'typeorm';
 import { Payment } from './payment.entity';
 import { Order } from '../../orders/entities/order.entity';
@@ -19,6 +20,8 @@ export enum RefundStatus {
   PROCESSED = 'traité', // remboursement effectué
 }
 
+@Index(['orderId'])
+@Index(['status'])
 @Entity('refunds')
 export class Refund {
 

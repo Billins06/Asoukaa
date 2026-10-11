@@ -18,6 +18,7 @@ import { JwtAuthGuard }        from '../auth/guards/jwt-auth.guard';
 import { RolesGuard }          from '../auth/guards/roles.guard';
 import { Roles }               from '../auth/decorators/roles.decorator';
 import { Role }                from '../../common/enums/role.enum';
+import { clampLimit, clampPage } from '../../common/utils/pagination.util';
 
 const getUser = (req: Request): any => (req as any).user;
 
@@ -56,7 +57,7 @@ export class DashboardController {
   ) {
     return this.dashboardService.getAdminTopProducts(
       query,
-      Number(limit) || 10,
+      clampLimit(limit, 10),
     );
   }
 
@@ -70,7 +71,7 @@ export class DashboardController {
   ) {
     return this.dashboardService.getAdminTopVendors(
       query,
-      Number(limit) || 10,
+      clampLimit(limit, 10),
     );
   }
 
@@ -107,7 +108,7 @@ export class DashboardController {
     return this.dashboardService.getVendorTopProducts(
       getUser(req).id,
       query,
-      Number(limit) || 10,
+      clampLimit(limit, 10),
     );
   }
 }

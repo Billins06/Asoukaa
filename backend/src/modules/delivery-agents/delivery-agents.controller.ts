@@ -22,6 +22,7 @@ import type { Request } from 'express';
 
 import { DeliveryAgentsService }      from './delivery-agents.service';
 import { SubmitAgentProfileDto }      from './dto/submit-agent-profile.dto';
+import { CompleteAgentDocumentsDto }  from './dto/complete-agent-documents.dto';
 import { UpdateAgentAvailabilityDto } from './dto/update-availability.dto';
 import { ReviewAgentDto }             from './dto/review-agent.dto';
 import { AgentStatus }                from '../users/entities/delivery-agent-profile.entity';
@@ -29,6 +30,7 @@ import { JwtAuthGuard }               from '../auth/guards/jwt-auth.guard';
 import { RolesGuard }                 from '../auth/guards/roles.guard';
 import { Roles }                      from '../auth/decorators/roles.decorator';
 import { Role }                       from '../../common/enums/role.enum';
+import { clampLimit, clampPage } from '../../common/utils/pagination.util';
 
 const getIp   = (req: Request) =>
   (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim()
@@ -65,6 +67,26 @@ export class DeliveryAgentsController {
   @Get('me')
   getMyProfile(@Req() req: Request) {
     return this.deliveryAgentsService.getMyProfile(getUser(req).id);
+  }
+
+  @ApiOperation({ summary: 'Compléter les documents manquants (dossier en attente)' })
+  @Patch('me/documents')
+  @HttpCode(HttpStatus.OK)
+  completeDocuments(
+    @Req() req: Request,
+    @Body() dto: CompleteAgentDocumentsDto,
+  ) {
+    return this.deliveryAgentsService.completeDocuments(
+      getUser(req).id,
+      dto,
+      getIp(req),
+    );
+  }
+
+  @ApiOperation({ summary: 'Voir mes gains (solde, historique des livraisons payées)' })
+  @Get('me/earnings')
+  getMyEarnings(@Req() req: Request) {
+    return this.deliveryAgentsService.getMyEarnings(getUser(req).id);
   }
 
   @ApiOperation({ summary: 'Mettre à jour ma disponibilité' })
@@ -110,8 +132,8 @@ export class DeliveryAgentsController {
   ) {
     return this.deliveryAgentsService.getAllAgents(
       status,
-      Number(page),
-      Number(limit),
+      clampPage(page),
+      clampLimit(limit),
     );
   }
 
@@ -151,6 +173,22 @@ export class DeliveryAgentsController {
     @Req() req: Request,
   ) {
     return this.deliveryAgentsService.blockAgent(
+      id,
+      getUser(req).id,
+      getIp(req),
+    );
+  }
+
+  @ApiOperation({ summary: '[ADMIN] Débloquer un livreur' })
+  @UseGuards(RolesGuard)
+  @Roles(Role.ADMIN)
+  @Patch(':id/unblock')
+  @HttpCode(HttpStatus.OK)
+  unblockAgent(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Req() req: Request,
+  ) {
+    return this.deliveryAgentsService.unblockAgent(
       id,
       getUser(req).id,
       getIp(req),

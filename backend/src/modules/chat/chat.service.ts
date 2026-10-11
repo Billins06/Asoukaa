@@ -1,3 +1,5 @@
+import { toPublicVendor } from '../products/public-vendor.util';
+import { toPresence }      from '../presence/presence.util';
 import {
   Injectable,
   NotFoundException,
@@ -10,7 +12,7 @@ import { Repository, Not }  from 'typeorm';
 import { Conversation } from './entities/conversation.entity';
 import { Message }      from './entities/message.entity';
 import { User }         from '../users/entities/user.entity';
-import { VendorProfile } from '../users/entities/vendor-profile.entity';
+import { VendorProfile, VendorStatus } from '../users/entities/vendor-profile.entity';
 import { Product }      from '../products/entities/product.entity';
 
 import { CreateConversationDto } from './dto/create-conversation.dto';
@@ -73,6 +75,22 @@ export class ChatService {
   }
 
   // ─────────────────────────────────────────────────────
+  // PRÉSENCE DE L'AUTRE PARTICIPANT (« En ligne / Vu à … »)
+  // ─────────────────────────────────────────────────────
+  // { id, lastSeenAt, isOnline } : UNIQUEMENT l'identifiant et les deux
+  // champs de présence, aucune autre donnée du compte. isOnline est calculé
+  // ici (dernière activité de moins de 2 minutes), voir presence.util.ts.
+  private async loadOtherUser(otherUserId: string) {
+    const other = await this.conversationRepo.manager.findOne(User, {
+      where:  { id: otherUserId },
+      select: { id: true, lastSeenAt: true },
+    });
+    return other
+      ? { id: other.id, ...toPresence(other.lastSeenAt) }
+      : null;
+  }
+
+  // ─────────────────────────────────────────────────────
   // CRÉER UNE CONVERSATION
   // ─────────────────────────────────────────────────────
   async createConversation(
@@ -120,7 +138,24 @@ export class ChatService {
         existing.productId = dto.productId;
         await this.conversationRepo.save(existing);
       }
-      return existing; // Retourner la conversation existante
+      // Conversation existante + présence du vendeur (otherUser).
+      return { ...existing, otherUser: await this.loadOtherUser(vendor.userId) };
+    }
+
+    // Une NOUVELLE conversation ne peut être ouverte qu'avec une boutique
+    // approuvée (pas en attente, refusée ou bloquée). Une conversation déjà
+    // existante reste consultable (renvoyée ci-dessus).
+    if (vendor.status !== VendorStatus.APPROVED) {
+      throw new ForbiddenException(
+        'Cette boutique n\'est pas disponible pour le moment.'
+      );
+    }
+
+    // Boutique masquée par son vendeur : pas de NOUVELLE conversation
+    // (le propriétaire est déjà exclu plus haut ; une conversation existante
+    // reste consultable, voir le retour anticipé ci-dessus).
+    if (vendor.shopVisible === false) {
+      throw new ForbiddenException('Cette boutique est momentanément indisponible');
     }
 
     // Créer la conversation
@@ -130,7 +165,8 @@ export class ChatService {
     conversation.productId         = dto.productId ?? null;
     conversation.isArchived        = false;
 
-    return this.conversationRepo.save(conversation);
+    const created = await this.conversationRepo.save(conversation);
+    return { ...created, otherUser: await this.loadOtherUser(vendor.userId) };
   }
 
   // ─────────────────────────────────────────────────────
@@ -260,13 +296,29 @@ export class ChatService {
 
     // Masquer les données sensibles
     const safe = conversations.map(c => {
+      // Présence de l'AUTRE participant : le vendeur si je suis le client,
+      // sinon le client. { id, lastSeenAt, isOnline } uniquement — calculé
+      // avant que client / vendor soient réduits à leur liste blanche.
+      const otherSrc: any = c.clientId === userId ? c.vendor?.user : c.client;
+      (c as any).otherUser = otherSrc
+        ? { id: otherSrc.id, ...toPresence(otherSrc.lastSeenAt) }
+        : null;
+
+      // Liste blanche : l'autre participant n'a besoin que de l'identité
+      // affichable (jamais e-mail, téléphone, hash, champs de sécurité...).
       if (c.client) {
-        const { passwordHash, ...userSafe } = c.client as any;
-        (c as any).client = userSafe;
+        const cl = c.client as any;
+        (c as any).client = {
+          id:        cl.id,
+          prenom:    cl.prenom,
+          name:      cl.name,
+          avatarUrl: cl.avatarUrl,
+        };
       }
-      if (c.vendor?.user) {
-        const { passwordHash, ...userSafe } = c.vendor.user as any;
-        (c.vendor as any).user = userSafe;
+      // Fiche publique de la boutique uniquement (ni documents, ni
+      // paiement, ni e-mail/téléphone du compte vendeur).
+      if (c.vendor) {
+        (c as any).vendor = toPublicVendor(c.vendor);
       }
       return c;
     });
@@ -277,8 +329,14 @@ export class ChatService {
     // (aperçu + badge non-lus) dans l'écran "Messages".
     const withPreview = await Promise.all(
       safe.map(async (c) => {
+        // Un message bloqué par le filtre anti-contournement n'est visible
+        // que par son expéditeur : jamais en aperçu ni en non-lu chez
+        // le destinataire.
         const lastMessage = await this.messageRepo.findOne({
-          where:  { conversationId: c.id },
+          where:  [
+            { conversationId: c.id, isBlocked: false },
+            { conversationId: c.id, senderId: userId },
+          ],
           order:  { createdAt: 'DESC' },
         });
 
@@ -286,6 +344,7 @@ export class ChatService {
           where: {
             conversationId: c.id,
             isRead:         false,
+            isBlocked:      false,
             senderId:       Not(userId),
           },
         });
@@ -315,6 +374,39 @@ export class ChatService {
   }
 
   // ─────────────────────────────────────────────────────
+  // COMPTEUR DE DISCUSSIONS NON LUES (badge de l'onglet "Messages")
+  // Une seule requête agrégée : pas de boucle par conversation.
+  // Même définition de "non lu" que getMyConversations : messages
+  // isRead = false envoyés par l'AUTRE participant, dans les
+  // conversations où l'utilisateur est client OU vendeur.
+  // ─────────────────────────────────────────────────────
+  async getUnreadCount(userId: string): Promise<{ conversations: number; messages: number }> {
+    const qb = this.messageRepo.createQueryBuilder('m');
+    const vendorIds = qb
+      .subQuery()
+      .select('v.id')
+      .from(VendorProfile, 'v')
+      .where('v.userId = :userId')
+      .getQuery();
+
+    const row = await qb
+      .select('COUNT(DISTINCT "m"."conversationId")', 'conversations')
+      .addSelect('COUNT("m"."id")', 'messages')
+      .innerJoin('m.conversation', 'c')
+      .where('m.isRead = false')
+      .andWhere('m.senderId != :userId')
+      .andWhere('m.isBlocked = false')
+      .andWhere(`(c.clientId = :userId OR c.vendorId IN ${vendorIds})`)
+      .setParameter('userId', userId)
+      .getRawOne();
+
+    return {
+      conversations: parseInt(row?.conversations ?? '0', 10) || 0,
+      messages:      parseInt(row?.messages ?? '0', 10) || 0,
+    };
+  }
+
+  // ─────────────────────────────────────────────────────
   // MESSAGES D'UNE CONVERSATION
   // ─────────────────────────────────────────────────────
   async getMessages(
@@ -338,8 +430,14 @@ export class ChatService {
       throw new ForbiddenException('Accès refusé');
     }
 
+    // Les messages bloqués par le filtre anti-contournement ne sont
+    // visibles que par leur expéditeur (il voit ce qu'il a tenté d'envoyer) :
+    // le destinataire ne les reçoit jamais.
     const [messages, total] = await this.messageRepo.findAndCount({
-      where: { conversationId },
+      where: [
+        { conversationId, isBlocked: false },
+        { conversationId, senderId: userId },
+      ],
       order: { createdAt: 'DESC' },
       skip:  (page - 1) * limit,
       take:  limit,
@@ -367,6 +465,10 @@ export class ChatService {
       limit,
       pages: Math.ceil(total / limit),
       otherIsTyping: this.isOtherParticipantTyping(userId, conversationId),
+      // Présence de l'autre participant : { id, lastSeenAt, isOnline }.
+      otherUser: await this.loadOtherUser(
+        isClient ? conversation.vendor.userId : conversation.clientId,
+      ),
     };
   }
 
@@ -429,14 +531,16 @@ export class ChatService {
 
     const [conversations, total] = await query.getManyAndCount();
 
+    // Liste blanche pour la modération : identité + e-mail seulement
+    // (jamais passwordHash, tokensValidAfter, securityAlert*...).
+    const pickUser = (u: any) =>
+      u ? { id: u.id, prenom: u.prenom, name: u.name, email: u.email } : u;
     const safe = conversations.map(c => {
       if (c.client) {
-        const { passwordHash, ...userSafe } = c.client as any;
-        (c as any).client = userSafe;
+        (c as any).client = pickUser(c.client);
       }
       if (c.vendor?.user) {
-        const { passwordHash, ...userSafe } = c.vendor.user as any;
-        (c.vendor as any).user = userSafe;
+        (c.vendor as any).user = pickUser(c.vendor.user);
       }
       return c;
     });
@@ -468,8 +572,10 @@ export class ChatService {
 
     return messages.map(m => {
       if (m.sender) {
-        const { passwordHash, ...userSafe } = m.sender as any;
-        (m as any).sender = userSafe;
+        const se = m.sender as any;
+        (m as any).sender = {
+          id: se.id, prenom: se.prenom, name: se.name, email: se.email,
+        };
       }
       return m;
     });

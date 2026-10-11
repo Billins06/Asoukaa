@@ -27,6 +27,7 @@ import { JwtAuthGuard }           from '../auth/guards/jwt-auth.guard';
 import { RolesGuard }             from '../auth/guards/roles.guard';
 import { Roles }                  from '../auth/decorators/roles.decorator';
 import { Role }                   from '../../common/enums/role.enum';
+import { clampLimit, clampPage } from '../../common/utils/pagination.util';
 
 const getUser = (req: Request): any => (req as any).user;
 
@@ -49,6 +50,14 @@ export class ChatController {
     return this.chatService.createConversation(getUser(req).id, dto);
   }
 
+  // Déclaré AVANT toute route paramétrée (conversations/:id/...) pour
+  // éviter toute collision de chemin.
+  @ApiOperation({ summary: 'Nombre de discussions et de messages non lus' })
+  @Get('unread-count')
+  getUnreadCount(@Req() req: Request) {
+    return this.chatService.getUnreadCount(getUser(req).id);
+  }
+
   @ApiOperation({ summary: 'Mes conversations' })
   @ApiQuery({ name: 'page',  required: false })
   @ApiQuery({ name: 'limit', required: false })
@@ -60,8 +69,8 @@ export class ChatController {
   ) {
     return this.chatService.getMyConversations(
       getUser(req).id,
-      Number(page)  || 1,
-      Number(limit) || 20,
+      clampPage(page),
+      clampLimit(limit, 20),
     );
   }
 
@@ -78,8 +87,8 @@ export class ChatController {
     return this.chatService.getMessages(
       getUser(req).id,
       id,
-      Number(page)  || 1,
-      Number(limit) || 50,
+      clampPage(page),
+      clampLimit(limit, 50),
     );
   }
 
@@ -127,8 +136,8 @@ export class ChatController {
     @Query('limit') limit?: number,
   ) {
     return this.chatService.getReportedConversations(
-      Number(page)  || 1,
-      Number(limit) || 20,
+      clampPage(page),
+      clampLimit(limit, 20),
     );
   }
 
