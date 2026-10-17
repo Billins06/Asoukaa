@@ -25,8 +25,17 @@ import { DeliveryZone }            from '../delivery-zones/entities/delivery-zon
 import { Payment, PaymentStatus, PaymentMethod }  from '../payments/entities/payment.entity';
 import { User }                    from '../users/entities/user.entity';
 import { DeliveryProof, ProofRole, ProofStage } from '../delivery/entities/delivery-proof.entity';
+import { Delivery, DeliveryStatus } from '../delivery/entities/delivery.entity';
+import { DeliveryAgentProfile }    from '../users/entities/delivery-agent-profile.entity';
 import { UploadService, UploadType } from '../upload/upload.service';
 import { resolveTierUnitPrice }    from '../../common/utils/tier-pricing.util';
+import {
+  generateHandoverCode,
+  assertHandoverCode,
+  HANDOVER_PROOF_MARKER,
+} from '../../common/utils/handover-code.util';
+import { normalizeCommune }        from '../../common/utils/commune.util';
+import { releaseCouponForOrder }   from './coupon-release.util';
 
 import { CreateOrderDto }         from './dto/create-order.dto';
 import { UpdateOrderStatusDto }   from './dto/update-order-status.dto';
@@ -35,6 +44,7 @@ import { SubmitStorePickupProofDto } from './dto/submit-store-pickup-proof.dto';
 import { SubmitDispatchProofDto }    from './dto/submit-dispatch-proof.dto';
 import { SubmitReceptionProofDto }   from './dto/submit-reception-proof.dto';
 import { OpenDisputeDto }            from './dto/open-dispute.dto';
+import { AdminCloseDisputeDto, DisputeDecision } from './dto/admin-close-dispute.dto';
 import { ActivityLogService }     from '../../common/services/activity-log.service';
 import { MailService }            from '../mail/mail.service';
 import { DeliveryService }        from '../delivery/delivery.service';
@@ -45,6 +55,20 @@ import {
   ActorType,
   LogAction,
 } from '../../common/entities/activity-log.entity';
+
+// Résultat d'une annulation admin faite dans la transaction (utilisé pour
+// journaliser / notifier APRÈS le commit).
+interface AdminCancelResult {
+  order:          Order;
+  oldStatus:      OrderStatus;
+  payment:        Payment | null;
+  // true = un paiement réussi existe : il faudra rembourser le client à la
+  // main (aucun appel FeexPay n'est fait ici).
+  paid:           boolean;
+  stockRestored:  boolean;
+  agentReleased:  boolean;
+  couponReleased: boolean;
+}
 
 @Injectable()
 export class OrdersService implements OnModuleInit {
@@ -147,10 +171,14 @@ export class OrdersService implements OnModuleInit {
     // delivery_zones, paramétrée par l'admin). Même frais appliqué à chaque
     // commande (une par boutique) puisque chacune est livrée séparément à
     // cette même adresse. Nul en mode retrait.
-    const fraisLivraisonCommune =
+    // La commune est comparée sans accents ni casse ; une commune inconnue ou
+    // non desservie est refusée (400), et le mode de transport bus/taxi est
+    // contrôlé contre la commune (obligatoire dans le Nord, interdit ailleurs).
+    const livraison =
       deliveryMode === OrderDeliveryMode.RETRAIT
-        ? 0
-        : await this.getFraisLivraisonForCommune(address.ville, dto.transportMode);
+        ? { frais: 0, transportMode: null as string | null, commune: null as string | null }
+        : await this.resolveLivraison(address.ville, dto.transportMode);
+    const fraisLivraisonCommune = livraison.frais;
 
     // 3. Vérifier le stock de chaque article
     // et regrouper les articles par boutique
@@ -182,6 +210,11 @@ export class OrdersService implements OnModuleInit {
           + `Veuillez retirer ses articles de votre panier.`
         );
       }
+
+      // Produit désactivé / brouillon, ou variante désactivée depuis son
+      // ajout au panier : le panier ne vérifie qu'à l'ajout, donc on revérifie
+      // ici, au moment de créer la commande.
+      this.assertVariantOrderable(variant);
 
       // Vérifier stock disponible
       if (variant.stockQuantity < item.quantity) {
@@ -225,7 +258,21 @@ export class OrdersService implements OnModuleInit {
     let coupon: Coupon | null = null;
     if (dto.couponCode) {
       coupon = await this.validateCoupon(dto.couponCode, userId);
+
+      // Coupon d'une boutique : il ne vaut que pour les articles de CETTE
+      // boutique. Sans article d'elle dans le panier, il n'est pas applicable
+      // (avant, la remise était prise sur la première boutique du panier,
+      // même si elle n'avait rien offert).
+      const scopeVendorId = coupon.vendorId ?? coupon.createdByVendorId ?? null;
+      if (scopeVendorId && !vendorGroups.has(scopeVendorId)) {
+        throw new BadRequestException(
+          'Ce code promo ne s\'applique pas aux articles de votre panier.'
+        );
+      }
     }
+    const couponScopeVendorId = coupon
+      ? (coupon.vendorId ?? coupon.createdByVendorId ?? null)
+      : null;
 
     // 5. Créer une commande par boutique dans une transaction
     // ⚠️ Transaction = si une commande échoue, tout est annulé
@@ -236,6 +283,8 @@ export class OrdersService implements OnModuleInit {
     const createdOrders = await this.dataSource.transaction(
       async (manager) => {
         const orders: Order[] = [];
+        // Commande qui porte la remise du coupon (et donc son « usage »).
+        let discountedOrderId: string | null = null;
 
         for (const [vendorId, items] of vendorGroups) {
           // Calculer le sous-total de cette boutique
@@ -245,10 +294,21 @@ export class OrdersService implements OnModuleInit {
             0
           );
 
-          // Calculer la remise coupon (uniquement sur la première boutique)
+          // Calculer la remise coupon :
+          //  - coupon d'une boutique → uniquement sur la commande de CETTE
+          //    boutique (sous-total de ses seules lignes) ;
+          //  - coupon global (plateforme) → comportement inchangé : sur la
+          //    première boutique.
           let discount = 0;
-          if (coupon && orders.length === 0) {
-            discount = this.calculateDiscount(coupon, subtotal);
+          let couponApplied = false;
+          if (coupon) {
+            const eligible = couponScopeVendorId
+              ? vendorId === couponScopeVendorId
+              : orders.length === 0;
+            if (eligible) {
+              discount = this.calculateDiscount(coupon, subtotal);
+              couponApplied = true;
+            }
           }
 
           const total = subtotal - discount;
@@ -262,7 +322,7 @@ export class OrdersService implements OnModuleInit {
           order.userId              = userId;
           order.vendorId            = vendorId;
           order.addressId           = dto.addressId;
-          order.couponId            = coupon?.id ?? null;
+          order.couponId            = couponApplied ? coupon!.id : null;
           order.status              = OrderStatus.PENDING;
           order.instructions        = dto.instructions ?? null;
           order.subtotal            = Number(subtotal.toFixed(2));
@@ -271,9 +331,12 @@ export class OrdersService implements OnModuleInit {
           order.montantCommission   = 0; // calculé au paiement
           order.total               = Number((total + fraisLivraisonCommune).toFixed(2));
           order.deliveryMode        = deliveryMode;
-          order.transportMode       = dto.transportMode ?? null;
+          order.transportMode       = livraison.transportMode;
+          // Code de remise secret de la commande (voir handover-code.util.ts).
+          order.handoverCode        = generateHandoverCode();
 
           await manager.save(order);
+          if (couponApplied) discountedOrderId = order.id;
 
           pickupAddressByOrderId.set(
             order.id,
@@ -322,7 +385,7 @@ export class OrdersService implements OnModuleInit {
           const usage         = manager.create(CouponUsage);
           usage.couponId      = coupon.id;
           usage.userId        = userId;
-          usage.orderId       = orders[0].id; // première commande
+          usage.orderId       = discountedOrderId ?? orders[0].id; // commande remisée
           await manager.save(usage);
         }
 
@@ -421,9 +484,16 @@ export class OrdersService implements OnModuleInit {
     // Échappe les jokers LIKE (% et _) : on cherche le texte tel quel.
     const likeQ = q.replace(/[\\%_]/g, '\\$&');
 
-    const clients = await this.userRepo
+    // Clients LIÉS à la boutique = ayant déjà au moins une commande chez CE
+    // vendeur. Sur eux, la recherche large (3 caractères) reste possible et
+    // les coordonnées sont complètes.
+    const linkedSql =
+      'user.id IN (SELECT o."userId" FROM orders o WHERE o."vendorId" = :vendorId)';
+
+    const linkedClients = await this.userRepo
       .createQueryBuilder('user')
       .where('user.isActive = true')
+      .andWhere(linkedSql, { vendorId: vendor.id })
       .andWhere(
         '(user.phone ILIKE :q OR user.email ILIKE :q '
         + 'OR user.prenom ILIKE :q OR user.name ILIKE :q)',
@@ -433,20 +503,64 @@ export class OrdersService implements OnModuleInit {
       .take(10)
       .getMany();
 
-    if (!clients.length) {
-      throw new NotFoundException(
-        'Aucun client trouvé. Le client doit d\'abord '
-        + 'créer un compte sur l\'application.'
-      );
-    }
-
-    return clients.map((c) => ({
+    const results: Array<Record<string, any>> = linkedClients.map((c) => ({
       id:     c.id,
       prenom: c.prenom,
       name:   c.name,
       phone:  c.phone,
       email:  c.email,
+      linked: true,
     }));
+
+    // Clients SANS lien avec la boutique : uniquement sur correspondance EXACTE
+    // d'un téléphone complet ou d'un e-mail complet (le vendeur connaît déjà
+    // cette information — vente par téléphone). Aucune recherche partielle :
+    // impossible de parcourir la base clients. Le résultat est masqué
+    // (téléphone, e-mail, nom de famille réduit à l'initiale).
+    const looksLikeEmail = q.includes('@');
+    const digits         = q.replace(/\D/g, '');
+    if (looksLikeEmail || digits.length >= 8) {
+      const qb = this.userRepo
+        .createQueryBuilder('user')
+        .where('user.isActive = true')
+        .andWhere(`NOT (${linkedSql})`, { vendorId: vendor.id });
+
+      if (looksLikeEmail) {
+        qb.andWhere('LOWER(user.email) = :email', { email: q.toLowerCase() });
+      } else {
+        const candidates = new Set<string>([digits]);
+        const noZeros = digits.replace(/^00/, '');
+        candidates.add(noZeros);
+        if (noZeros.startsWith('229')) candidates.add(noZeros.slice(3));
+        else candidates.add(`229${noZeros}`);
+        qb.andWhere(
+          `regexp_replace(user.phone, '\\D', '', 'g') IN (:...candidates)`,
+          { candidates: [...candidates].filter((c) => c.length >= 8) },
+        );
+      }
+
+      const unlinked = await qb.take(1).getMany();
+      for (const c of unlinked) {
+        results.push({
+          id:     c.id,
+          prenom: c.prenom,
+          name:   OrdersService.initialOnly(c.name),
+          phone:  OrdersService.maskPhone(c.phone),
+          email:  OrdersService.maskEmail(c.email),
+          linked: false,
+        });
+      }
+    }
+
+    if (!results.length) {
+      throw new NotFoundException(
+        'Aucun client trouvé parmi vos clients. Pour un nouveau client, '
+        + 'saisissez son numéro de téléphone complet (ou son e-mail complet) : '
+        + 'il doit déjà avoir un compte sur l\'application.'
+      );
+    }
+
+    return results;
   }
 
   // ─────────────────────────────────────────────────────
@@ -471,6 +585,26 @@ export class OrdersService implements OnModuleInit {
       throw new NotFoundException('Client introuvable');
     }
 
+    // Seuls les clients ayant déjà commandé chez CE vendeur exposent leurs
+    // adresses et leur téléphone complet. Pour les autres : identité réduite,
+    // téléphone masqué, AUCUNE adresse (le vendeur saisit alors une nouvelle
+    // adresse de livraison, et désigne le client par son id à la création de
+    // la commande).
+    const linkedCount = await this.orderRepo.count({
+      where: { vendorId: vendor.id, userId: client.id },
+      take:  1,
+    });
+    if (linkedCount === 0) {
+      return {
+        id:        client.id,
+        prenom:    client.prenom,
+        name:      OrdersService.initialOnly(client.name),
+        phone:     OrdersService.maskPhone(client.phone),
+        linked:    false,
+        addresses: [],
+      };
+    }
+
     const addresses = await this.addressRepo.find({
       where: { userId: client.id },
     });
@@ -480,6 +614,7 @@ export class OrdersService implements OnModuleInit {
       prenom:  client.prenom,
       name:    client.name,
       phone:   client.phone,
+      linked:  true,
       addresses,
     };
   }
@@ -513,20 +648,44 @@ export class OrdersService implements OnModuleInit {
         'Votre boutique doit être approuvée pour initier une commande.'
       );
     }
+    // Boutique masquée (« Boutique visible » désactivé) : plus de nouvelle
+    // commande, y compris initiée par le vendeur.
+    if (vendor.shopVisible === false) {
+      throw new BadRequestException(
+        'Votre boutique est momentanément masquée : vous ne pouvez pas '
+        + 'créer de commande tant qu\'elle n\'est pas de nouveau visible.'
+      );
+    }
 
-    const client = await this.userRepo.findOne({
-      where: { phone: dto.clientPhone },
-    });
+    // Le client est désigné soit par son id (renvoyé par find-client — seule
+    // façon de choisir un client SANS lien avec la boutique, dont le
+    // téléphone est masqué), soit par son numéro complet.
+    if (!dto.clientId && !dto.clientPhone) {
+      throw new BadRequestException(
+        'Le client est obligatoire (clientId ou clientPhone).'
+      );
+    }
+    const client = dto.clientId
+      ? await this.userRepo.findOne({ where: { id: dto.clientId } })
+      : await this.userRepo.findOne({ where: { phone: dto.clientPhone } });
     if (!client) {
       throw new NotFoundException(
-        'Aucun client trouvé avec ce numéro. Le client doit d\'abord '
+        'Aucun client trouvé. Le client doit d\'abord '
         + 'créer un compte sur l\'application.'
+      );
+    }
+    if (client.isActive === false) {
+      throw new BadRequestException(
+        'Le compte de ce client est désactivé : impossible de créer une commande pour lui.'
       );
     }
 
     // Résoudre l'adresse : une adresse existante du client, ou une
-    // nouvelle qu'on crée pour lui à la volée.
+    // nouvelle qu'on crée pour lui à la volée (enregistrée seulement avec la
+    // commande, dans la transaction ci-dessous — une commune refusée ne laisse
+    // donc pas d'adresse orpheline).
     let address: Address;
+    let addressIsNew = false;
     if (dto.addressId) {
       const existing = await this.addressRepo.findOne({
         where: { id: dto.addressId, userId: client.id },
@@ -545,7 +704,7 @@ export class OrdersService implements OnModuleInit {
         ville:              dto.newAddressVille.trim(),
         isDefault:          false,
       });
-      address = await this.addressRepo.save(address);
+      addressIsNew = true;
     } else {
       throw new BadRequestException(
         'Adresse de livraison requise (addressId ou newAddressVille/newAddressQuartier)'
@@ -553,10 +712,15 @@ export class OrdersService implements OnModuleInit {
     }
 
     const deliveryMode = dto.deliveryMode ?? OrderDeliveryMode.LIVRAISON;
-    const fraisLivraison =
+    const livraison =
       deliveryMode === OrderDeliveryMode.RETRAIT
-        ? 0
-        : await this.getFraisLivraisonForCommune(address.ville, dto.transportMode);
+        ? { frais: 0, transportMode: null as string | null, commune: null as string | null }
+        : await this.resolveLivraison(address.ville, dto.transportMode);
+    const fraisLivraison = livraison.frais;
+    // Nouvelle adresse : on enregistre le nom officiel de la commune.
+    if (addressIsNew && livraison.commune) {
+      address.ville = livraison.commune;
+    }
 
     // Charger et vérifier chaque variante (doit appartenir à ce vendeur).
     const lines: { variant: ProductVariant; quantity: number; unitPrice: number }[] = [];
@@ -576,6 +740,8 @@ export class OrdersService implements OnModuleInit {
           `Le produit "${variant.product.prod_name}" n'appartient pas à votre boutique`
         );
       }
+      // Produit désactivé / brouillon ou variante désactivée : plus commandable.
+      this.assertVariantOrderable(variant);
       if (variant.stockQuantity < item.quantity) {
         throw new BadRequestException(
           `Stock insuffisant pour "${variant.product.prod_name}" : `
@@ -598,6 +764,10 @@ export class OrdersService implements OnModuleInit {
 
     const { order, pickupAddress } = await this.dataSource.transaction(
       async (manager) => {
+        if (addressIsNew) {
+          address = await manager.save(address);
+        }
+
         const orderNumber = await this.generateOrderNumber(manager);
 
         const order               = manager.create(Order);
@@ -614,7 +784,9 @@ export class OrdersService implements OnModuleInit {
         order.montantCommission   = 0; // calculé à la confirmation du paiement
         order.total               = total;
         order.deliveryMode        = deliveryMode;
-        order.transportMode       = dto.transportMode ?? null;
+        order.transportMode       = livraison.transportMode;
+        // Code de remise secret de la commande (voir handover-code.util.ts).
+        order.handoverCode        = generateHandoverCode();
         await manager.save(order);
 
         for (const { variant, quantity, unitPrice } of lines) {
@@ -762,6 +934,33 @@ export class OrdersService implements OnModuleInit {
     (order as any).delivery =
       await this.deliveryService.getPublicDeliveryForOrder(orderId);
 
+    // Une commande payée reste « en attente » jusqu'à la confirmation du
+    // vendeur : l'appli a besoin de l'état du paiement pour afficher « En
+    // attente de confirmation du vendeur » plutôt que « À payer ». On ne
+    // renvoie que les champs non sensibles (jamais la référence opérateur).
+    const payment = await this.paymentRepo.findOne({ where: { orderId } });
+    (order as any).payment = payment
+      ? {
+          id:     payment.id,
+          status: payment.status,
+          method: payment.method,
+          paidAt: payment.paidAt ?? null,
+        }
+      : null;
+
+    // Code de remise (« QR de preuve ») : renvoyé UNIQUEMENT ici, au client
+    // propriétaire de la commande (le filtre { id, userId } plus haut le
+    // garantit), et seulement quand la preuve peut réellement être validée :
+    //  - livraison à domicile avec livreur (pas bus/taxi, qui se prouve par
+    //    photo de réception) : « livreur affecté », « expedié », « en transit »
+    //    (la remise elle-même se valide en « en transit ») ;
+    //  - retrait en boutique : « en cours » (le vendeur valide le retrait).
+    // Partout ailleurs : null. Jamais présent dans une réponse vendeur /
+    // livreur / admin (colonne select:false), jamais journalisé.
+    (order as any).handoverCode = OrdersService.handoverCodeVisible(order)
+      ? await this.ensureHandoverCode(order.id)
+      : null;
+
     return order;
   }
 
@@ -819,6 +1018,13 @@ export class OrdersService implements OnModuleInit {
         // Date limite théorique de confirmation (référence + délai de rappel) ;
         // null si la commande n'attend pas la confirmation du vendeur.
         confirmBy: this.orderConfirmation.computeConfirmBy(o, payment),
+        // true = commande PAYÉE qui attend le bouton « Confirmer » du vendeur
+        // (reste « en attente » après paiement Mobile Money). Une commande
+        // « en attente » SANS paiement réussi n'est pas à confirmer : le
+        // serveur refuse d'ailleurs sa confirmation (voir updateStatus).
+        awaitingConfirmation:
+          o.status === OrderStatus.PENDING
+          && payment?.status === PaymentStatus.SUCCESS,
       };
     });
 
@@ -841,6 +1047,15 @@ export class OrdersService implements OnModuleInit {
     ip:       string,
     isAdmin:  boolean = false,
   ) {
+    // Annulation par l'ADMIN : chemin dédié, atomique (transaction + verrou
+    // d'écriture sur la commande) et possible depuis « livreur affecté »,
+    // « expedié » et « en transit » en plus de « en attente » / « en cours »
+    // (voir cancelOrderAsAdmin). Jamais atteignable par un vendeur : sa
+    // branche ci-dessous refuse toute annulation.
+    if (isAdmin && dto.status === OrderStatus.CANCELLED) {
+      return this.cancelOrderAsAdmin(orderId, userId, dto.motifAnnulation, ip);
+    }
+
     const order = await this.orderRepo.findOne({
       where:     { id: orderId },
       relations: ['vendor', 'items', 'items.variant', 'user'],
@@ -917,71 +1132,41 @@ export class OrdersService implements OnModuleInit {
     const oldStatus = order.status;
     order.status    = dto.status;
 
-    // (Annulation : atteignable ici uniquement par l'ADMIN — le vendeur est
-    // bloqué plus haut. Le code ci-dessous reste donc nécessaire côté admin.)
-    // Si annulation → remettre le stock, MAIS uniquement s'il avait
-    // réellement été décrémenté.
-    // ⚠️ Le stock n'est décrémenté qu'à la confirmation du paiement
-    // (PaymentsService.confirmPayment). Avant ce correctif, on le
-    // réincrémentait à chaque annulation sans vérifier : annuler une
-    // commande PENDING jamais payée créait du stock qui n'a jamais existé,
-    // et l'inventaire dérivait à chaque cycle commande → annulation.
+    // (Annulation : traitée plus haut par cancelOrderAsAdmin pour l'admin, et
+    // refusée au vendeur. Cette garde ne sert que de filet de sécurité : aucune
+    // annulation ne doit passer par ce chemin non transactionnel.)
     if (dto.status === OrderStatus.CANCELLED) {
-      order.motifAnnulation = dto.motifAnnulation ?? null;
-
-      const payment = await this.paymentRepo.findOne({
-        where: { orderId: order.id },
-      });
-      const stockWasDecremented =
-        payment?.status === PaymentStatus.SUCCESS;
-
-      if (stockWasDecremented) {
-        for (const item of order.items) {
-          await this.variantRepo.increment(
-            { id: item.variantId },
-            'stockQuantity',
-            item.quantity,
-          );
-        }
-      }
+      throw new ForbiddenException(
+        'Seul un administrateur peut annuler une commande.'
+      );
     }
 
-    await this.orderRepo.save(order);
+    // Changement CONDITIONNEL (le statut doit être encore celui lu plus haut) :
+    // si l'admin vient d'annuler la commande pendant que le vendeur cliquait sur
+    // « Confirmer », la commande annulée n'est pas « ressuscitée ».
+    const moved = await this.orderRepo.update(
+      { id: order.id, status: oldStatus },
+      { status: dto.status },
+    );
+    if (!moved.affected) {
+      throw new BadRequestException(
+        'Cette commande vient d\'être modifiée : actualisez la page.'
+      );
+    }
 
     await this.logService.log({
       actorId:    userId,
       actorType:  isAdmin ? ActorType.ADMIN : ActorType.VENDOR,
-      action:     dto.status === OrderStatus.CANCELLED
-                    ? LogAction.ORDER_CANCELLED
-                    : LogAction.ORDER_STATUS_CHANGED,
+      action:     LogAction.ORDER_STATUS_CHANGED,
       entityType: 'order',
       entityId:   orderId,
       oldValue:   { status: oldStatus },
-      newValue:   { status: dto.status, reason: dto.motifAnnulation },
+      newValue:   { status: dto.status },
       ipAddress:  ip,
     });
 
-    // Si la commande est annulée alors qu'un livreur avait déjà été
-    // affecté, il doit être prévenu dans l'app : il ne doit plus aller
-    // récupérer ni livrer ce colis. Best-effort — l'annulation doit
-    // aboutir même si la notification plante (même logique que
-    // chat.service.ts et que l'email ci-dessous).
-    if (dto.status === OrderStatus.CANCELLED) {
-      try {
-        const delivery = await this.deliveryService.getDeliveryForOrderRaw(
-          order.id,
-        );
-        if (delivery?.agent?.userId) {
-          await this.notificationsService.notifyDeliveryCancelled(
-            delivery.agent.userId,
-            delivery.id,
-            order.orderNumber,
-          );
-        }
-      } catch (error) {
-        this.logger.error(`Échec notification annulation livraison — commande ${order.id}`, error?.message);
-      }
-    }
+    // (L'annulation par l'admin, avec notification du livreur et e-mail du
+    // client, est traitée par cancelOrderAsAdmin / afterAdminCancel.)
 
     // Email au client — sendOrderStatusUpdate logue l'erreur en interne
     // sans jamais bloquer la mise a jour du statut si l'envoi echoue.
@@ -989,19 +1174,15 @@ export class OrdersService implements OnModuleInit {
     // centaines de ms et le vendeur n'a aucune raison d'attendre l'envoi du
     // mail pour voir son statut mis à jour.
     // Préférence « Commandes & livraisons » de l'acheteur : l'e-mail de suivi
-    // est coupé, SAUF l'annulation (information importante, toujours envoyée).
+    // est coupé (l'annulation, elle, est toujours envoyée par afterAdminCancel).
     if (
       order.user?.email
-      && (
-        order.status === OrderStatus.CANCELLED
-        || (await this.notificationsService.isAllowed(order.userId, NotificationType.ORDER, 'orders'))
-      )
+      && (await this.notificationsService.isAllowed(order.userId, NotificationType.ORDER, 'orders'))
     ) {
       void this.mailService.sendOrderStatusUpdate(order.user.email, {
         prenom:      order.user.prenom,
         orderNumber: order.orderNumber,
         status:      order.status,
-        motif:       dto.motifAnnulation,
         orderId:     order.id,
       });
     }
@@ -1046,25 +1227,35 @@ export class OrdersService implements OnModuleInit {
 
     this.validateStatusTransition(order.status, OrderStatus.DELIVERED);
 
-    // Le QR scanné doit correspondre à CETTE commande.
-    const expected = order.orderNumber.replace(/^ASK-/, '');
-    const scanned  = dto.qrScanValue.replace(/^ASK-/, '');
-    if (scanned !== expected) {
+    // Le code de remise saisi / scanné doit être celui de CETTE commande : code
+    // aléatoire que seul le client connaît (affiché dans son suivi de commande),
+    // comparé en temps constant, avec blocage temporaire après 3 essais ratés.
+    // Avant, le « QR » était le numéro de commande, visible du vendeur.
+    await assertHandoverCode(this.dataSource, order.id, dto.qrScanValue);
+
+    // Passage à « livré » conditionnel : si deux validations arrivent en même
+    // temps, une seule gagne (et le compteur de ventes n'est incrémenté qu'une
+    // fois).
+    const oldStatus = order.status;
+    const moved = await this.orderRepo.update(
+      { id: order.id, status: oldStatus },
+      { status: OrderStatus.DELIVERED },
+    );
+    if (!moved.affected) {
       throw new BadRequestException(
-        'Le QR code scanné ne correspond pas à cette commande'
+        'Cette commande vient d\'être modifiée : actualisez la page.'
       );
     }
-
-    const oldStatus = order.status;
     order.status = OrderStatus.DELIVERED;
-    await this.orderRepo.save(order);
     await this.incrementProductSales(order.id);
 
+    // On ne conserve JAMAIS le code lui-même dans la preuve (lisible par le
+    // vendeur et l'admin) : seulement la mention qu'il a été vérifié.
     await this.proofRepo.save(this.proofRepo.create({
       orderId:         order.id,
       role:            ProofRole.VENDEUR,
       stage:           ProofStage.RETRAIT_BOUTIQUE,
-      qrScanValue:     dto.qrScanValue,
+      qrScanValue:     HANDOVER_PROOF_MARKER,
       createdByUserId: userId,
     }));
 
@@ -1384,9 +1575,18 @@ export class OrdersService implements OnModuleInit {
 
     for (const order of candidates) {
       try {
+        // Passage CONDITIONNEL : la commande doit être encore « expedié » et
+        // sans litige. Si l'admin l'a annulée, si le client a ouvert un litige
+        // ou si une autre instance du serveur l'a déjà confirmée entre la
+        // lecture et ici, on n'écrase rien (et les ventes ne sont pas
+        // comptées deux fois).
+        const moved = await this.orderRepo.update(
+          { id: order.id, status: OrderStatus.SHIPPED, disputeOuverte: false },
+          { status: OrderStatus.DELIVERED, confirmationAutomatique: true },
+        );
+        if (!moved.affected) continue;
         order.status = OrderStatus.DELIVERED;
         order.confirmationAutomatique = true;
-        await this.orderRepo.save(order);
         await this.incrementProductSales(order.id);
 
         await this.logService.log({
@@ -1422,10 +1622,11 @@ export class OrdersService implements OnModuleInit {
     status?:   OrderStatus;
     vendorId?: string;
     userId?:   string;
+    disputeOuverte?: boolean;
     page?:     number;
     limit?:    number;
   }) {
-    const { status, vendorId, userId, page = 1, limit = 20 } = params;
+    const { status, vendorId, userId, disputeOuverte, page = 1, limit = 20 } = params;
 
     const query = this.orderRepo
       .createQueryBuilder('order')
@@ -1438,6 +1639,7 @@ export class OrdersService implements OnModuleInit {
     if (status)   query.andWhere('order.status = :status',     { status });
     if (vendorId) query.andWhere('order.vendorId = :vendorId', { vendorId });
     if (userId)   query.andWhere('order.userId = :userId',     { userId });
+    if (disputeOuverte) query.andWhere('order.disputeOuverte = true');
 
     const [orders, total] = await query.getManyAndCount();
 
@@ -1447,6 +1649,123 @@ export class OrdersService implements OnModuleInit {
       page,
       limit,
       pages: Math.ceil(total / limit),
+    };
+  }
+
+  // ─────────────────────────────────────────────────────
+  // ADMIN — ANNULER UNE COMMANDE (atomique)
+  // ─────────────────────────────────────────────────────
+  // Réservé à l'admin (voir updateStatus). Depuis « en attente », « en cours »,
+  // « livreur affecté », « expedié » ET « en transit » (avant : ces trois
+  // derniers statuts n'avaient aucune issue). Motif obligatoire.
+  //
+  // Tout se fait dans UNE transaction, avec un verrou d'écriture sur la
+  // commande (même ordre de verrous que PaymentsService.confirmPayment :
+  // commande, puis paiement) : une annulation et une confirmation de paiement
+  // simultanées ne peuvent plus se croiser.
+  //  - stock restitué SEULEMENT si un paiement réussi existe (c'est à ce moment
+  //    que le stock est décrémenté, voir confirmPayment) ;
+  //  - livreur libéré (redevient disponible) ;
+  //  - usage du coupon libéré si la commande n'avait pas été payée ;
+  //  - aucun remboursement automatique : si un paiement réussi existe, le
+  //    journal porte « REMBOURSEMENT MANUEL À EFFECTUER ».
+  async cancelOrderAsAdmin(
+    orderId: string,
+    adminId: string,
+    motifRaw: string | undefined,
+    ip:      string,
+  ) {
+    const motif = (motifRaw ?? '').trim();
+    if (motif.length < 3) {
+      throw new BadRequestException('Le motif d\'annulation est obligatoire');
+    }
+
+    const result = await this.dataSource.transaction((manager) =>
+      this.cancelOrderTx(manager, orderId, motif, false),
+    );
+
+    await this.afterAdminCancel(result, adminId, motif, ip, {});
+
+    return {
+      message:     'Statut mis à jour',
+      orderNumber: result.order.orderNumber,
+      status:      OrderStatus.CANCELLED,
+      // true = un paiement réussi existe : le remboursement reste à faire à la main.
+      remboursementManuelRequis: result.paid,
+    };
+  }
+
+  // ─────────────────────────────────────────────────────
+  // ADMIN — CLORE UN LITIGE (livraison bus/taxi contestée par le client)
+  // ─────────────────────────────────────────────────────
+  // Il n'existe pas d'entité « litige » : un litige = orders.disputeOuverte
+  // (posé par openDispute) + une ligne du journal d'activité. Clore =
+  // remettre ce drapeau à false :
+  //  - 'rejete' : litige non fondé, la commande reprend son cours
+  //    (confirmation automatique 3 jours après l'expédition, ou confirmation
+  //    du client) ;
+  //  - 'fonde'  : litige fondé, la commande est annulée (cancelOrderTx).
+  async closeDispute(
+    orderId: string,
+    adminId: string,
+    dto:     AdminCloseDisputeDto,
+    ip:      string,
+  ) {
+    const note = dto.note.trim();
+    if (note.length < 3) {
+      throw new BadRequestException('Le motif / la note de clôture est obligatoire');
+    }
+
+    if (dto.decision === DisputeDecision.FOUNDED) {
+      const result = await this.dataSource.transaction((manager) =>
+        this.cancelOrderTx(manager, orderId, `Litige fondé : ${note}`, true),
+      );
+      await this.afterAdminCancel(result, adminId, `Litige fondé : ${note}`, ip, {
+        decisionLitige: DisputeDecision.FOUNDED,
+      });
+      return {
+        message:     'Litige clos : commande annulée',
+        orderNumber: result.order.orderNumber,
+        status:      OrderStatus.CANCELLED,
+        remboursementManuelRequis: result.paid,
+      };
+    }
+
+    const order = await this.dataSource.transaction(async (manager) => {
+      const locked = await manager.findOne(Order, {
+        where: { id: orderId },
+        lock:  { mode: 'pessimistic_write' },
+      });
+      if (!locked) throw new NotFoundException('Commande introuvable');
+      if (!locked.disputeOuverte) {
+        throw new BadRequestException('Aucun litige ouvert sur cette commande');
+      }
+      await manager.update(Order, { id: orderId }, { disputeOuverte: false });
+      return locked;
+    });
+
+    await this.logService.log({
+      actorId:    adminId,
+      actorType:  ActorType.ADMIN,
+      action:     LogAction.ORDER_STATUS_CHANGED,
+      entityType: 'order',
+      entityId:   orderId,
+      oldValue:   { disputeOuverte: true, status: order.status },
+      newValue:   {
+        disputeOuverte: false,
+        decisionLitige: DisputeDecision.REJECTED,
+        note,
+      },
+      ipAddress:  ip,
+    });
+
+    return {
+      message:
+        'Litige clos (non fondé) : la commande reprend son cours. Si le délai '
+        + 'de 3 jours après l\'expédition est déjà écoulé, elle passera '
+        + '« livré » automatiquement au prochain passage.',
+      orderNumber: order.orderNumber,
+      status:      order.status,
     };
   }
 
@@ -1466,29 +1785,167 @@ export class OrdersService implements OnModuleInit {
   ];
   private static readonly TARIF_TAXI_NORD = 1500;
 
-  // Frais de livraison fixe pour une commune (table delivery_zones,
-  // paramétrée par l'admin). Comparaison insensible à la casse/espaces ;
-  // si la commune n'a pas encore de zone connue, on n'empêche pas la
-  // création de la commande — on applique 0 (à surveiller côté admin).
-  // Pour une commune du Nord avec transportMode = 'taxi', le tarif fixe
-  // de la zone (bus, 2000f) est remplacé par TARIF_TAXI_NORD (1500f).
-  private async getFraisLivraisonForCommune(
-    commune: string,
+  // Zone de livraison + frais pour une commune (table delivery_zones,
+  // paramétrée par l'admin).
+  //  - Comparaison de la commune normalisée (sans accents, casse, tirets /
+  //    apostrophes) : « Segbana » = « Ségbana » (avant : frais à 0 en silence).
+  //  - Commune inconnue ou zone désactivée → 400 « zone non desservie ». C'est
+  //    cohérent avec l'application : le client choisit sa commune dans la liste
+  //    des zones actives renvoyée par GET /delivery-zones.
+  //  - Mode de transport validé contre la commune : OBLIGATOIRE (bus ou taxi)
+  //    dans le Nord, REFUSÉ ailleurs (il ferait basculer la commande dans le
+  //    circuit bus/taxi sans livreur).
+  //  - Dans le Nord, taxi = tarif fixe TARIF_TAXI_NORD ; bus = tarif de la zone.
+  private async resolveLivraison(
+    commune:        string,
     transportMode?: string | null,
-  ): Promise<number> {
-    if (!commune) return 0;
-    const target = commune.trim().toLowerCase();
-    const zone = await this.deliveryZoneRepo
-      .createQueryBuilder('zone')
-      .where('LOWER(TRIM(zone.commune)) = :target', { target })
-      .andWhere('zone.isActive = true')
-      .getOne();
-    if (!zone) return 0;
-    const isNord = OrdersService.NORD_DEPARTEMENTS.includes(zone.departement);
-    if (isNord && transportMode === 'taxi') {
-      return OrdersService.TARIF_TAXI_NORD;
+  ): Promise<{ frais: number; transportMode: string | null; commune: string }> {
+    const target = normalizeCommune(commune);
+    const shown  = String(commune ?? '').trim().slice(0, 60);
+
+    const zones = target
+      ? await this.deliveryZoneRepo.find({ where: { isActive: true } })
+      : [];
+    const zone = zones.find((z) => normalizeCommune(z.commune) === target);
+
+    if (!zone) {
+      this.logger.warn(
+        `Livraison refusée : commune non desservie ${JSON.stringify(shown)}`,
+      );
+      throw new BadRequestException(
+        shown
+          ? `Zone non desservie : nous ne livrons pas à « ${shown} ». `
+            + 'Choisissez une commune de la liste ou le retrait en boutique.'
+          : 'Zone non desservie : l\'adresse n\'a pas de commune. '
+            + 'Choisissez une commune de la liste ou le retrait en boutique.',
+      );
     }
-    return Number(zone.fraisLivraison);
+
+    const nord = OrdersService.NORD_DEPARTEMENTS.map(normalizeCommune);
+    const isNord = nord.includes(normalizeCommune(zone.departement));
+    const mode = transportMode ? String(transportMode) : null;
+
+    if (isNord) {
+      if (mode !== 'bus' && mode !== 'taxi') {
+        throw new BadRequestException(
+          `Pour une livraison à ${zone.commune} (Nord), choisissez le mode de `
+          + 'transport : bus ou taxi.',
+        );
+      }
+    } else if (mode) {
+      throw new BadRequestException(
+        'Le mode de transport (bus / taxi) ne concerne que les communes du Nord.',
+      );
+    }
+
+    const frais =
+      isNord && mode === 'taxi'
+        ? OrdersService.TARIF_TAXI_NORD
+        : Number(zone.fraisLivraison);
+
+    return { frais, transportMode: isNord ? mode : null, commune: zone.commune };
+  }
+
+  // Produit publié ET variante active, sinon la commande est refusée. Le
+  // panier ne vérifie cela qu'à l'AJOUT ; entre-temps le vendeur a pu
+  // désactiver le produit ou la variante.
+  private assertVariantOrderable(variant: ProductVariant): void {
+    const product = variant.product;
+    const name    = product?.prod_name ?? 'Un article';
+
+    if (!product || product.status === ProductStatus.OUT_OF_STOCK) {
+      throw new BadRequestException(
+        `"${name}" est en rupture de stock. Veuillez le retirer de la commande.`,
+      );
+    }
+    if (product.status !== ProductStatus.ACTIVE) {
+      throw new BadRequestException(
+        `"${name}" n'est plus en vente. Veuillez le retirer de la commande.`,
+      );
+    }
+    if (variant.isActive === false) {
+      throw new BadRequestException(
+        `La référence choisie de "${name}" n'est plus disponible. `
+        + 'Veuillez la retirer de la commande ou en choisir une autre.',
+      );
+    }
+  }
+
+  // ── Code de remise ───────────────────────────────────
+
+  // Le client peut-il voir le code de remise de cette commande ? Seulement
+  // quand la preuve par code peut réellement être validée (voir getOrderById).
+  private static handoverCodeVisible(order: Order): boolean {
+    if (order.transportMode) return false; // bus/taxi : preuve par photo
+    if (order.deliveryMode === OrderDeliveryMode.RETRAIT) {
+      return order.status === OrderStatus.PREPARING;
+    }
+    return (
+      order.status === OrderStatus.AGENT_ASSIGNED
+      || order.status === OrderStatus.SHIPPED
+      || order.status === OrderStatus.IN_TRANSIT
+    );
+  }
+
+  private static rowsOf(res: any): any[] {
+    if (!Array.isArray(res)) return [];
+    if (res.length === 2 && Array.isArray(res[0]) && typeof res[1] === 'number') {
+      return res[0];
+    }
+    return res;
+  }
+
+  // Lit le code de remise d'une commande ; le crée s'il manque (commande
+  // antérieure à la migration, jeu de données de test...) de façon atomique
+  // (WHERE handoverCode IS NULL : deux appels simultanés gardent le même code).
+  private async ensureHandoverCode(orderId: string): Promise<string | null> {
+    const read = async (): Promise<string | null> => {
+      const rows = OrdersService.rowsOf(
+        await this.dataSource.query(
+          `SELECT "handoverCode" AS "code" FROM "orders" WHERE "id" = $1`,
+          [orderId],
+        ),
+      );
+      return rows[0]?.code ?? null;
+    };
+
+    const existing = await read();
+    if (existing) return existing;
+
+    const rows = OrdersService.rowsOf(
+      await this.dataSource.query(
+        `UPDATE "orders" SET "handoverCode" = $2
+         WHERE "id" = $1 AND "handoverCode" IS NULL
+         RETURNING "handoverCode" AS "code"`,
+        [orderId, generateHandoverCode()],
+      ),
+    );
+    return rows[0]?.code ?? (await read());
+  }
+
+  // ── Masquage des coordonnées d'un client sans lien avec la boutique ──
+  private static initialOnly(name: string | null | undefined): string {
+    const n = String(name ?? '').trim();
+    return n ? `${n.charAt(0).toUpperCase()}.` : '';
+  }
+
+  private static maskPhone(phone: string | null | undefined): string {
+    const p = String(phone ?? '').trim();
+    if (p.length <= 6) return p ? '*'.repeat(p.length) : '';
+    return `${p.slice(0, 4)}${'*'.repeat(p.length - 6)}${p.slice(-2)}`;
+  }
+
+  private static maskEmail(email: string | null | undefined): string {
+    const e = String(email ?? '').trim();
+    const at = e.lastIndexOf('@');
+    if (at < 1) return e ? '***' : '';
+    const local  = e.slice(0, at);
+    const domain = e.slice(at + 1);
+    const dot    = domain.lastIndexOf('.');
+    const dom    = dot > 0
+      ? `${domain.charAt(0)}***${domain.slice(dot)}`
+      : `${domain.charAt(0)}***`;
+    return `${local.charAt(0)}***@${dom}`;
   }
 
   // Génère un numéro de commande unique.
@@ -1579,6 +2036,178 @@ export class OrdersService implements OnModuleInit {
         `Échec incrément totalVentes pour la commande ${orderId}`,
         error?.message,
       );
+    }
+  }
+
+  // Statuts depuis lesquels l'ADMIN peut annuler (et seulement l'admin — le
+  // vendeur ne peut jamais annuler). Aligné avec ORDER_ADMIN_TRANSITIONS du
+  // site admin (asoukaa-dashboard/src/lib/status-meta.ts).
+  private static readonly ADMIN_CANCELLABLE_STATUSES: OrderStatus[] = [
+    OrderStatus.PENDING,
+    OrderStatus.PREPARING,
+    OrderStatus.AGENT_ASSIGNED,
+    OrderStatus.SHIPPED,
+    OrderStatus.IN_TRANSIT,
+  ];
+
+  // Corps transactionnel de l'annulation admin (voir cancelOrderAsAdmin).
+  private async cancelOrderTx(
+    manager:        EntityManager,
+    orderId:        string,
+    motif:          string,
+    requireDispute: boolean,
+  ): Promise<AdminCancelResult> {
+    // 1. Verrou d'écriture sur la commande, puis relecture sous verrou.
+    const order = await manager.findOne(Order, {
+      where: { id: orderId },
+      lock:  { mode: 'pessimistic_write' },
+    });
+    if (!order) throw new NotFoundException('Commande introuvable');
+
+    if (!OrdersService.ADMIN_CANCELLABLE_STATUSES.includes(order.status)) {
+      throw new BadRequestException(
+        `Transition de statut invalide : `
+        + `${order.status} → ${OrderStatus.CANCELLED} n'est pas autorisée`,
+      );
+    }
+    if (requireDispute && !order.disputeOuverte) {
+      throw new BadRequestException('Aucun litige ouvert sur cette commande');
+    }
+
+    // 2. Paiement (verrouillé après la commande, comme confirmPayment).
+    const payment = await manager.findOne(Payment, {
+      where: { orderId },
+      lock:  { mode: 'pessimistic_write' },
+    });
+    const paid = payment?.status === PaymentStatus.SUCCESS;
+
+    // 3. Stock : décrémenté uniquement à la confirmation du paiement
+    // (PaymentsService.confirmPayment) → restitué seulement si paiement réussi.
+    // Variantes traitées dans un ordre fixe (pas d'interblocage entre deux
+    // annulations simultanées).
+    let stockRestored = false;
+    if (paid) {
+      const items = await manager.find(OrderItem, { where: { orderId } });
+      items.sort((a, b) => a.variantId.localeCompare(b.variantId));
+      for (const item of items) {
+        await manager.increment(
+          ProductVariant,
+          { id: item.variantId },
+          'stockQuantity',
+          item.quantity,
+        );
+      }
+      stockRestored = items.length > 0;
+    }
+
+    // 4. Livreur : libéré s'il était affecté à une course en cours.
+    let agentReleased = false;
+    const delivery = await manager.findOne(Delivery, { where: { orderId } });
+    if (
+      delivery?.agentId
+      && (
+        delivery.status === DeliveryStatus.ASSIGNED
+        || delivery.status === DeliveryStatus.PICKED_UP
+        || delivery.status === DeliveryStatus.IN_TRANSIT
+      )
+    ) {
+      await manager.update(
+        DeliveryAgentProfile,
+        { id: delivery.agentId },
+        { isAvailableNow: true },
+      );
+      agentReleased = true;
+    }
+
+    // 5. Coupon : rendu seulement si la commande n'avait jamais été payée.
+    const couponReleased = paid
+      ? false
+      : await releaseCouponForOrder(manager, orderId);
+
+    // 6. La commande. Le litige éventuel est clos par l'annulation.
+    const oldStatus = order.status;
+    await manager.update(
+      Order,
+      { id: orderId },
+      {
+        status:          OrderStatus.CANCELLED,
+        motifAnnulation: motif,
+        disputeOuverte:  false,
+      },
+    );
+    order.status          = OrderStatus.CANCELLED;
+    order.motifAnnulation = motif;
+
+    return { order, oldStatus, payment, paid, stockRestored, agentReleased, couponReleased };
+  }
+
+  // Journal, notification du livreur et e-mail du client APRÈS le commit
+  // (best-effort : l'annulation, déjà validée, ne dépend pas d'eux).
+  private async afterAdminCancel(
+    r:       AdminCancelResult,
+    adminId: string,
+    motif:   string,
+    ip:      string,
+    extra:   Record<string, any>,
+  ): Promise<void> {
+    await this.logService.log({
+      actorId:    adminId,
+      actorType:  ActorType.ADMIN,
+      action:     LogAction.ORDER_CANCELLED,
+      entityType: 'order',
+      entityId:   r.order.id,
+      oldValue:   { status: r.oldStatus },
+      newValue:   {
+        status: OrderStatus.CANCELLED,
+        reason: motif,
+        ...extra,
+        paiementStatut:            r.payment?.status ?? null,
+        remboursementManuelRequis: r.paid,
+        ...(r.paid
+          ? {
+              aFaire: 'REMBOURSEMENT MANUEL À EFFECTUER (paiement réussi — aucun appel FeexPay)',
+              paiementId:         r.payment?.id,
+              montantARembourser: r.payment?.montant,
+            }
+          : {}),
+        stockRestitue: r.stockRestored,
+        livreurLibere: r.agentReleased,
+        couponLibere:  r.couponReleased,
+      },
+      ipAddress:  ip,
+    });
+
+    // Livreur affecté : il ne doit plus aller chercher ni livrer ce colis.
+    if (r.agentReleased) {
+      try {
+        const delivery = await this.deliveryService.getDeliveryForOrderRaw(r.order.id);
+        if (delivery?.agent?.userId) {
+          await this.notificationsService.notifyDeliveryCancelled(
+            delivery.agent.userId,
+            delivery.id,
+            r.order.orderNumber,
+          );
+        }
+      } catch (error) {
+        this.logger.error(`Échec notification annulation livraison — commande ${r.order.id}`, error?.message);
+      }
+    }
+
+    // E-mail au client : l'annulation est toujours notifiée (information
+    // importante), comme avant.
+    try {
+      const user = await this.userRepo.findOne({ where: { id: r.order.userId } });
+      if (user?.email) {
+        void this.mailService.sendOrderStatusUpdate(user.email, {
+          prenom:      user.prenom,
+          orderNumber: r.order.orderNumber,
+          status:      OrderStatus.CANCELLED,
+          motif,
+          orderId:     r.order.id,
+        });
+      }
+    } catch (error) {
+      this.logger.error(`Échec e-mail annulation — commande ${r.order.id}`, error?.message);
     }
   }
 

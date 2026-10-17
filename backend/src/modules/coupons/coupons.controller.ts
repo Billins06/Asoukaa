@@ -19,10 +19,13 @@ import {
   ApiQuery,
 } from '@nestjs/swagger';
 import type { Request } from 'express';
+import { Throttle } from '@nestjs/throttler';
 
 import { CouponsService }  from './coupons.service';
 import { CreateCouponDto } from './dto/create-coupon.dto';
 import { ApplyCouponDto }  from './dto/apply-coupon.dto';
+import { ValidateCouponDto } from './dto/validate-coupon.dto';
+import { VendorActiveGuard } from '../../common/guards/vendor-active.guard';
 import { JwtAuthGuard }    from '../auth/guards/jwt-auth.guard';
 import { RolesGuard }      from '../auth/guards/roles.guard';
 import { Roles }           from '../auth/decorators/roles.decorator';
@@ -45,6 +48,7 @@ export class CouponsController {
   // ─── Routes Vendeur ───────────────────────────────────
 
   @ApiOperation({ summary: 'Créer un coupon (vendeur)' })
+  @UseGuards(VendorActiveGuard)
   @Post('vendor')
   @HttpCode(HttpStatus.CREATED)
   createAsVendor(
@@ -76,6 +80,7 @@ export class CouponsController {
   }
 
   @ApiOperation({ summary: 'Désactiver un coupon (vendeur)' })
+  @UseGuards(VendorActiveGuard)
   @Patch('vendor/:id/deactivate')
   @HttpCode(HttpStatus.OK)
   deactivateAsVendor(
@@ -92,17 +97,20 @@ export class CouponsController {
 
   // ─── Route Client ─────────────────────────────────────
 
+  // Limite serrée (≈ 10 essais / minute) : empêche de deviner des codes.
+  // Corps VALIDÉ (ValidateCouponDto) : `{}` ou un code invalide → 400.
   @ApiOperation({ summary: 'Vérifier un coupon avant commande' })
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post('validate')
   @HttpCode(HttpStatus.OK)
   validateCoupon(
     @Req() req: Request,
-    @Body() body: { code: string; subtotal: number },
+    @Body() dto: ValidateCouponDto,
   ) {
     return this.couponsService.validateCoupon(
-      body.code,
+      dto.code,
       getUser(req).id,
-      body.subtotal,
+      dto.subtotal,
     );
   }
 

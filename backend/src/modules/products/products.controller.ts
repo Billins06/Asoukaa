@@ -30,6 +30,8 @@ import { UpdateProductDto }   from './dto/update-product.dto';
 import { CreateVariantDto }   from './dto/create-variant.dto';
 import { UpdateVariantDto }   from './dto/update-variant.dto';
 import { CreateTierPriceDto } from './dto/create-tier-price.dto';
+import { AddProductImageDto } from './dto/add-product-image.dto';
+import { VendorActiveGuard }  from '../../common/guards/vendor-active.guard';
 import { ProductStatus }      from './entities/product.entity';
 import { JwtAuthGuard }       from '../auth/guards/jwt-auth.guard';
 import { RolesGuard }         from '../auth/guards/roles.guard';
@@ -140,7 +142,7 @@ export class ProductsController {
 
   @ApiOperation({ summary: 'Créer un produit' })
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, VendorActiveGuard)
   @Post()
   @HttpCode(HttpStatus.CREATED)
   create(
@@ -156,7 +158,7 @@ export class ProductsController {
 
   @ApiOperation({ summary: 'Modifier un produit' })
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, VendorActiveGuard)
   @Put(':id')
   update(
     @Param('id', ParseUUIDPipe) id: string,
@@ -173,7 +175,7 @@ export class ProductsController {
 
   @ApiOperation({ summary: 'Désactiver un produit' })
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, VendorActiveGuard)
   @Delete(':id')
   @HttpCode(HttpStatus.OK)
   remove(
@@ -191,7 +193,7 @@ export class ProductsController {
 
   @ApiOperation({ summary: 'Ajouter une variante' })
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, VendorActiveGuard)
   @Post(':id/variants')
   @HttpCode(HttpStatus.CREATED)
   createVariant(
@@ -208,7 +210,7 @@ export class ProductsController {
 
   @ApiOperation({ summary: 'Modifier une variante' })
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, VendorActiveGuard)
   @Put(':id/variants/:variantId')
   updateVariant(
     @Param('id',        ParseUUIDPipe) id:        string,
@@ -228,17 +230,13 @@ export class ProductsController {
 
   @ApiOperation({ summary: 'Ajouter une image' })
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, VendorActiveGuard)
   @Post(':id/images')
   @HttpCode(HttpStatus.CREATED)
   addImage(
     @Param('id', ParseUUIDPipe) id: string,
     @Req() req: Request,
-    @Body() body: {
-      imageUrl:  string;
-      isPrimary?: boolean;
-      isVideo?:   boolean;
-    },
+    @Body() body: AddProductImageDto,
   ) {
     return this.productsService.addImage(
       id,
@@ -251,7 +249,7 @@ export class ProductsController {
 
   @ApiOperation({ summary: 'Supprimer une image' })
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, VendorActiveGuard)
   @Delete(':id/images/:imageId')
   @HttpCode(HttpStatus.OK)
   removeImage(
@@ -270,7 +268,7 @@ export class ProductsController {
 
   @ApiOperation({ summary: 'Définir les prix dégressifs' })
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, VendorActiveGuard)
   @Put(':id/tier-prices')
   @HttpCode(HttpStatus.OK)
   setTierPrices(

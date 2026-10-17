@@ -28,6 +28,7 @@ import {
 
 import { ActivityLogService } from '../../common/services/activity-log.service';
 import { stripSecrets } from '../../common/utils/strip-secrets.util';
+import { UploadService, UploadType } from '../upload/upload.service';
 import {
   ActorType,
   LogAction,
@@ -52,6 +53,8 @@ export class DeliveryAgentsService {
 
     private readonly mailService:   MailService,
     private readonly logService:    ActivityLogService,
+    // Rafraîchit les URL signées (expirantes) des documents privés pour l'admin.
+    private readonly uploadService: UploadService,
   ) {}
 
   // ─────────────────────────────────────────────────────
@@ -89,6 +92,9 @@ export class DeliveryAgentsService {
         return this.resubmitProfile(existing, dto, ip);
       }
     }
+
+    // 1 bis. Pièce d'identité / selfie : doivent provenir de notre stockage privé
+    this.assertOwnKycUrls(dto);
 
     // 2. Créer le profil livreur
     const agent = this.agentRepo.create({
@@ -144,6 +150,22 @@ export class DeliveryAgentsService {
     };
   }
 
+  // Pièce d'identité / selfie : toute NOUVELLE valeur doit être une URL émise
+  // par notre propre route d'upload privée (types documents / selfies), pas une
+  // URL quelconque. Une valeur identique à celle déjà enregistrée n'est pas
+  // re-contrôlée (dossiers existants non cassés).
+  private assertOwnKycUrls(
+    dto:     { idDocumentUrl?: string; selfieUrl?: string },
+    current?: { idDocumentUrl?: string | null; selfieUrl?: string | null },
+  ): void {
+    if (dto.idDocumentUrl && dto.idDocumentUrl !== current?.idDocumentUrl) {
+      this.uploadService.assertIsOwnUploadUrl(dto.idDocumentUrl, UploadType.DOCUMENT);
+    }
+    if (dto.selfieUrl && dto.selfieUrl !== current?.selfieUrl) {
+      this.uploadService.assertIsOwnUploadUrl(dto.selfieUrl, UploadType.SELFIE);
+    }
+  }
+
   // ─────────────────────────────────────────────────────
   // RE-SOUMISSION APRÈS REFUS (méthode privée)
   // ─────────────────────────────────────────────────────
@@ -152,6 +174,9 @@ export class DeliveryAgentsService {
     dto:      SubmitAgentProfileDto,
     ip:       string,
   ) {
+    // Pièce d'identité / selfie : nouvelles valeurs issues de notre stockage privé
+    this.assertOwnKycUrls(dto, existing);
+
     existing.vehicleType            = dto.vehicleType;
     existing.availability           = dto.availability;
     existing.ville                  = dto.ville;
@@ -214,6 +239,8 @@ export class DeliveryAgentsService {
         "Cette action n'est possible que pour un dossier en attente de validation"
       );
     }
+
+    this.assertOwnKycUrls(dto, agent);
 
     if (dto.idDocumentUrl)   agent.idDocumentUrl = dto.idDocumentUrl;
     if (dto.selfieUrl)       agent.selfieUrl = dto.selfieUrl;
@@ -405,7 +432,12 @@ export class DeliveryAgentsService {
 
     // Route admin : retire le hash du mot de passe du compte livreur et
     // les secrets de l'admin relecteur (reviewedBy).
-    return stripSecrets(agent);
+    const safe = stripSecrets(agent);
+    // Documents privés : URL fraîches (les URL signées Supabase expirent).
+    // La photo du véhicule est un fichier public.
+    safe.idDocumentUrl = await this.uploadService.refreshPrivateUrl(agent.idDocumentUrl);
+    safe.selfieUrl     = await this.uploadService.refreshPrivateUrl(agent.selfieUrl);
+    return safe;
   }
 
   // ─────────────────────────────────────────────────────
@@ -651,7 +683,7 @@ export class DeliveryAgentsService {
   // ADMIN — DEMANDES EN ATTENTE
   // ─────────────────────────────────────────────────────
   async getPendingAgents() {
-    return this.agentRepo
+    const pending = await this.agentRepo
       .createQueryBuilder('agent')
       .leftJoin('agent.user', 'user')
       .select([
@@ -660,6 +692,10 @@ export class DeliveryAgentsService {
         'agent.ville',
         'agent.quartier',
         'agent.createdAt',
+        // Pièces à vérifier par l'admin (route réservée aux admins).
+        'agent.idDocumentUrl',
+        'agent.selfieUrl',
+        'agent.vehiclePhotoUrl',
         'user.id',
         'user.prenom',
         'user.name',
@@ -669,6 +705,15 @@ export class DeliveryAgentsService {
       .where('agent.status = :status', { status: AgentStatus.PENDING })
       .orderBy('agent.createdAt', 'ASC')
       .getMany();
+
+    return Promise.all(
+      pending.map(async (a) => ({
+        ...a,
+        // Documents privés : URL fraîches (les URL signées expirent).
+        idDocumentUrl: await this.uploadService.refreshPrivateUrl(a.idDocumentUrl),
+        selfieUrl:     await this.uploadService.refreshPrivateUrl(a.selfieUrl),
+      })),
+    );
   }
 
   // ─────────────────────────────────────────────────────

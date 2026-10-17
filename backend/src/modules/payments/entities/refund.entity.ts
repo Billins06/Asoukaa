@@ -58,6 +58,12 @@ export class Refund {
   @Column({ type: 'text' })
   motif: string;
 
+  // Motif du REFUS saisi par l'admin (rejet uniquement) ; distinct de `motif`
+  // (raison donnée par le client). Colonne ajoutée par la migration
+  // 1791700000001-AddRefundRejectionReason. Transmis au client par e-mail.
+  @Column({ type: 'text', nullable: true })
+  motifRejet: string | null;
+
   @Column({
     type: 'enum',
     enum: RefundStatus,

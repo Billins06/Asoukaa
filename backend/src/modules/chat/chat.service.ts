@@ -18,6 +18,7 @@ import { Product }      from '../products/entities/product.entity';
 import { CreateConversationDto } from './dto/create-conversation.dto';
 import { SendMessageDto }        from './dto/send-message.dto';
 import { NotificationsService }  from '../notifications/notifications.service';
+import { UploadService, UploadType } from '../upload/upload.service';
 
 @Injectable()
 export class ChatService {
@@ -36,6 +37,8 @@ export class ChatService {
     private readonly productRepo: Repository<Product>,
 
     private readonly notificationsService: NotificationsService,
+
+    private readonly uploadService: UploadService,
   ) {}
 
   // ─────────────────────────────────────────────────────
@@ -201,6 +204,14 @@ export class ChatService {
       throw new BadRequestException(
         'Le message doit contenir du texte ou une image'
       );
+    }
+
+    // 3 bis. L'image d'un message doit provenir de NOTRE stockage de chat
+    // (POST /upload/chat). Sans ce contrôle, n'importe quelle URL externe
+    // (pixel espion, contenu malveillant) s'afficherait dans l'appli de
+    // l'autre participant. Échec → 400, avant toute écriture en base.
+    if (dto.imageUrl) {
+      this.uploadService.assertIsOwnUploadUrl(dto.imageUrl, UploadType.CHAT);
     }
 
     // 4. Appliquer le filtrage anti-contournement

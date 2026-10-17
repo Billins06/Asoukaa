@@ -37,6 +37,9 @@ export enum LogAction {
   EMAIL_CHANGE_CONFIRMED  = 'Adresse e-mail modifiée',
   // Gravité élevée : le propriétaire dit ne PAS être à l'origine du changement
   EMAIL_CHANGE_REVERTED   = 'E-mail annulé — compte potentiellement compromis',
+  // Un admin a pris connaissance d'une alerte « Ce n'est pas moi » (valeur
+  // ajoutée à l'enum Postgres par la migration 1791700000000-AddSecurityAlertAck).
+  SECURITY_ALERT_ACKED    = 'Alerte de sécurité acquittée',
 
   // Gestion utilisateurs
   USER_BLOCKED            = 'Utilisateur bloqué',
@@ -85,6 +88,15 @@ export enum LogAction {
   PAYMENT_FAILED          = 'Échec du paiement',
   REFUND_REQUESTED        = 'Demande de remboursement',
   REFUND_PROCESSED        = 'Remboursement effectué',
+  // ⚠️ Valeur aussi ajoutée à activity_logs_action_enum par la migration
+  // 1791840000000-AddPaymentReviewed.
+  PAYMENT_REVIEWED        = 'Paiement reçu examiné par un administrateur',
+
+  // Alerte sécurité : un vendeur demande un retrait vers un numéro Mobile Money
+  // différent de son dernier retrait / de celui de sa fiche. ⚠️ Valeur aussi
+  // ajoutée à activity_logs_action_enum par la migration
+  // 1791820000010-AddWithdrawalNumberAlertLogAction.
+  VENDOR_WITHDRAWAL_NUMBER_ALERT = 'Retrait vendeur : numéro Mobile Money inhabituel',
 
   // Livraisons
   DELIVERY_ASSIGNED       = 'Livraison assignée',

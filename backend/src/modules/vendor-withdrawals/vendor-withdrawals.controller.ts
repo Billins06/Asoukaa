@@ -71,6 +71,10 @@ export class VendorWithdrawalsController {
     @Req() req: Request,
     @Body() dto: CreateWithdrawalDto,
   ) {
-    return this.withdrawalsService.createWithdrawal(getUser(req).id, dto);
+    return this.withdrawalsService.createWithdrawal(
+      getUser(req).id,
+      dto,
+      req.ip,
+    );
   }
 }

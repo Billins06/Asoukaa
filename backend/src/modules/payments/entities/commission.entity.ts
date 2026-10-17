@@ -46,7 +46,9 @@ export class Commission {
   @JoinColumn({ name: 'vendorId' })
   vendor: VendorProfile;
 
-  // Montant total de la commande
+  // Base de calcul de la commission = produits APRÈS remise (subtotal − rabais),
+  // SANS les frais de livraison (qui reviennent au livreur et à la plateforme,
+  // jamais au vendeur). Ce n'est donc plus le total payé par le client.
   @Column({ type: 'decimal', precision: 12, scale: 2 })
   totalCommande: number;
 
@@ -57,12 +59,12 @@ export class Commission {
   taux: number;
 
   // Montant prélevé par Asoukaa
-  // Calculé : orderTotal * rate / 100
+  // Calculé : totalCommande (base produits) * taux / 100
   @Column({ type: 'decimal', precision: 12, scale: 2 })
   montantCommission: number;
 
   // Montant reversé au vendeur
-  // Calculé : orderTotal - commissionAmount
+  // Calculé : totalCommande (base produits) - montantCommission
   @Column({ type: 'decimal', precision: 12, scale: 2 })
   commissionVendor: number;
 

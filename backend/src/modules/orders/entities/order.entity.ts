@@ -206,6 +206,25 @@ export class Order {
   @Column({ type: 'timestamptz', nullable: true })
   adminAlertedAt: Date | null;
 
+  // ─── Code de remise (« QR de preuve ») ─────────────────
+  // Code aléatoire propre à la commande (voir
+  // common/utils/handover-code.util.ts). Connu du seul client propriétaire
+  // (GET /orders/me/:id -> handoverCode) ; le livreur (remise à domicile) ou le
+  // vendeur (retrait en boutique) doit le saisir / scanner.
+  // ⚠️ `select: false` : ces colonnes ne sont JAMAIS chargées par défaut, donc
+  // jamais renvoyées dans une réponse vendeur / livreur / admin. Pour les lire :
+  // addSelect explicite (voir OrdersService.ensureHandoverCode).
+  @Column({ type: 'varchar', length: 16, nullable: true, select: false })
+  handoverCode: string | null;
+
+  // Essais ratés de saisie du code ; au 3e raté, handoverLockedUntil bloque
+  // la validation quelques minutes.
+  @Column({ type: 'int', default: 0, select: false })
+  handoverFailedAttempts: number;
+
+  @Column({ type: 'timestamptz', nullable: true, select: false })
+  handoverLockedUntil: Date | null;
+
   @OneToMany(() => OrderItem, (item) => item.order, {
     cascade: true,
   })

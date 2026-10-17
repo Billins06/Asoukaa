@@ -8,6 +8,7 @@ import { UserRole }                 from '../users/entities/user-role.entity';
 import { User }                     from '../users/entities/user.entity';
 import { DeliveryEarning }          from '../delivery/entities/delivery-earning.entity';
 import { CommonModule }             from '../../common/common.module';
+import { UploadModule }             from '../upload/upload.module';
 
 @Module({
   imports: [
@@ -18,6 +19,8 @@ import { CommonModule }             from '../../common/common.module';
       DeliveryEarning,
     ]),
     CommonModule,
+    // UploadService : rafraîchit les URL signées des documents (fiches admin)
+    UploadModule,
   ],
   controllers: [DeliveryAgentsController],
   providers:   [DeliveryAgentsService],

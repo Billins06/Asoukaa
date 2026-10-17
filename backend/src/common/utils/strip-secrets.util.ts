@@ -12,6 +12,7 @@ export const SECRET_KEYS: ReadonlySet<string> = new Set([
   'tokensValidAfter',
   'securityAlertAt',
   'securityAlertReason',
+  'securityAlertAckedAt',
 ]);
 
 function walk(value: any, path: Set<object>): any {

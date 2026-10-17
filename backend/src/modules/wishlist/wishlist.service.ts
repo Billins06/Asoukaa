@@ -106,6 +106,49 @@ export class WishlistService {
 
     const [items, total] = await query.getManyAndCount();
 
+    // Disponibilité de chaque produit (sinon « Ajouter au panier » reste
+    // toujours désactivé côté application : elle ne recevait ni stock ni
+    // variante). Une seule requête pour toute la page.
+    //   product.stock            : total des unités disponibles (variantes
+    //                              actives), 0 si rupture ;
+    //   product.defaultVariantId : UUID de la première variante active en stock
+    //                              (la moins chère, puis par SKU), sinon null ;
+    //   product.variantCount     : nombre de variantes actives.
+    const productIds = items
+      .map((it) => it.productId)
+      .filter((id): id is string => !!id);
+    const availability = new Map<
+      string,
+      { stock: number; variantCount: number; defaultVariantId: string | null }
+    >();
+    if (productIds.length) {
+      const rows: Array<{
+        productId:        string;
+        stock:            number;
+        variantCount:     number;
+        defaultVariantId: string | null;
+      }> = await this.wishlistRepo.manager.query(
+        `
+        SELECT v."productId" AS "productId",
+          COALESCE(SUM(v."stockQuantity") FILTER (WHERE v."isActive"), 0)::int AS "stock",
+          (COUNT(*) FILTER (WHERE v."isActive"))::int AS "variantCount",
+          (ARRAY_AGG(v."id" ORDER BY v."price" ASC, v."sku" ASC)
+            FILTER (WHERE v."isActive" AND v."stockQuantity" > 0))[1] AS "defaultVariantId"
+        FROM "product_variants" v
+        WHERE v."productId" = ANY($1::uuid[])
+        GROUP BY v."productId"
+        `,
+        [productIds],
+      );
+      for (const r of rows) {
+        availability.set(r.productId, {
+          stock:            Number(r.stock) || 0,
+          variantCount:     Number(r.variantCount) || 0,
+          defaultVariantId: r.defaultVariantId ?? null,
+        });
+      }
+    }
+
     // Ordre stable des prix dégressifs par quantité minimale croissante,
     // comme dans ProductsService.findOne()/findAll().
     for (const it of items) {
@@ -115,6 +158,11 @@ export class WishlistService {
       // Seule la fiche publique du vendeur part vers l'appli.
       if (it.product) {
         (it.product as any).vendor = toPublicVendor((it.product as any).vendor);
+
+        const a = availability.get(it.productId);
+        (it.product as any).stock            = a?.stock ?? 0;
+        (it.product as any).defaultVariantId = a?.defaultVariantId ?? null;
+        (it.product as any).variantCount     = a?.variantCount ?? 0;
       }
     }
 

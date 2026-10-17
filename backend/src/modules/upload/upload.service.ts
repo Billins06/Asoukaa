@@ -2,8 +2,10 @@ import {
   Injectable,
   BadRequestException,
   InternalServerErrorException,
+  PayloadTooLargeException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { DataSource } from 'typeorm';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { v4 as uuidv4 }  from 'uuid';
 import { extname, join } from 'path';
@@ -90,6 +92,18 @@ function isPdf(b: Buffer): boolean {
 function matchesImageSignature(b: Buffer): boolean {
   return isJpeg(b) || isPng(b) || isWebp(b);
 }
+// MP4 / MOV (QuickTime) : conteneur ISO-BMFF, la boîte « ftyp » commence à
+// l'octet 4 (les 4 premiers octets sont la taille de la boîte).
+function isIsoBmff(b: Buffer): boolean {
+  return b.length >= 12 && b.subarray(4, 8).toString('latin1') === 'ftyp';
+}
+// WEBM : en-tête EBML (1A 45 DF A3) dont le « DocType » est « webm »
+// (ce qui écarte les fichiers Matroska .mkv).
+function isWebm(b: Buffer): boolean {
+  return b.length >= 16
+    && b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3
+    && b.subarray(0, Math.min(b.length, 64)).toString('latin1').includes('webm');
+}
 const SIGNED_URL_TTL_SECONDS = 60 * 60 * 24 * 7;
 
 // 📁 Repli "stockage local" (dev) : activé via STORAGE_DRIVER=local dans
@@ -112,7 +126,10 @@ export class UploadService {
   private readonly appUrl: string;
   private readonly supabaseUrl: string | null = null;
 
-  constructor(private readonly configService: ConfigService) {
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly dataSource: DataSource,
+  ) {
     this.driver = (this.configService.get<string>('STORAGE_DRIVER') ?? 'supabase') === 'local'
       ? 'local'
       : 'supabase';
@@ -145,6 +162,30 @@ export class UploadService {
   // par un compte ADMIN/SUPERADMIN (images de vitrine et de catégories).
   isAdminOnlyType(type: string): boolean {
     return ADMIN_ONLY_UPLOAD_TYPES.has(type as UploadType);
+  }
+
+  // Types d'envoi connus (valeurs de UploadType) — utilisé par
+  // UploadParseInterceptor pour refuser un type inconnu AVANT de lire le fichier.
+  isKnownType(type: string): boolean {
+    return (Object.values(UploadType) as string[]).includes(type);
+  }
+
+  knownTypes(): string[] {
+    return Object.values(UploadType) as string[];
+  }
+
+  // Taille maximale (en octets) d'un fichier pour un type d'envoi :
+  // vidéos produit → MAX_VIDEO_FILE_SIZE (50 Mo par défaut) ; tous les autres
+  // types (images, PDF) → MAX_FILE_SIZE (5 Mo par défaut). Une valeur de .env
+  // absente ou invalide retombe sur le défaut.
+  maxBytesFor(type: string): number {
+    const positive = (raw: unknown, fallback: number): number => {
+      const n = Number(raw);
+      return Number.isFinite(n) && n > 0 ? Math.trunc(n) : fallback;
+    };
+    return VIDEO_UPLOAD_TYPES.has(type as UploadType)
+      ? positive(this.configService.get('MAX_VIDEO_FILE_SIZE'), DEFAULT_MAX_VIDEO_FILE_SIZE)
+      : positive(this.configService.get('MAX_FILE_SIZE'), 5242880);
   }
 
   // Vérifie qu'une URL de fichier soumise par un client (ex: dans une
@@ -198,7 +239,12 @@ export class UploadService {
         || host.endsWith('.ngrok.io')
         || host.endsWith('.ngrok.app');
       const isReachableOwnFile = isDevAccessHost && filePath.test(parsed.pathname);
-      if ((!isOwnHost && !isReachableOwnFile) || !pathContainsType) {
+      // Documents/selfies (privés) : seule la forme EXACTE émise par notre
+      // route d'upload est acceptée, quel que soit l'hôte — sinon on pourrait
+      // enregistrer une URL « /quelconque/documents/<nom d'autrui> » sur notre
+      // propre hôte pour se faire passer pour propriétaire du fichier.
+      const isStrictPrivateOk = !this.isPrivateType(type) || filePath.test(parsed.pathname);
+      if ((!isOwnHost && !isReachableOwnFile) || !pathContainsType || !isStrictPrivateOk) {
         throw new BadRequestException(
           'Ce fichier ne provient pas du stockage de l\'application'
         );
@@ -207,10 +253,29 @@ export class UploadService {
     }
 
     // Driver supabase : l'URL doit pointer vers notre propre projet
-    // Supabase et notre propre bucket public.
+    // Supabase et notre propre bucket.
     const isOwnSupabaseHost = this.supabaseUrl
       ? parsed.host === new URL(this.supabaseUrl).host
       : false;
+
+    if (this.isPrivateType(type)) {
+      // Documents/selfies : stockés dans le bucket PRIVÉ, l'URL émise par
+      // l'upload est une URL signée « …/storage/v1/object/sign/<bucket privé>/
+      // <type>/<uuid>.<ext>?token=… ». On exige exactement cette forme (le
+      // bucket public n'est PAS valable pour ces types).
+      const escapedBucket = this.privateBucket.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const privatePath = new RegExp(
+        `^/storage/v1/object/(?:sign|authenticated)/${escapedBucket}/${type}/[0-9a-f-]{36}\\.[a-z0-9]{2,5}$`,
+        'i',
+      );
+      if (!isOwnSupabaseHost || !privatePath.test(parsed.pathname)) {
+        throw new BadRequestException(
+          'Ce fichier ne provient pas du stockage de l\'application'
+        );
+      }
+      return;
+    }
+
     const isOwnBucket = parsed.pathname.includes(`/${this.publicBucket}/`);
 
     if (!isOwnSupabaseHost || !isOwnBucket || !pathContainsType) {
@@ -231,11 +296,11 @@ export class UploadService {
     const allowedExtensions = isVideoType
       ? VIDEO_EXTENSIONS
       : isImageOnlyType ? IMAGE_EXTENSIONS : ALLOWED_EXTENSIONS;
-    const maxSize = isVideoType
-      ? (this.configService.get<number>('MAX_VIDEO_FILE_SIZE') ?? DEFAULT_MAX_VIDEO_FILE_SIZE)
-      : (this.configService.get<number>('MAX_FILE_SIZE') ?? 5242880);
+    // Même valeur que la limite Multer appliquée à la réception (deuxième
+    // barrière, au cas où le service serait appelé ailleurs que par la route).
+    const maxSize = this.maxBytesFor(type);
 
-    if (file.size > maxSize) throw new BadRequestException(`Fichier trop volumineux. Maximum ${maxSize / 1024 / 1024} MB`);
+    if (file.size > maxSize) throw new PayloadTooLargeException(`Fichier trop volumineux. Maximum ${maxSize / 1024 / 1024} Mo`);
     if (!allowedMimeTypes.includes(file.mimetype)) {
       throw new BadRequestException(
         isVideoType
@@ -248,14 +313,25 @@ export class UploadService {
     const ext = extname(file.originalname).toLowerCase();
     if (!allowedExtensions.includes(ext)) throw new BadRequestException(`Extension non autorisée. Extensions acceptées : ${allowedExtensions.join(', ')}`);
 
-    // Contenu réel (hors vidéo) : JPEG/PNG/WEBP, plus PDF pour les types
-    // qui l'acceptent. Un fichier dont les octets ne correspondent pas est
-    // refusé même si son mimetype/extension sont acceptables.
-    if (!isVideoType) {
-      const buf = file.buffer;
-      const contentOk = !!buf && (
-        matchesImageSignature(buf) || (!isImageOnlyType && isPdf(buf))
-      );
+    // Contenu réel (octets « magiques »), cohérent avec ce que le fichier
+    // prétend être (mimetype + extension) :
+    //  - vidéo : MP4/MOV (« ftyp ») ou WEBM (EBML + DocType webm) ;
+    //  - PDF annoncé : doit commencer par « %PDF- » ;
+    //  - image annoncée : JPEG, PNG ou WEBP.
+    // Un fichier dont les octets ne correspondent pas est refusé même si son
+    // mimetype/extension sont acceptables.
+    const buf = file.buffer;
+    if (isVideoType) {
+      const wantsWebm = ext === '.webm' || file.mimetype === 'video/webm';
+      const videoOk = !!buf && (wantsWebm ? isWebm(buf) : isIsoBmff(buf));
+      if (!videoOk) {
+        throw new BadRequestException(
+          'Le contenu du fichier n\'est pas une vidéo valide (MP4, MOV, WEBM)'
+        );
+      }
+    } else {
+      const wantsPdf = ext === '.pdf' || file.mimetype === 'application/pdf';
+      const contentOk = !!buf && (wantsPdf ? isPdf(buf) : matchesImageSignature(buf));
       if (!contentOk) {
         throw new BadRequestException(
           isImageOnlyType
@@ -301,6 +377,62 @@ export class UploadService {
     if (!files || files.length === 0) throw new BadRequestException('Aucun fichier reçu');
     if (files.length > 10) throw new BadRequestException('Maximum 10 fichiers par requête');
     return Promise.all(files.map(file => this.uploadFile(file, type)));
+  }
+
+  // Régénère une URL fraîche pour un document PRIVÉ (pièce d'identité,
+  // selfie) tel qu'il est stocké en base. En mode Supabase, l'URL enregistrée
+  // est une URL signée qui EXPIRE (7 jours) : sans ce rafraîchissement, l'admin
+  // verrait des images cassées pour toute demande un peu ancienne.
+  //  - mode local : l'URL de la route authentifiée n'expire pas → inchangée ;
+  //  - URL/chemin d'un autre bucket (fichier public) → inchangé ;
+  //  - toute erreur → on renvoie la valeur d'origine (jamais d'échec de la
+  //    fiche admin à cause d'une image).
+  async refreshPrivateUrl(stored: string | null | undefined): Promise<string | null> {
+    if (!stored) return null;
+    if (this.driver !== 'supabase' || !this.supabase) return stored;
+    try {
+      let path: string | null = stored;
+      if (/^https?:\/\//i.test(stored)) {
+        const m = new URL(stored).pathname.match(
+          /\/storage\/v1\/object\/(?:sign|authenticated|public)\/(.+)$/,
+        );
+        path = m ? decodeURIComponent(m[1]) : null;
+      }
+      if (!path || path.split('/')[0] !== this.privateBucket) return stored;
+      return await this.refreshSignedUrl(path);
+    } catch {
+      return stored;
+    }
+  }
+
+  // Le compte `userId` est-il PROPRIÉTAIRE de ce fichier privé ? = son profil
+  // vendeur ou livreur référence ce nom de fichier (documents → pièce d'identité,
+  // selfies → selfie). Sert à la route GET /upload/file/:type/:filename.
+  // Comparaison de fin de chaîne (RIGHT) et non LIKE : le nom contient « _ »
+  // ou « % » possibles, qui sont des jokers LIKE.
+  async isPrivateFileOwner(userId: string, type: string, filename: string): Promise<boolean> {
+    if (!userId || !this.isPrivateType(type)) return false;
+    if (!/^[A-Za-z0-9._-]{1,200}$/.test(filename) || filename.includes('..')) return false;
+
+    const column = type === UploadType.DOCUMENT ? 'idDocumentUrl' : 'selfieUrl';
+    const needle = `/${type}/${filename}`;
+    // L'URL enregistrée doit SE TERMINER par « /<type>/<nom> » (et non le
+    // contenir quelque part) : on retire d'abord un éventuel « ?token=… »
+    // (URL signée Supabase) ou « #… », puis on compare la fin de la chaîne.
+    // Sans cela, une URL arbitraire contenant le nom d'un fichier d'autrui
+    // aurait fait passer le contrôle.
+    const rows = await this.dataSource.query(
+      `SELECT 1 FROM "vendor_profiles"
+        WHERE "userId" = $1
+          AND RIGHT(split_part(split_part(COALESCE("${column}", ''), '#', 1), '?', 1), char_length($2::text)) = $2::text
+       UNION ALL
+       SELECT 1 FROM "delivery_agent_profiles"
+        WHERE "userId" = $1
+          AND RIGHT(split_part(split_part(COALESCE("${column}", ''), '#', 1), '?', 1), char_length($2::text)) = $2::text
+       LIMIT 1`,
+      [userId, needle],
+    );
+    return Array.isArray(rows) && rows.length > 0;
   }
 
   async refreshSignedUrl(storedPath: string): Promise<string> {

@@ -26,3 +26,10 @@ SEEDERS_SUMMARY.md
 
 # Sauvegardes de travail (.bak, .bak_qa1, .bak_feexpay3, ...)
 *.bak*
+
+# Sauvegardes de travail, dossiers a supprimer, journaux d import
+_sauvegardes*/
+_a_supprimer/
+_to_delete/
+scratch_*.js
+scripts/import-produits/import-log-*.json

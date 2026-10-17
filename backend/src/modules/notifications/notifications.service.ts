@@ -239,16 +239,32 @@ export class NotificationsService {
     onlyUnread: boolean = false,
     page:     number = 1,
     limit:    number = 20,
+    since?:   Date,
   ) {
     const where: any = { userId };
     if (onlyUnread) where.isRead = false;
 
-    const [notifications, total] = await this.notificationRepo.findAndCount({
-      where,
-      order: { createdAt: 'DESC' },
-      skip:  (page - 1) * limit,
-      take:  limit,
-    });
+    // `since` (sondage de l'appli) : seulement les notifications créées
+    // STRICTEMENT après cet instant. La base stocke des microsecondes alors
+    // que la date renvoyée à l'appli (JSON) est tronquée à la milliseconde :
+    // sans date_trunc, la notification qui a servi de point de départ
+    // (ex. …:00.123456 > …:00.123) reviendrait à chaque sondage.
+    const [notifications, total] = since && !Number.isNaN(since.getTime())
+      ? await this.notificationRepo
+          .createQueryBuilder('n')
+          .where('n."userId" = :userId', { userId })
+          .andWhere(onlyUnread ? 'n."isRead" = false' : '1=1')
+          .andWhere(`date_trunc('milliseconds', n."createdAt") > :since`, { since })
+          .orderBy('n.createdAt', 'DESC')
+          .skip((page - 1) * limit)
+          .take(limit)
+          .getManyAndCount()
+      : await this.notificationRepo.findAndCount({
+          where,
+          order: { createdAt: 'DESC' },
+          skip:  (page - 1) * limit,
+          take:  limit,
+        });
 
     return {
       data:  notifications,
@@ -469,11 +485,35 @@ export class NotificationsService {
     });
   }
 
+  // Commande jamais payée, annulée automatiquement (UnpaidOrdersService).
+  async notifyOrderAutoCancelled(
+    userId:      string,
+    orderNumber: string,
+    orderId:     string,
+    hours:       number,
+  ) {
+    const ref = orderNumber ? `Votre commande ${orderNumber}` : 'Votre commande';
+    return this.create({
+      userId,
+      title:         'Commande annulée',
+      body:          `${ref} a été annulée automatiquement : elle n'a pas été payée dans les ${hours} heures. `
+                   + 'Vous pouvez repasser commande quand vous voulez.',
+      prefKey:       'orders',
+      type:          NotificationType.ORDER,
+      referenceId:   orderId,
+      referenceType: 'order',
+      sendEmail:     true,
+    });
+  }
+
   async notifyNewOrder(vendorUserId: string, orderNumber: string, orderId: string) {
     return this.create({
       userId:        vendorUserId,
-      title:         '🛒 Nouvelle commande !',
-      body:          `Vous avez reçu une nouvelle commande : ${orderNumber}.`,
+      title:         '🛒 Nouvelle commande payée !',
+      // Appelée par PaymentsService.confirmPayment : la commande est déjà
+      // PAYÉE mais reste « en attente » tant que le vendeur n'a pas cliqué
+      // sur « Confirmer ».
+      body:          `Nouvelle commande payée : ${orderNumber}. Confirmez-la pour lancer la préparation.`,
       prefKey:       'newOrders',
       type:          NotificationType.ORDER,
       referenceId:   orderId,

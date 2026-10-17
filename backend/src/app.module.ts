@@ -32,12 +32,16 @@ import { VitrineModule } from './modules/vitrine/vitrine.module';
 import { SupportTicketsModule } from './modules/support-tickets/support-tickets.module';
 import { CommonModule } from './common/common.module';
 import { PresenceModule } from './modules/presence/presence.module';
+import { validateEnvironment } from './config/env.validation';
 
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
       envFilePath: '.env',
+      // Vérification du .env au démarrage (clé de chiffrement, secrets JWT,
+      // DB_SYNCHRONIZE...) : bloque en production, avertit en développement.
+      validate: validateEnvironment,
     }),
     // 🛡️ Rate limiting global : 100 requêtes / minute / IP.
     // ⚠️ Cette limite globale est volontairement large (navigation

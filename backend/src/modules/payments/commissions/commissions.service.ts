@@ -2,6 +2,7 @@
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, FindOptionsWhere, FindManyOptions } from 'typeorm';
 import { Commission, CommissionStatus } from '../entities/commission.entity';
+import { VendorEarningAdjustment } from '../entities/vendor-earning-adjustment.entity';
 import { ActivityLogService } from 'src/common/services/activity-log.service';
 import { ActorType, LogAction, LogResult } from 'src/common/entities/activity-log.entity';
 import { stripSecrets } from '../../../common/utils/strip-secrets.util';
@@ -101,11 +102,24 @@ export class CommissionsService {
   }
 
   async getStatistics() {
+    // Part de commission RENDUE par la plateforme suite à des remboursements
+    // clients approuvés (vendor_earning_adjustments.montantCommission), par
+    // statut de la commission d'origine : elle est retranchée des totaux.
+    const refundedCommission = (status: CommissionStatus) =>
+      this.commissionRepo.manager
+        .createQueryBuilder(VendorEarningAdjustment, 'a')
+        .innerJoin(Commission, 'c', 'c.id = a.commissionId')
+        .select('COALESCE(SUM(a.montantCommission), 0)', 'sum')
+        .where('c.status = :status', { status })
+        .getRawOne<{ sum: string }>();
+
     const [
       totalPending,
       totalPaid,
-      sumPending,
-      sumPaid,
+      sumPendingGross,
+      sumPaidGross,
+      refundedPending,
+      refundedPaid,
     ] = await Promise.all([
       this.commissionRepo.count({ where: { status: CommissionStatus.PENDING } }),
       this.commissionRepo.count({ where: { status: CommissionStatus.PAID } }),
@@ -119,7 +133,22 @@ export class CommissionsService {
         .select('COALESCE(SUM(c.montantCommission), 0)', 'sum')
         .where('c.status = :status', { status: CommissionStatus.PAID })
         .getRawOne(),
+      refundedCommission(CommissionStatus.PENDING),
+      refundedCommission(CommissionStatus.PAID),
     ]);
+
+    const sumPending: any = {
+      sum: String(Math.max(
+        0,
+        parseFloat(sumPendingGross.sum || 0) - parseFloat(refundedPending?.sum || '0'),
+      )),
+    };
+    const sumPaid: any = {
+      sum: String(Math.max(
+        0,
+        parseFloat(sumPaidGross.sum || 0) - parseFloat(refundedPaid?.sum || '0'),
+      )),
+    };
 
     return {
       pending: {

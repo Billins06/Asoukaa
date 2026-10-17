@@ -3,7 +3,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Between, MoreThanOrEqual } from 'typeorm';
+import { Repository, Between, MoreThanOrEqual, DataSource } from 'typeorm';
 
 import { User }                              from '../users/entities/user.entity';
 import { VendorProfile, VendorStatus }       from '../users/entities/vendor-profile.entity';
@@ -15,6 +15,10 @@ import { Payment, PaymentStatus }            from '../payments/entities/payment.
 import { Commission }                        from '../payments/entities/commission.entity';
 import { Review, ReviewStatus }              from '../reviews/entities/review.entity';
 import { Delivery, DeliveryStatus }          from '../delivery/entities/delivery.entity';
+import { Refund, RefundStatus }              from '../payments/entities/refund.entity';
+import { TicketStatus }                      from '../support-tickets/support-ticket.constants';
+import { OrderConfirmationService }          from '../orders/order-confirmation.service';
+import { paymentsToReviewWhere }             from '../payments/payments-to-review.criteria';
 
 import {
   DashboardQueryDto,
@@ -54,7 +58,71 @@ export class DashboardService {
 
     @InjectRepository(Delivery)
     private readonly deliveryRepo: Repository<Delivery>,
+
+    private readonly dataSource: DataSource,
+
+    private readonly orderConfirmation: OrderConfirmationService,
   ) {}
+
+  // ═════════════════════════════════════════════════════
+  //          COMPTEURS DU MENU ADMIN
+  // GET /api/v1/admin/sidebar-counts
+  // ═════════════════════════════════════════════════════
+  // Un seul aller-retour pour toutes les pastilles du menu. Chaque compteur
+  // reprend EXACTEMENT le critère de la page qu'il annonce :
+  //  - vendors / agents    : inscriptions « en attente » (pages « pending » et
+  //                          getAdminOverview) ;
+  //  - supportTickets      : tickets ouverts OU en cours ;
+  //  - refunds             : remboursements « en attente » ;
+  //  - ordersToConfirm     : même WHERE que GET /admin/orders/late-confirmation ;
+  //  - securityAlerts      : alerte « Ce n'est pas moi » non acquittée
+  //                          (securityAlertAt non nul ET acquittement nul ou
+  //                          antérieur à l'alerte) ;
+  //  - paymentsToReview    : paiements reçus (FeexPay SUCCESS) mais commande
+  //                          non validée (stock / annulée) — critère détaillé
+  //                          dans payments/payments-to-review.criteria.ts ;
+  //                          même filtre que GET /payments?toReview=true.
+  async getSidebarCounts() {
+    const [
+      vendors,
+      agents,
+      [ticketsRow],
+      refunds,
+      ordersToConfirm,
+      [alertsRow],
+      [reviewRow],
+    ] = await Promise.all([
+      this.vendorRepo.count({ where: { status: VendorStatus.PENDING } }),
+      this.agentRepo.count({ where: { status: AgentStatus.PENDING } }),
+      this.dataSource.query(
+        `SELECT COUNT(*)::int AS "n" FROM "support_tickets" WHERE "status" IN ($1, $2)`,
+        [TicketStatus.OUVERT, TicketStatus.EN_COURS],
+      ),
+      this.dataSource.getRepository(Refund).count({
+        where: { status: RefundStatus.PENDING },
+      }),
+      this.orderConfirmation.countLateConfirmation(),
+      this.dataSource.query(
+        `SELECT COUNT(*)::int AS "n" FROM "users"
+         WHERE "securityAlertAt" IS NOT NULL
+           AND ("securityAlertAckedAt" IS NULL OR "securityAlertAckedAt" < "securityAlertAt")`,
+      ),
+      this.dataSource.query(
+        `SELECT COUNT(*)::int AS "n" FROM "payments" "p"
+         WHERE ${paymentsToReviewWhere('p')}`,
+      ),
+    ]);
+
+    return {
+      vendors,
+      agents,
+      supportTickets:  Number(ticketsRow?.n ?? 0),
+      refunds,
+      ordersToConfirm,
+      securityAlerts:  Number(alertsRow?.n ?? 0),
+      paymentsToReview: Number(reviewRow?.n ?? 0),
+    };
+  }
 
   // ═════════════════════════════════════════════════════
   //          DASHBOARD ADMIN
@@ -272,11 +340,28 @@ export class DashboardService {
     ]);
 
     // Revenus de la période
+    // ⚠️ RÈGLE MÉTIER : le vendeur ne touche RIEN des frais de livraison
+    // (livreur 80 % + plateforme). Son chiffre d'affaires = ses PRODUITS après
+    // remise (subtotal − rabais), PAS order.total. Le net déduit la vraie
+    // commission (table commissions, créée au paiement) : la colonne
+    // orders.montantCommission est toujours 0 et ne sert à rien ici.
     const revenueStats = await this.orderRepo
       .createQueryBuilder('order')
+      .leftJoin(Commission, 'comm', 'comm.orderId = order.id')
       .select('COUNT(order.id)',     'totalOrders')
-      .addSelect('SUM(order.total)', 'grossRevenue')
-      .addSelect('SUM(order.total - order.montantCommission)', 'netRevenue')
+      .addSelect('SUM(order.subtotal - order.rabais)', 'grossRevenue')
+      // Net vendeur = produits après remise − commission − reprises pour
+      // remboursement client approuvé (vendor_earning_adjustments ; sous-requête
+      // plutôt que jointure pour ne jamais dupliquer une commande).
+      .addSelect(
+        'SUM(order.subtotal - order.rabais - COALESCE(comm.montantCommission, 0)'
+        + ' - COALESCE((SELECT SUM(adj."montantVendeur") FROM "vendor_earning_adjustments" adj WHERE adj."orderId" = order.id), 0))',
+        'netRevenue',
+      )
+      .addSelect(
+        'COALESCE(SUM((SELECT SUM(adj2."montantVendeur") FROM "vendor_earning_adjustments" adj2 WHERE adj2."orderId" = order.id)), 0)',
+        'reprisesRemboursements',
+      )
       .where('order.vendorId = :vendorId', { vendorId: vendor.id })
       .andWhere('order.createdAt BETWEEN :start AND :end', {
         start: startDate,
@@ -311,6 +396,8 @@ export class DashboardService {
         totalOrders:   Number(revenueStats?.totalOrders) || 0,
         grossRevenue:  Number(revenueStats?.grossRevenue) || 0,
         netRevenue:    Number(revenueStats?.netRevenue) || 0,
+        // Champ AJOUTÉ : total repris sur ces commandes (remboursements clients).
+        reprisesRemboursements: Number(revenueStats?.reprisesRemboursements) || 0,
       },
       reputation: {
         avgRating:   Number(reviewStats?.avgRating)?.toFixed(2) || 0,
@@ -334,7 +421,8 @@ export class DashboardService {
     const result = await this.orderRepo
       .createQueryBuilder('order')
       .select('DATE(order.createdAt)', 'date')
-      .addSelect('SUM(order.total)',   'revenue')
+      // Produits après remise, hors frais de livraison (jamais pour le vendeur)
+      .addSelect('SUM(order.subtotal - order.rabais)', 'revenue')
       .addSelect('COUNT(order.id)',    'orderCount')
       .where('order.vendorId = :vendorId', { vendorId: vendor.id })
       .andWhere('order.createdAt BETWEEN :start AND :end', {

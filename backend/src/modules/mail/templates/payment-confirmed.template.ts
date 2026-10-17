@@ -20,7 +20,7 @@ export const paymentConfirmedTemplate = (data: PaymentConfirmedData): string => 
         <td align="right" style="padding:16px 0 0;font-size:19px;font-weight:800;color:#FF6B00;">${Number(data.montant).toLocaleString('fr-FR')} FCFA</td>
       </tr>
     </table>
-    <p style="margin:22px 0 8px;font-size:14px;color:#6B6B72;line-height:1.6;text-align:center;">Votre commande est maintenant en préparation.</p>`;
+    <p style="margin:22px 0 8px;font-size:14px;color:#6B6B72;line-height:1.6;text-align:center;">Votre commande est en attente de confirmation par le vendeur. Vous serez prévenu(e) dès qu'il l'aura confirmée.</p>`;
 
   return renderEmailLayout({
     category: 'commande',

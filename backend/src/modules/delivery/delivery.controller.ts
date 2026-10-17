@@ -34,6 +34,7 @@ import { RolesGuard }                    from '../auth/guards/roles.guard';
 import { Roles }                         from '../auth/decorators/roles.decorator';
 import { Role }                          from '../../common/enums/role.enum';
 import { clampLimit, clampPage } from '../../common/utils/pagination.util';
+import { VendorActiveGuard }             from '../../common/guards/vendor-active.guard';
 
 const getIp   = (req: Request) =>
   (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim()
@@ -63,6 +64,7 @@ export class DeliveryController {
   }
 
   @ApiOperation({ summary: 'Affecter un livreur à une livraison' })
+  @UseGuards(VendorActiveGuard)
   @Patch(':id/assign')
   @HttpCode(HttpStatus.OK)
   assignAgent(
@@ -79,6 +81,7 @@ export class DeliveryController {
   }
 
   @ApiOperation({ summary: 'Cas A — démarrer la livraison (actif seulement après la preuve de ramassage du livreur)' })
+  @UseGuards(VendorActiveGuard)
   @Post(':id/start-transit')
   @HttpCode(HttpStatus.OK)
   startTransit(
@@ -145,7 +148,7 @@ export class DeliveryController {
     );
   }
 
-  @ApiOperation({ summary: 'Cas A — preuve de remise finale au client (scan QR + GPS + signature)' })
+  @ApiOperation({ summary: 'Cas A — preuve de remise finale au client (code de remise du client saisi / scanné + GPS + signature)' })
   @Post(':id/handoff-proof')
   @HttpCode(HttpStatus.OK)
   submitHandoffProof(

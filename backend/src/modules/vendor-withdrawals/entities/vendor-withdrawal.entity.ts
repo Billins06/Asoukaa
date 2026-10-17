@@ -28,6 +28,14 @@ export enum VendorWithdrawalStatus {
 }
 
 @Index(['vendorId'])
+// Garde-fou anti double-demande : UNE SEULE demande « en attente » par vendeur.
+// Cet index existe déjà en base (migration 1790800000000-UniquePendingWithdrawal) ;
+// il est AUSSI déclaré ici, avec le même nom et la même condition partielle,
+// sinon DB_SYNCHRONIZE=true (dev) le supprimerait au démarrage.
+@Index('UQ_vendor_withdrawals_one_pending', ['vendorId'], {
+  unique: true,
+  where: `"status" = 'en attente'`,
+})
 @Index(['status'])
 @Index(['createdAt'])
 @Entity('vendor_withdrawals')

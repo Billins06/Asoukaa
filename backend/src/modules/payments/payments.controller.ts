@@ -23,6 +23,9 @@ import type { Request } from 'express';
 import { PaymentsService }    from './payments.service';
 import { InitiatePaymentDto } from './dto/initiate-payment.dto';
 import { RequestRefundDto }   from './dto/request-refund.dto';
+import { RejectRefundDto }    from './dto/reject-refund.dto';
+import { MarkRefundProcessedDto } from './dto/mark-refund-processed.dto';
+import { MarkPaymentReviewedDto } from './dto/mark-payment-reviewed.dto';
 import { PaymentStatus }      from './entities/payment.entity';
 import { RefundStatus }       from './entities/refund.entity';
 import { JwtAuthGuard }       from '../auth/guards/jwt-auth.guard';
@@ -126,6 +129,15 @@ export class PaymentsController {
     );
   }
 
+  @ApiOperation({ summary: 'Aperçu du remboursement d\'une commande (montant fixe ou libre)' })
+  @Get(['refund-preview/:orderId', 'refund-quote/:orderId'])
+  getRefundQuote(
+    @Req() req: Request,
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+  ) {
+    return this.paymentsService.getRefundQuote(getUser(req).id, orderId);
+  }
+
   @ApiOperation({ summary: 'Mes demandes de remboursement' })
   @ApiQuery({ name: 'page',  required: false })
   @ApiQuery({ name: 'limit', required: false })
@@ -166,16 +178,23 @@ export class PaymentsController {
   @ApiQuery({ name: 'status', required: false, enum: PaymentStatus })
   @ApiQuery({ name: 'page',   required: false })
   @ApiQuery({ name: 'limit',  required: false })
+  @ApiQuery({
+    name: 'toReview',
+    required: false,
+    description: 'true = seulement les paiements reçus mais non validés (stock / commande annulée)',
+  })
   @Get()
   getAllPayments(
     @Query('status') status?: PaymentStatus,
     @Query('page')   page?:   number,
     @Query('limit')  limit?:  number,
+    @Query('toReview') toReview?: string,
   ) {
     return this.paymentsService.getAllPayments(
       status,
       clampPage(page),
       clampLimit(limit, 20),
+      toReview === 'true',
     );
   }
 
@@ -223,12 +242,61 @@ export class PaymentsController {
   rejectRefund(
     @Param('id', ParseUUIDPipe) id: string,
     @Req() req: Request,
+    // Corps facultatif : { motif?: string } (nom envoyé par le site admin).
+    @Body() dto: RejectRefundDto,
   ) {
     return this.paymentsService.processRefund(
       id,
       getUser(req).id,
       'reject',
       getIp(req),
+      dto?.motif,
+    );
+  }
+
+  // Passe un remboursement « approuvé » à « traité » : l'argent a été rendu
+  // au client À LA MAIN. Aucun appel FeexPay, aucun montant modifié (la
+  // reprise sur les gains du vendeur a déjà eu lieu à l'approbation).
+  @ApiOperation({
+    summary: '[ADMIN] Marquer un remboursement approuvé comme traité (argent rendu à la main)',
+  })
+  @UseGuards(RolesGuard)
+  @Roles(Role.ADMIN)
+  @Patch('refunds/:id/processed')
+  @HttpCode(HttpStatus.OK)
+  markRefundProcessed(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Req() req: Request,
+    // Corps facultatif : { note?: string } (500 caractères maximum).
+    @Body() dto: MarkRefundProcessedDto,
+  ) {
+    return this.paymentsService.markRefundProcessed(
+      id,
+      getUser(req).id,
+      getIp(req),
+      dto?.note,
+    );
+  }
+
+  // Sort un « paiement à examiner » de la liste une fois le dossier traité.
+  @ApiOperation({
+    summary: '[ADMIN] Marquer un paiement reçu à examiner comme traité',
+  })
+  @UseGuards(RolesGuard)
+  @Roles(Role.ADMIN)
+  @Patch(':id/reviewed')
+  @HttpCode(HttpStatus.OK)
+  markPaymentReviewed(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Req() req: Request,
+    // Corps facultatif : { note?: string } (500 caractères maximum).
+    @Body() dto: MarkPaymentReviewedDto,
+  ) {
+    return this.paymentsService.markPaymentReviewed(
+      id,
+      getUser(req).id,
+      getIp(req),
+      dto?.note,
     );
   }
 }

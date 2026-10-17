@@ -24,6 +24,8 @@ export enum PaymentMethod {
   BANK         = 'bank',
 }
 
+// Boutiques par statut (liste admin, annuaire) — migration 1791810000000.
+@Index('IDX_vendor_profiles_status', ['status'])
 @Entity('vendor_profiles')
 export class VendorProfile {
 

@@ -13,6 +13,8 @@ import { Payment }                     from '../payments/entities/payment.entity
 import { Commission }                  from '../payments/entities/commission.entity';
 import { Review }                      from '../reviews/entities/review.entity';
 import { Delivery }                    from '../delivery/entities/delivery.entity';
+import { OrdersModule }                from '../orders/orders.module';
+import { AdminSidebarCountsController } from './admin-sidebar-counts.controller';
 
 @Module({
   imports: [
@@ -28,8 +30,10 @@ import { Delivery }                    from '../delivery/entities/delivery.entit
       Review,
       Delivery,
     ]),
+    // OrderConfirmationService (compteur « commandes à confirmer »)
+    OrdersModule,
   ],
-  controllers: [DashboardController],
+  controllers: [DashboardController, AdminSidebarCountsController],
   providers:   [DashboardService],
   exports:     [DashboardService],
 })

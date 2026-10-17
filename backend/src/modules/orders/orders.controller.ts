@@ -29,6 +29,8 @@ import { SubmitStorePickupProofDto } from './dto/submit-store-pickup-proof.dto';
 import { SubmitDispatchProofDto }    from './dto/submit-dispatch-proof.dto';
 import { SubmitReceptionProofDto }   from './dto/submit-reception-proof.dto';
 import { OpenDisputeDto }            from './dto/open-dispute.dto';
+import { AdminCloseDisputeDto }      from './dto/admin-close-dispute.dto';
+import { VendorActiveGuard }         from '../../common/guards/vendor-active.guard';
 import { OrderStatus }            from './entities/order.entity';
 import { JwtAuthGuard }           from '../auth/guards/jwt-auth.guard';
 import { RolesGuard }             from '../auth/guards/roles.guard';
@@ -137,6 +139,7 @@ export class OrdersController {
   }
 
   @ApiOperation({ summary: 'Initier une commande pour un client (vente téléphonique/boutique)' })
+  @UseGuards(VendorActiveGuard)
   @Post('vendor-initiated')
   @HttpCode(HttpStatus.CREATED)
   createVendorInitiated(
@@ -151,6 +154,7 @@ export class OrdersController {
   }
 
   @ApiOperation({ summary: 'Mettre à jour le statut d\'une commande' })
+  @UseGuards(VendorActiveGuard)
   @Patch(':id/status')
   @HttpCode(HttpStatus.OK)
   updateStatus(
@@ -167,7 +171,8 @@ export class OrdersController {
     );
   }
 
-  @ApiOperation({ summary: 'Cas B — preuve de retrait en boutique (scan du QR du client)' })
+  @ApiOperation({ summary: 'Cas B — preuve de retrait en boutique (saisie / scan du code de remise du client)' })
+  @UseGuards(VendorActiveGuard)
   @Post(':id/store-pickup-proof')
   @HttpCode(HttpStatus.OK)
   submitStorePickupProof(
@@ -184,6 +189,7 @@ export class OrdersController {
   }
 
   @ApiOperation({ summary: 'Cas C — preuve de remise au transporteur bus/taxi (photo + état)' })
+  @UseGuards(VendorActiveGuard)
   @Post(':id/dispatch-proof')
   @HttpCode(HttpStatus.OK)
   submitDispatchProof(
@@ -250,6 +256,7 @@ export class OrdersController {
   @ApiQuery({ name: 'status',   required: false, enum: OrderStatus })
   @ApiQuery({ name: 'vendorId', required: false })
   @ApiQuery({ name: 'userId',   required: false })
+  @ApiQuery({ name: 'disputeOuverte', required: false, description: 'true = seulement les commandes avec un litige ouvert' })
   @ApiQuery({ name: 'page',     required: false })
   @ApiQuery({ name: 'limit',    required: false })
   @Get()
@@ -257,6 +264,7 @@ export class OrdersController {
     @Query('status')   status?:   OrderStatus,
     @Query('vendorId') vendorId?: string,
     @Query('userId')   userId?:   string,
+    @Query('disputeOuverte') disputeOuverte?: string,
     @Query('page')     page?:     number,
     @Query('limit')    limit?:    number,
   ) {
@@ -264,6 +272,7 @@ export class OrdersController {
       status,
       vendorId,
       userId,
+      disputeOuverte: disputeOuverte === 'true',
       page:  clampPage(page),
       limit: clampLimit(limit, 20),
     });
@@ -285,6 +294,27 @@ export class OrdersController {
       dto,
       getIp(req),
       true, // isAdmin = true
+    );
+  }
+
+  @ApiOperation({
+    summary:
+      '[ADMIN] Clore un litige (livraison bus/taxi contestée) : rejete = reprend son cours, fonde = commande annulée',
+  })
+  @UseGuards(RolesGuard)
+  @Roles(Role.ADMIN)
+  @Patch(':id/admin-close-dispute')
+  @HttpCode(HttpStatus.OK)
+  adminCloseDispute(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Req() req: Request,
+    @Body() dto: AdminCloseDisputeDto,
+  ) {
+    return this.ordersService.closeDispute(
+      id,
+      getUser(req).id,
+      dto,
+      getIp(req),
     );
   }
 }

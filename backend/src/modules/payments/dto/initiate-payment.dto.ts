@@ -1,5 +1,6 @@
 import {
   IsEnum,
+  IsIn,
   IsNotEmpty,
   IsUUID,
   IsOptional,
@@ -32,14 +33,27 @@ export class InitiatePaymentDto {
   @IsUUID('4', { each: true, message: 'ID commande invalide dans orderIds' })
   orderIds?: string[];
 
-  @IsNotEmpty()
+  // ⚠️ Pour l'instant SEUL Mobile Money est géré de bout en bout (stock,
+  // commission, vendeur). `cash_on_delivery` et `card` restent dans l'enum
+  // PaymentMethod (des données existantes peuvent les contenir) mais ne sont
+  // plus acceptés EN ENTRÉE.
+  @IsNotEmpty({ message: 'La méthode de paiement est obligatoire' })
   @IsEnum(PaymentMethod, { message: 'Méthode de paiement invalide' })
+  @IsIn([PaymentMethod.MOBILE_MONEY], {
+    message:
+      'Seul le paiement par Mobile Money (MTN ou Moov) est disponible pour le moment. '
+      + 'Le paiement à la livraison et par carte ne sont pas encore ouverts.',
+  })
   method: PaymentMethod;
 
   // Opérateur obligatoire si Mobile Money
   @ValidateIf(o => o.method === PaymentMethod.MOBILE_MONEY)
   @IsNotEmpty({ message: 'L\'opérateur est obligatoire pour Mobile Money' })
-  @IsEnum(PaymentOperator)
+  @IsEnum(PaymentOperator, { message: 'Opérateur invalide' })
+  @IsIn([PaymentOperator.MTN, PaymentOperator.MOOV], {
+    message:
+      'Opérateur non pris en charge : seuls MTN et Moov sont disponibles pour le moment.',
+  })
   operator?: PaymentOperator;
 
   // Numéro de téléphone pour Mobile Money

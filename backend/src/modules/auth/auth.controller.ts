@@ -18,6 +18,7 @@ import type { Request } from 'express';
 
 import { AuthService }           from './auth.service';
 import { RegisterDto }           from './dto/register.dto';
+import { RefreshTokenDto }       from './dto/refresh-token.dto';
 import { LoginDto }              from './dto/login.dto';
 import { VerifyOtpDto }          from './dto/verify-otp.dto';
 import { ForgotPasswordDto }     from './dto/forgot-password.dto';
@@ -45,6 +46,10 @@ import { clampLimit, clampPage } from '../../common/utils/pagination.util';
 const AUTH_THROTTLE = { default: { limit: 5, ttl: 60_000 } };
 const OTP_THROTTLE = { default: { limit: 5, ttl: 60_000 } };
 const RESEND_THROTTLE = { default: { limit: 3, ttl: 300_000 } };
+// Renouvellement de session : l'appli l'appelle au plus une fois par
+// expiration de jeton d'accès (+ une éventuelle relance) ; 20/min par IP
+// laisse de la marge derrière un même réseau tout en bloquant le martelage.
+const REFRESH_THROTTLE = { default: { limit: 20, ttl: 60_000 } };
 
 // Helper pour récupérer l'IP de la requête
 const getIp = (req: Request): string =>
@@ -93,6 +98,14 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   login(@Body() dto: LoginDto, @Req() req: Request) {
     return this.authService.login(dto, getIp(req));
+  }
+
+  @ApiOperation({ summary: 'Renouveler la session (jeton de rafraîchissement)' })
+  @Throttle(REFRESH_THROTTLE)
+  @Post('refresh')
+  @HttpCode(HttpStatus.OK)
+  refresh(@Body() dto: RefreshTokenDto) {
+    return this.authService.refresh(dto);
   }
 
   @ApiOperation({ summary: 'Mot de passe oublié' })

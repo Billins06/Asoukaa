@@ -23,6 +23,7 @@ import { UploadModule }     from '../upload/upload.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { AdminAccount }        from '../auth/entities/admin-account.entity';
 import { OrderConfirmationService }         from './order-confirmation.service';
+import { UnpaidOrdersService }              from './unpaid-orders.service';
 import { AdminOrderConfirmationController } from './admin-order-confirmation.controller';
 
 @Module({
@@ -50,7 +51,7 @@ import { AdminOrderConfirmationController } from './admin-order-confirmation.con
     NotificationsModule,
   ],
   controllers: [OrdersController, AdminOrderConfirmationController],
-  providers:   [OrdersService, OrderConfirmationService],
-  exports:     [OrdersService, TypeOrmModule],
+  providers:   [OrdersService, OrderConfirmationService, UnpaidOrdersService],
+  exports:     [OrdersService, OrderConfirmationService, TypeOrmModule],
 })
 export class OrdersModule {}

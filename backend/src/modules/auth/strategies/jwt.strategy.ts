@@ -6,11 +6,14 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { UsersService } from '../../users/users.service';
 import { AdminAccount } from '../entities/admin-account.entity';
+import { TokenService } from '../../../common/services/token.service';
 
 interface JwtPayload {
   sub: string;
   email: string;
   type?: 'user' | 'admin';
+  // Nature du jeton : 'access' (ou absent, anciens jetons) / 'refresh'.
+  typ?: 'access' | 'refresh';
   role?: string;
   // « issued at » (secondes) : ajouté automatiquement par jsonwebtoken
   iat?: number;
@@ -37,6 +40,13 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(payload: JwtPayload) {
+    // Un jeton de rafraîchissement ne donne JAMAIS accès à l'API : il ne sert
+    // qu'à POST /auth/refresh (même si, par erreur de configuration, les deux
+    // secrets étaient identiques).
+    if (payload.typ === 'refresh') {
+      throw new UnauthorizedException('Jeton invalide');
+    }
+
     // Token admin/superadmin
     if (payload.type === 'admin') {
       const admin = await this.adminRepo.findOne({ where: { id: payload.sub } });
@@ -67,16 +77,9 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     // d'e-mail, tous les jetons émis avant `tokensValidAfter` sont refusés
     // (le jeton garde sa validité cryptographique, c'est nous qui le
     // refusons). Un jeton sans `iat` est refusé par prudence.
-    if (user.tokensValidAfter) {
-      const issuedAtMs = (payload.iat ?? 0) * 1000;
-      // `iat` est arrondi à la seconde : on arrondit aussi la date de
-      // révocation, pour ne pas refuser un jeton émis dans la même seconde
-      // (nouvelle connexion juste après un déblocage, par exemple).
-      const validAfterMs =
-        Math.floor(user.tokensValidAfter.getTime() / 1000) * 1000;
-      if (issuedAtMs < validAfterMs) {
-        throw new UnauthorizedException('Session expirée, reconnectez-vous');
-      }
+    // (Comparaison arrondie à la seconde : voir TokenService.isRevoked.)
+    if (TokenService.isRevoked(payload.iat, user.tokensValidAfter)) {
+      throw new UnauthorizedException('Session expirée, reconnectez-vous');
     }
     return user;
   }

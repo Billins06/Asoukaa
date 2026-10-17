@@ -97,7 +97,7 @@ export class EmailChangeService {
     private readonly dataSource: DataSource,
     private readonly mailService: MailService,
     private readonly logService: ActivityLogService,
-    configService: ConfigService,
+    private readonly configService: ConfigService,
   ) {
     const port =
       configService.get<number>('APP_PORT') ??
@@ -619,6 +619,22 @@ export class EmailChangeService {
       ipAddress: this.cleanIp(ip),
     });
 
+    // Prévenir l'ÉQUIPE (best-effort, jamais bloquant) : les admins n'ont pas
+    // de notification dédiée, l'e-mail à l'adresse de support (la même que
+    // pour les tickets) est le seul signal actif. Adresses masquées.
+    try {
+      await this.mailService.sendSecurityAlertToTeam(this.supportTeamEmail(), {
+        userId:         result.userId,
+        prenom:         result.prenom,
+        outcome:        result.outcome,
+        maskedOldEmail: maskEmail(result.oldEmail),
+        maskedNewEmail: maskEmail(result.newEmail),
+        dateLabel:      formatDateFr(new Date()),
+      });
+    } catch (error) {
+      this.logger.error(`Mail d'alerte à l'équipe non envoyé : ${error?.message}`);
+    }
+
     // Mails uniquement si l'adresse d'origine est bien rétablie : sinon elle
     // appartient désormais à un autre compte et l'adresse « nouvelle » est
     // encore celle du compte — on ne dit rien à personne par e-mail.
@@ -769,6 +785,15 @@ export class EmailChangeService {
   }
 
   // ─── Utilitaires ───────────────────────────────────────────────────────
+
+  // Même règle que SupportTicketsNotifier : SUPPORT_TEAM_EMAIL s'il est
+  // valide, sinon contact@asoukaa.com.
+  private supportTeamEmail(): string {
+    const configured = (this.configService.get<string>('SUPPORT_TEAM_EMAIL') ?? '').trim();
+    return /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(configured)
+      ? configured
+      : 'contact@asoukaa.com';
+  }
 
   private isRevertable(row: EmailChange): boolean {
     return (

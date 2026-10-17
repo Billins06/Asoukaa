@@ -1,24 +1,40 @@
 import {
   Injectable,
+  Logger,
   NotFoundException,
   BadRequestException,
+  ForbiddenException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, FindOptionsWhere, FindManyOptions } from 'typeorm';
+import {
+  Repository,
+  FindOptionsWhere,
+  FindManyOptions,
+  DataSource,
+  EntityManager,
+} from 'typeorm';
 import {
   VendorWithdrawal,
   VendorWithdrawalStatus,
 } from './entities/vendor-withdrawal.entity';
-import { VendorProfile } from '../users/entities/vendor-profile.entity';
+import {
+  VendorProfile,
+  VendorStatus,
+  PaymentMethod as VendorPaymentMethod,
+} from '../users/entities/vendor-profile.entity';
+import { User } from '../users/entities/user.entity';
 import { Order, OrderStatus } from '../orders/entities/order.entity';
 import {
   Commission,
   CommissionStatus,
 } from '../payments/entities/commission.entity';
+import { VendorEarningAdjustment } from '../payments/entities/vendor-earning-adjustment.entity';
 import { CreateWithdrawalDto } from './dto/create-withdrawal.dto';
 import { MarkWithdrawalPaidDto } from './dto/mark-withdrawal-paid.dto';
 import { RejectWithdrawalDto } from './dto/reject-withdrawal.dto';
 import { ActivityLogService } from '../../common/services/activity-log.service';
+import { EncryptionService } from '../../common/services/encryption.service';
+import { MailService } from '../mail/mail.service';
 import {
   ActorType,
   LogAction,
@@ -42,6 +58,18 @@ export interface VendorBalance {
   soldeDisponible: number; // gainsBruts - totalPaye - totalEnAttente
   minWithdrawalAmount: number; // quota minimum fixe par l'admin (0 = aucun)
   aUneDemandeEnAttente: boolean;
+  // ── Reprises liées aux remboursements clients (ajoutés, rien de renommé) ──
+  // Total repris sur les gains du vendeur suite à des remboursements clients
+  // approuvés (voir PaymentsService.processRefund / vendor_earning_adjustments).
+  reprisesRemboursements: number;
+  // Dette envers la plateforme (>= 0) : positive quand les reprises dépassent
+  // ce que le vendeur avait encore en caisse (il avait déjà retiré l'argent).
+  // soldeDisponible reste TOUJOURS >= 0 ; la dette est exposée à part et
+  // se rembourse toute seule sur les prochains gains. Tant qu'elle est > 0,
+  // aucun nouveau retrait n'est possible.
+  dette: number;
+  // Phrase française prête à afficher (null quand dette = 0).
+  messageDette: string | null;
 }
 
 // Meme esprit que DeliveryEarningsService (delivery-earnings/) cote livreur :
@@ -53,6 +81,8 @@ export interface VendorBalance {
 // getBalance() ci-dessous pour la formule exacte.
 @Injectable()
 export class VendorWithdrawalsService {
+  private readonly logger = new Logger(VendorWithdrawalsService.name);
+
   constructor(
     @InjectRepository(VendorWithdrawal)
     private withdrawalRepo: Repository<VendorWithdrawal>,
@@ -63,7 +93,12 @@ export class VendorWithdrawalsService {
 
     @InjectRepository(Order)
     private orderRepo: Repository<Order>,
+    @InjectRepository(VendorEarningAdjustment)
+    private readonly adjustmentRepo: Repository<VendorEarningAdjustment>,
     private logService: ActivityLogService,
+    private readonly dataSource: DataSource,
+    private readonly encryptionService: EncryptionService,
+    private readonly mailService: MailService,
   ) {}
 
   // ─────────────────────────────────────────────────────
@@ -107,7 +142,36 @@ export class VendorWithdrawalsService {
     return this.computeBalance(vendor);
   }
 
-  private async computeBalance(vendor: VendorProfile): Promise<VendorBalance> {
+  // Même calcul à partir de l'id de la FICHE vendeur (utilisé par
+  // PaymentsService après un remboursement, pour savoir si le vendeur est
+  // en dette). Renvoie null si la fiche n'existe pas.
+  async getBalanceByVendorId(
+    vendorId: string,
+    manager?: EntityManager,
+  ): Promise<VendorBalance | null> {
+    const vendor = manager
+      ? await manager.findOne(VendorProfile, { where: { id: vendorId } })
+      : await this.vendorRepo.findOne({ where: { id: vendorId } });
+    if (!vendor) return null;
+    return this.computeBalance(vendor, manager);
+  }
+
+  // `manager` : à passer quand le calcul se fait DANS une transaction (création
+  // d'une demande de retrait, sous verrou) pour lire avec la même connexion.
+  private async computeBalance(
+    vendor: VendorProfile,
+    manager?: EntityManager,
+  ): Promise<VendorBalance> {
+    const commissionRepo = manager
+      ? manager.getRepository(Commission)
+      : this.commissionRepo;
+    const withdrawalRepo = manager
+      ? manager.getRepository(VendorWithdrawal)
+      : this.withdrawalRepo;
+    const adjustmentRepo = manager
+      ? manager.getRepository(VendorEarningAdjustment)
+      : this.adjustmentRepo;
+
     // ⚠️ SOURCE DE VERITE DES GAINS : la table `commissions`, PAS
     // `orders.total - orders.montantCommission`.
     //
@@ -120,10 +184,11 @@ export class VendorWithdrawalsService {
     // promettre au vendeur 100 % du montant de la commande.
     //
     // C'est aussi la source utilisee par VendorsService.getMyEarnings
-    // (ecran profil vendeur) : les deux ecrans affichent enfin le meme
-    // chiffre.
-    const [brutRow, reverseRow, paidRow, pendingRow, pendingCount] = await Promise.all([
-      this.commissionRepo
+    // (ecran profil vendeur), qui lui DELEGUE soldeDisponible, dette,
+    // messageDette et reprisesRemboursements via getBalance() : les deux
+    // ecrans affichent le meme chiffre.
+    const [brutRow, reverseRow, paidRow, pendingRow, pendingCount, repriseRow] = await Promise.all([
+      commissionRepo
         .createQueryBuilder('c')
         .innerJoin('c.order', 'o')
         .select('COALESCE(SUM(c.commissionVendor), 0)', 'sum')
@@ -135,7 +200,7 @@ export class VendorWithdrawalsService {
       // Sans cette soustraction, un vendeur deja paye par ce circuit
       // pourrait redemander le meme argent en retrait : on paierait deux
       // fois. Tant que les deux circuits coexistent, on retranche les deux.
-      this.commissionRepo
+      commissionRepo
         .createQueryBuilder('c')
         .innerJoin('c.order', 'o')
         .select('COALESCE(SUM(c.commissionVendor), 0)', 'sum')
@@ -143,7 +208,7 @@ export class VendorWithdrawalsService {
         .andWhere('o.status = :status', { status: OrderStatus.DELIVERED })
         .andWhere('c.status = :cstatus', { cstatus: CommissionStatus.PAID })
         .getRawOne<{ sum: string }>(),
-      this.withdrawalRepo
+      withdrawalRepo
         .createQueryBuilder('w')
         .select('COALESCE(SUM(w.montant), 0)', 'sum')
         .where('w.vendorId = :vendorId', { vendorId: vendor.id })
@@ -151,7 +216,7 @@ export class VendorWithdrawalsService {
           status: VendorWithdrawalStatus.PAID,
         })
         .getRawOne<{ sum: string }>(),
-      this.withdrawalRepo
+      withdrawalRepo
         .createQueryBuilder('w')
         .select('COALESCE(SUM(w.montant), 0)', 'sum')
         .where('w.vendorId = :vendorId', { vendorId: vendor.id })
@@ -159,12 +224,20 @@ export class VendorWithdrawalsService {
           status: VendorWithdrawalStatus.PENDING,
         })
         .getRawOne<{ sum: string }>(),
-      this.withdrawalRepo.count({
+      withdrawalRepo.count({
         where: {
           vendorId: vendor.id,
           status: VendorWithdrawalStatus.PENDING,
         },
       }),
+      // Reprises sur gains suite à un remboursement client approuvé : une
+      // ligne par remboursement dans vendor_earning_adjustments (0 pour une
+      // commande qui n'avait jamais été livrée : rien à reprendre).
+      adjustmentRepo
+        .createQueryBuilder('a')
+        .select('COALESCE(SUM(a.montantVendeur), 0)', 'sum')
+        .where('a.vendorId = :vendorId', { vendorId: vendor.id })
+        .getRawOne<{ sum: string }>(),
     ]);
 
     const gainsBruts     = this.round2(Number(brutRow?.sum ?? 0));
@@ -174,12 +247,20 @@ export class VendorWithdrawalsService {
     );
     const totalEnAttente = this.round2(Number(pendingRow?.sum ?? 0));
 
-    // Jamais de solde negatif affiche au vendeur : si une commande livrée
-    // est annulée a posteriori apres un virement deja fait, le solde est
-    // borne a 0 (la dette eventuelle se regle hors application).
-    const soldeDisponible = this.round2(
-      Math.max(0, gainsBruts - totalPaye - totalEnAttente),
+    const reprises = this.round2(Number(repriseRow?.sum ?? 0));
+
+    // Valeur INTERNE, qui peut etre negative : gains - reprises - deja verse
+    // - en attente. Negative = le vendeur a deja retire de l'argent qui a
+    // ensuite ete rendu au client (une « dette » envers la plateforme).
+    const soldeInterne = this.round2(
+      gainsBruts - reprises - totalPaye - totalEnAttente,
     );
+
+    // Jamais de solde negatif brut expose au vendeur : `soldeDisponible` est
+    // borne a 0 et la dette est donnee a part (`dette` >= 0, avec un message
+    // explicatif). Elle diminue toute seule quand de nouveaux gains arrivent.
+    const soldeDisponible = this.round2(Math.max(0, soldeInterne));
+    const dette           = this.round2(Math.max(0, -soldeInterne));
 
     return {
       gainsBruts,
@@ -190,7 +271,22 @@ export class VendorWithdrawalsService {
         Number(vendor.minWithdrawalAmount ?? 0),
       ),
       aUneDemandeEnAttente: pendingCount > 0,
+      reprisesRemboursements: reprises,
+      dette,
+      messageDette: dette > 0 ? this.debtMessage(dette) : null,
     };
+  }
+
+  private debtMessage(dette: number): string {
+    const montant = dette
+      .toLocaleString('fr-FR', { maximumFractionDigits: 2 })
+      .replace(/[\u202f\u00a0]/g, ' ');
+    return (
+      `Un remboursement client a été déduit de vos gains alors que vous aviez `
+      + `déjà retiré cet argent : vous avez une dette de ${montant} FCFA envers `
+      + `la plateforme. Elle sera déduite automatiquement de vos prochains `
+      + `gains. Les retraits sont suspendus tant qu'elle n'est pas couverte.`
+    );
   }
 
   private round2(value: number): number {
@@ -204,65 +300,239 @@ export class VendorWithdrawalsService {
   async createWithdrawal(
     userId: string,
     dto: CreateWithdrawalDto,
+    ipAddress?: string,
   ) {
-    const vendor  = await this.getVendorByUserId(userId);
-    const balance = await this.computeBalance(vendor);
-
     const montant = this.round2(Number(dto.montant));
 
     if (!Number.isFinite(montant) || montant <= 0) {
       throw new BadRequestException('Le montant doit être supérieur à 0');
     }
 
-    // Une seule demande en attente a la fois : plus simple a suivre pour
-    // l'admin, et ca evite les doubles demandes sur le meme solde.
-    if (balance.aUneDemandeEnAttente) {
-      throw new BadRequestException(
-        'Vous avez déjà une demande de retrait en attente. '
-        + 'Attendez son traitement avant d\'en créer une nouvelle.',
-      );
+    const paymentMethod = dto.paymentMethod.trim();
+    const mobileNumber  = dto.mobileNumber.trim();
+
+    const vendorLookup = await this.getVendorByUserId(userId);
+
+    // ⚠️ Tout se passe dans UNE transaction, sous verrou sur la fiche vendeur :
+    // deux demandes simultanées (double clic, renvoi réseau) font la queue ;
+    // la seconde relit le solde et voit la demande de la première.
+    // Avant : lecture du solde puis écriture sans verrou -> deux demandes
+    // pouvaient être créées pour le même argent.
+    let created: {
+      withdrawal: VendorWithdrawal;
+      vendor: VendorProfile;
+      previousNumber: string | null;
+    };
+    try {
+      created = await this.dataSource.transaction(async (manager) => {
+        // Verrou de ligne (SELECT ... FOR UPDATE) sur la fiche vendeur.
+        await manager.query(
+          'SELECT "id" FROM "vendor_profiles" WHERE "id" = $1 FOR UPDATE',
+          [vendorLookup.id],
+        );
+
+        // Relire la fiche SOUS verrou (statut, minimum, coordonnées à jour).
+        const vendor = await manager.findOne(VendorProfile, {
+          where: { id: vendorLookup.id },
+        });
+        if (!vendor) {
+          throw new NotFoundException('Aucun profil vendeur trouvé.');
+        }
+
+        // Seul un vendeur approuvé peut retirer de l'argent (un vendeur
+        // bloqué, rejeté ou en attente de validation ne le peut pas).
+        if (vendor.status !== VendorStatus.APPROVED) {
+          throw new ForbiddenException(
+            'Votre boutique doit être approuvée pour demander un retrait.',
+          );
+        }
+
+        // Le solde disponible déduit déjà les retraits payés ET les demandes
+        // en attente (voir computeBalance).
+        const balance = await this.computeBalance(vendor, manager);
+
+        // Dette suite a un remboursement client : aucun nouveau retrait tant
+        // qu'elle n'est pas couverte par de nouveaux gains.
+        if (balance.dette > 0) {
+          throw new BadRequestException(
+            balance.messageDette ?? 'Retrait impossible : vous avez une dette.',
+          );
+        }
+
+        // Une seule demande en attente a la fois : plus simple a suivre pour
+        // l'admin, et ca evite les doubles demandes sur le meme solde.
+        if (balance.aUneDemandeEnAttente) {
+          throw new BadRequestException(this.PENDING_EXISTS_MESSAGE);
+        }
+
+        // Quota minimum propre a CE vendeur (0 = aucun minimum)
+        if (
+          balance.minWithdrawalAmount > 0
+          && montant < balance.minWithdrawalAmount
+        ) {
+          throw new BadRequestException(
+            `Le montant minimum de retrait fixé pour votre boutique est de `
+            + `${balance.minWithdrawalAmount} FCFA.`,
+          );
+        }
+
+        if (montant > balance.soldeDisponible) {
+          throw new BadRequestException(
+            `Montant supérieur à votre solde disponible `
+            + `(${balance.soldeDisponible} FCFA).`,
+          );
+        }
+
+        // Numéro du dernier retrait (avant celui-ci), pour l'alerte de changement.
+        const last = await manager.findOne(VendorWithdrawal, {
+          where: { vendorId: vendor.id },
+          order: { createdAt: 'DESC' },
+        });
+
+        const withdrawal = manager.create(VendorWithdrawal, {
+          vendorId:      vendor.id,
+          montant,
+          status:        VendorWithdrawalStatus.PENDING,
+          paymentMethod,
+          mobileNumber,
+          noteAdmin:     null,
+          paidAt:        null,
+          processedById: null,
+        });
+        const saved = await manager.save(withdrawal);
+
+        return {
+          withdrawal: saved,
+          vendor,
+          previousNumber: last?.mobileNumber ?? null,
+        };
+      });
+    } catch (err: any) {
+      // Filet de sécurité : l'index unique « une seule demande en attente »
+      // (UQ_vendor_withdrawals_one_pending) a refusé l'insertion.
+      if (
+        err?.code === '23505'
+        || err?.driverError?.code === '23505'
+      ) {
+        throw new BadRequestException(this.PENDING_EXISTS_MESSAGE);
+      }
+      throw err;
     }
 
-    // Quota minimum propre a CE vendeur (0 = aucun minimum)
+    // Alerte « numéro inhabituel » : jamais bloquante, jamais attendue.
+    void this.alertIfUnusualNumber({
+      userId,
+      vendor:         created.vendor,
+      withdrawal:     created.withdrawal,
+      previousNumber: created.previousNumber,
+      ipAddress,
+    }).catch((e) =>
+      this.logger.error(`Alerte numéro de retrait impossible : ${e?.message}`),
+    );
+
+    // Pas de ligne ActivityLog "demande de retrait" : la ligne
+    // vendor_withdrawals porte vendorId + createdAt. Seules les DECISIONS
+    // admin et les ALERTES (numéro inhabituel) sont loguées.
+    return {
+      demande: created.withdrawal,
+      solde:   await this.computeBalance(created.vendor),
+    };
+  }
+
+  private readonly PENDING_EXISTS_MESSAGE =
+    'Vous avez déjà une demande de retrait en attente. '
+    + 'Attendez son traitement avant d\'en créer une nouvelle.';
+
+  // ─────────────────────────────────────────────────────
+  // ALERTE : retrait vers un numéro Mobile Money inhabituel
+  // ─────────────────────────────────────────────────────
+  // Protège contre le vol de compte (le numéro est libre à chaque demande :
+  // on ne bloque PAS le flux, on prévient). Un numéro est « inhabituel » s'il
+  // diffère du numéro du dernier retrait OU de celui enregistré sur la fiche
+  // (quand ils existent). Action : ligne dans le journal d'activité + e-mail
+  // d'information au vendeur, numéro masqué sauf ses 4 derniers chiffres.
+  private async alertIfUnusualNumber(args: {
+    userId: string;
+    vendor: VendorProfile;
+    withdrawal: VendorWithdrawal;
+    previousNumber: string | null;
+    ipAddress?: string;
+  }): Promise<void> {
+    const { userId, vendor, withdrawal, previousNumber, ipAddress } = args;
+
+    let profileNumber: string | null = null;
     if (
-      balance.minWithdrawalAmount > 0
-      && montant < balance.minWithdrawalAmount
+      vendor.paymentMethod === VendorPaymentMethod.MOBILE_MONEY
+      && vendor.paymentDetails
     ) {
-      throw new BadRequestException(
-        `Le montant minimum de retrait fixé pour votre boutique est de `
-        + `${balance.minWithdrawalAmount} FCFA.`,
-      );
+      try {
+        const details = this.encryptionService.decrypt(vendor.paymentDetails);
+        if (details?.number) profileNumber = String(details.number);
+      } catch {
+        profileNumber = null; // fiche illisible : on compare seulement au dernier retrait
+      }
     }
 
-    if (montant > balance.soldeDisponible) {
-      throw new BadRequestException(
-        `Montant supérieur à votre solde disponible `
-        + `(${balance.soldeDisponible} FCFA).`,
-      );
-    }
+    const newKey = this.phoneKey(withdrawal.mobileNumber);
+    const differsFromLast =
+      !!previousNumber && this.phoneKey(previousNumber) !== newKey;
+    const differsFromProfile =
+      !!profileNumber && this.phoneKey(profileNumber) !== newKey;
 
-    const withdrawal = this.withdrawalRepo.create({
-      vendorId:      vendor.id,
-      montant,
-      status:        VendorWithdrawalStatus.PENDING,
-      paymentMethod: dto.paymentMethod.trim(),
-      mobileNumber:  dto.mobileNumber.trim(),
-      noteAdmin:     null,
-      paidAt:        null,
-      processedById: null,
+    if (!differsFromLast && !differsFromProfile) return;
+
+    const maskedNew = this.maskPhone(withdrawal.mobileNumber);
+
+    await this.logService.log({
+      actorId:    userId,
+      actorType:  ActorType.VENDOR,
+      action:     LogAction.VENDOR_WITHDRAWAL_NUMBER_ALERT,
+      entityType: 'VendorWithdrawal',
+      entityId:   withdrawal.id,
+      oldValue:   {
+        numeroDernierRetrait: previousNumber ? this.maskPhone(previousNumber) : null,
+        numeroFiche:          profileNumber ? this.maskPhone(profileNumber) : null,
+      },
+      newValue:   {
+        nouveauNumero: maskedNew,
+        operateur:     withdrawal.paymentMethod,
+        montant:       Number(withdrawal.montant),
+        differeDuDernierRetrait: differsFromLast,
+        differeDeLaFiche:        differsFromProfile,
+      },
+      ipAddress,
     });
 
-    // Pas de ligne ActivityLog a la creation : aucune valeur de LogAction ne
-    // decrit honnetement "demande de retrait vendeur" (y en ajouter une
-    // imposerait un ALTER TYPE sur l'enum Postgres de activity_logs). La
-    // trace existe de toute facon : la ligne vendor_withdrawals porte
-    // vendorId + createdAt. Seules les DECISIONS admin sont loguees.
-    const saved = await this.withdrawalRepo.save(withdrawal);
+    const user = await this.dataSource
+      .getRepository(User)
+      .findOne({ where: { id: userId }, select: ['id', 'email', 'prenom'] });
+    if (!user?.email) return;
 
-    return {
-      demande: saved,
-      solde:   await this.computeBalance(vendor),
-    };
+    await this.mailService.sendWithdrawalNumberAlert(user.email, {
+      prenom:           user.prenom ?? '',
+      montant:          Number(withdrawal.montant),
+      operateur:        withdrawal.paymentMethod,
+      maskedNumber:     maskedNew,
+      requestedAtLabel: new Date().toLocaleString('fr-FR', {
+        timeZone: 'Africa/Porto-Novo',
+        dateStyle: 'long',
+        timeStyle: 'short',
+      }),
+    });
+  }
+
+  // Clé de comparaison de numéros : chiffres seulement, 8 derniers chiffres
+  // (« +229 01 96 78 20 26 », « 0196782026 » et « 96782026 » = même numéro).
+  private phoneKey(value: string): string {
+    const digits = String(value ?? '').replace(/\D/g, '');
+    return digits.length > 8 ? digits.slice(-8) : digits;
+  }
+
+  // Masque tout sauf les 4 derniers chiffres : « 0196782026 » -> « ******2026 ».
+  private maskPhone(value: string): string {
+    const digits = String(value ?? '').replace(/\D/g, '');
+    if (digits.length <= 4) return '****';
+    return '*'.repeat(digits.length - 4) + digits.slice(-4);
   }
 
   // ─────────────────────────────────────────────────────
@@ -421,7 +691,21 @@ export class VendorWithdrawalsService {
       ipAddress,
     });
 
-    return stripSecrets(updated);
+    // Information pour l'admin : si, une fois ce retrait versé, les reprises
+    // pour remboursements clients dépassent le solde du vendeur, il est en
+    // dette (champ AJOUTÉ à la réponse ; 0 dans le cas normal).
+    let detteVendeur = 0;
+    try {
+      const vendorForBalance = withdrawal.vendor
+        ?? (await this.vendorRepo.findOne({ where: { id: withdrawal.vendorId } }));
+      if (vendorForBalance) {
+        detteVendeur = (await this.computeBalance(vendorForBalance)).dette;
+      }
+    } catch (e: any) {
+      this.logger.warn(`Calcul de dette impossible après paiement : ${e?.message}`);
+    }
+
+    return { ...stripSecrets(updated), detteVendeur };
   }
 
   // ─────────────────────────────────────────────────────

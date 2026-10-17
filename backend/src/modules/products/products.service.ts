@@ -24,6 +24,7 @@ import { UpdateVariantDto }   from './dto/update-variant.dto';
 import { CreateTierPriceDto } from './dto/create-tier-price.dto';
 
 import { ActivityLogService } from '../../common/services/activity-log.service';
+import { UploadService, UploadType } from '../upload/upload.service';
 import {
   ActorType,
   LogAction,
@@ -55,6 +56,9 @@ export class ProductsService {
     private readonly vendorRepo: Repository<VendorProfile>,
 
     private readonly logService: ActivityLogService,
+
+    // Contrôle « l'URL de l'image vient bien de notre stockage ».
+    private readonly uploadService: UploadService,
   ) {}
 
   // ─────────────────────────────────────────────────────
@@ -599,6 +603,12 @@ export class ProductsService {
 
     await this.checkOwnership(product, userId);
 
+    // Image de variante : doit être un fichier de NOTRE stockage (type
+    // « products »), pas une URL quelconque.
+    if (dto.imageUrl) {
+      this.uploadService.assertIsOwnUploadUrl(dto.imageUrl, UploadType.PRODUCT);
+    }
+
     // Vérifier l'unicité du SKU
     const skuExists = await this.variantRepo.findOne({
       where: { sku: dto.sku },
@@ -646,6 +656,13 @@ export class ProductsService {
 
     if (!variant) throw new NotFoundException('Variante introuvable');
 
+    // Nouvelle image de variante : doit venir de notre stockage. Une valeur
+    // identique à celle déjà enregistrée n'est pas re-contrôlée (fiches
+    // existantes / données de départ non cassées).
+    if (dto.imageUrl && dto.imageUrl !== variant.imageUrl) {
+      this.uploadService.assertIsOwnUploadUrl(dto.imageUrl, UploadType.PRODUCT);
+    }
+
     // Vérifier l'unicité du SKU si changé
     if (dto.sku && dto.sku !== variant.sku) {
       const skuExists = await this.variantRepo.findOne({
@@ -676,6 +693,13 @@ export class ProductsService {
     if (!product) throw new NotFoundException('Produit introuvable');
 
     await this.checkOwnership(product, userId);
+
+    // L'image / la vidéo doit venir de NOTRE stockage (photos : type
+    // « products » ; vidéos : « product-videos »), jamais d'une URL libre.
+    this.uploadService.assertIsOwnUploadUrl(
+      imageUrl,
+      isVideo ? UploadType.PRODUCT_VIDEO : UploadType.PRODUCT,
+    );
 
     // Si isPrimary → retirer le primary des autres images
     if (isPrimary) {

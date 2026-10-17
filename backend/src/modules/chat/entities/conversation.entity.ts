@@ -8,6 +8,7 @@ import {
   CreateDateColumn,
   UpdateDateColumn,
   Unique,
+  Index,
 } from 'typeorm';
 import { User } from '../../users/entities/user.entity';
 import { VendorProfile } from '../../users/entities/vendor-profile.entity';
@@ -18,6 +19,9 @@ import { Message } from './message.entity';
 // (comme sur WhatsApp avec un contact) : la contrainte ne porte plus
 // sur le produit, qui n'est qu'une référence affichée dans la discussion.
 @Unique(['clientId', 'vendorId'])
+// Liste des conversations côté vendeur (migration 1791200000000) — déclaré ici
+// pour que DB_SYNCHRONIZE=true ne le supprime pas.
+@Index('IDX_conversations_vendorId', ['vendorId'])
 @Entity('conversations')
 export class Conversation {
 

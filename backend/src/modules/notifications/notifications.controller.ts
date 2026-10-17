@@ -22,6 +22,7 @@ import type { Request } from 'express';
 
 import { NotificationsService }       from './notifications.service';
 import { MarkNotificationsReadDto }   from './dto/mark-read.dto';
+import { GetNotificationsQueryDto }   from './dto/get-notifications-query.dto';
 import { JwtAuthGuard }               from '../auth/guards/jwt-auth.guard';
 import { clampLimit, clampPage } from '../../common/utils/pagination.util';
 
@@ -38,18 +39,22 @@ export class NotificationsController {
   @ApiQuery({ name: 'unread', required: false, type: Boolean })
   @ApiQuery({ name: 'page',   required: false })
   @ApiQuery({ name: 'limit',  required: false })
+  @ApiQuery({
+    name: 'since',
+    required: false,
+    description: 'Date ISO 8601 : seulement les notifications créées strictement après',
+  })
   @Get()
   getMyNotifications(
     @Req() req: Request,
-    @Query('unread') unread?: string,
-    @Query('page')   page?:   number,
-    @Query('limit')  limit?:  number,
+    @Query() query: GetNotificationsQueryDto,
   ) {
     return this.notificationsService.getMyNotifications(
       getUser(req).id,
-      unread === 'true',
-      clampPage(page),
-      clampLimit(limit, 20),
+      query.unread === 'true',
+      clampPage(query.page),
+      clampLimit(query.limit, 20),
+      query.since ? new Date(query.since) : undefined,
     );
   }
 

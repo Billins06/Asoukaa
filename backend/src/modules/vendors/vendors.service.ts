@@ -15,6 +15,7 @@ import { VendorProfile, VendorStatus } from '../users/entities/vendor-profile.en
 import { UserRole, UserRoleEnum }      from '../users/entities/user-role.entity';
 import { User }                        from '../users/entities/user.entity';
 import { Commission, CommissionStatus } from '../payments/entities/commission.entity';
+import { VendorEarningAdjustment } from '../payments/entities/vendor-earning-adjustment.entity';
 import { Product, ProductStatus }       from '../products/entities/product.entity';
 import { Order, OrderStatus }           from '../orders/entities/order.entity';
 import { Review, ReviewStatus }         from '../reviews/entities/review.entity';
@@ -32,6 +33,8 @@ import { ReviewVendorDto, VendorReviewAction } from './dto/review-vendor.dto';
 
 import { ActivityLogService } from '../../common/services/activity-log.service';
 import { EncryptionService } from '../../common/services/encryption.service';
+import { UploadService, UploadType } from '../upload/upload.service';
+import { VendorWithdrawalsService } from '../vendor-withdrawals/vendor-withdrawals.service';
 import {
   ActorType,
   LogAction,
@@ -53,6 +56,10 @@ export class VendorsService {
 
     @InjectRepository(Commission)
     private readonly commissionRepo: Repository<Commission>,
+
+    // Reprises sur gains suite à un remboursement client (voir getMyEarnings).
+    @InjectRepository(VendorEarningAdjustment)
+    private readonly adjustmentRepo: Repository<VendorEarningAdjustment>,
 
     @InjectRepository(Product)
     private readonly productRepo: Repository<Product>,
@@ -76,6 +83,11 @@ export class VendorsService {
     // Règle de visibilité produit + résolution des sous-catégories pour
     // l'annuaire des boutiques (getDirectory).
     private readonly productsService: ProductsService,
+    // Rafraîchit les URL signées (expirantes) des documents privés pour l'admin.
+    private readonly uploadService: UploadService,
+    // Source de vérité du solde retirable / de la dette du vendeur (voir
+    // getMyEarnings) : on ne recalcule pas ces chiffres ici.
+    private readonly vendorWithdrawalsService: VendorWithdrawalsService,
   ) {}
 
   // ─────────────────────────────────────────────────────
@@ -226,6 +238,9 @@ export class VendorsService {
       }
     }
 
+    // 1 bis. Pièce d'identité / selfie : doivent provenir de notre stockage privé
+    this.assertOwnKycUrls(dto);
+
     // 2. Vérifier que le nom de boutique n'est pas déjà pris
     const nameExists = await this.vendorRepo.findOne({
       where: { shopName: dto.shopName },
@@ -291,6 +306,22 @@ export class VendorsService {
     };
   }
 
+  // Pièce d'identité / selfie : toute NOUVELLE valeur doit être une URL émise
+  // par notre propre route d'upload privée (types documents / selfies), pas une
+  // URL quelconque. Une valeur identique à celle déjà enregistrée n'est pas
+  // re-contrôlée (dossiers existants non cassés).
+  private assertOwnKycUrls(
+    dto:     { idDocumentUrl?: string; selfieUrl?: string },
+    current?: { idDocumentUrl?: string | null; selfieUrl?: string | null },
+  ): void {
+    if (dto.idDocumentUrl && dto.idDocumentUrl !== current?.idDocumentUrl) {
+      this.uploadService.assertIsOwnUploadUrl(dto.idDocumentUrl, UploadType.DOCUMENT);
+    }
+    if (dto.selfieUrl && dto.selfieUrl !== current?.selfieUrl) {
+      this.uploadService.assertIsOwnUploadUrl(dto.selfieUrl, UploadType.SELFIE);
+    }
+  }
+
   // ─────────────────────────────────────────────────────
   // RE-SOUMISSION APRÈS REFUS (méthode privée)
   // ─────────────────────────────────────────────────────
@@ -300,6 +331,9 @@ export class VendorsService {
     ip:       string,
     activity: { categoryIds: string[]; activityType: string },
   ) {
+    // Pièce d'identité / selfie : nouvelles valeurs issues de notre stockage privé
+    this.assertOwnKycUrls(dto, existing);
+
     // Vérifier que le nouveau nom de boutique
     // n'est pas déjà pris par quelqu'un d'autre
     if (dto.shopName !== existing.shopName) {
@@ -379,6 +413,8 @@ export class VendorsService {
         "Cette action n'est possible que pour un dossier en attente de validation"
       );
     }
+
+    this.assertOwnKycUrls(dto, vendor);
 
     if (dto.idDocumentUrl)     vendor.idDocumentUrl = dto.idDocumentUrl;
     if (dto.selfieUrl)         vendor.selfieUrl = dto.selfieUrl;
@@ -546,7 +582,7 @@ export class VendorsService {
       order:     { createdAt: 'DESC' },
     });
 
-    const pendingAmount = commissions
+    const pendingGross = commissions
       .filter((c) => c.status === CommissionStatus.PENDING)
       .reduce((sum, c) => sum + Number(c.commissionVendor), 0);
 
@@ -554,17 +590,57 @@ export class VendorsService {
       .filter((c) => c.status === CommissionStatus.PAID)
       .reduce((sum, c) => sum + Number(c.commissionVendor), 0);
 
+    // Reprises suite à un remboursement client approuvé (le client a été
+    // remboursé : la part du vendeur sur ces produits lui est reprise).
+    // Une reprise sur une commission DÉJÀ versée (statut « payé ») est
+    // retranchée du reste à recevoir : si cela ne suffit pas, le vendeur est
+    // en DETTE (jamais de solde négatif brut renvoyé : `dette` à part).
+    const adjustments = await this.adjustmentRepo.find({
+      where: { vendorId: vendor.id },
+    });
+    const repriseByCommission = new Map<string, number>();
+    let reprisesTotal = 0;
+    for (const a of adjustments) {
+      const amount = Number(a.montantVendeur);
+      reprisesTotal += amount;
+      if (a.commissionId) {
+        repriseByCommission.set(
+          a.commissionId,
+          (repriseByCommission.get(a.commissionId) ?? 0) + amount,
+        );
+      }
+    }
+    const round2 = (n: number) => Math.round(n * 100) / 100;
+    const soldeInterne    = round2(pendingGross - reprisesTotal);
+    const pendingAmount   = round2(Math.max(0, soldeInterne));
+
+    // Solde retirable, dette et reprises : DÉLÉGUÉS à VendorWithdrawalsService
+    // (source de vérité, la même que l'écran des retraits) pour que les deux
+    // écrans affichent le même chiffre.
+    const balance = await this.vendorWithdrawalsService.getBalance(userId);
+
     return {
-      soldeDisponible: pendingAmount,
+      soldeDisponible: balance.soldeDisponible,
       enAttente:       pendingAmount,
       totalRetire:     paidAmount,
-      historique: commissions.slice(0, 30).map((c) => ({
-        id:          c.id,
-        orderNumber: c.order?.orderNumber ?? '—',
-        montant:     Number(c.commissionVendor),
-        statut:      c.status,
-        date:        c.paidAt ?? c.createdAt,
-      })),
+      historique: commissions.slice(0, 30).map((c) => {
+        const reprise = repriseByCommission.get(c.id) ?? 0;
+        return {
+          id:          c.id,
+          orderNumber: c.order?.orderNumber ?? '—',
+          montant:     Number(c.commissionVendor),
+          // Champs AJOUTÉS : part reprise pour remboursement client, et
+          // montant restant après cette reprise.
+          reprise,
+          montantNet:  round2(Number(c.commissionVendor) - reprise),
+          statut:      c.status,
+          date:        c.paidAt ?? c.createdAt,
+        };
+      }),
+      // Champs AJOUTÉS.
+      reprisesRemboursements: balance.reprisesRemboursements,
+      dette:                  balance.dette,
+      messageDette:           balance.messageDette,
     };
   }
 
@@ -1070,6 +1146,15 @@ export class VendorsService {
 
     // ⚠️ Logo et bannière — UNIQUEMENT si status = APPROVED
     // Cette vérification est déjà faite ci-dessus donc on est safe
+    // Toute NOUVELLE valeur doit provenir de notre stockage (POST /upload/shop) ;
+    // une valeur identique à celle déjà enregistrée (ou une URL de seed) n'est
+    // pas re-contrôlée, pour ne rien casser d'existant.
+    if (dto.logoUrl && dto.logoUrl !== vendor.logoUrl) {
+      this.uploadService.assertIsOwnUploadUrl(dto.logoUrl, UploadType.SHOP);
+    }
+    if (dto.bannerUrl && dto.bannerUrl !== vendor.bannerUrl) {
+      this.uploadService.assertIsOwnUploadUrl(dto.bannerUrl, UploadType.SHOP);
+    }
     if (dto.logoUrl)   vendor.logoUrl   = dto.logoUrl;
     if (dto.bannerUrl) vendor.bannerUrl = dto.bannerUrl;
 
@@ -1215,6 +1300,11 @@ export class VendorsService {
 
     return {
       ...vendorSafe,
+      // Documents privés : URL fraîches (les URL signées Supabase expirent
+      // au bout de 7 jours). Photos d'échantillon = fichiers publics.
+      idDocumentUrl:     await this.uploadService.refreshPrivateUrl(vendor.idDocumentUrl),
+      selfieUrl:         await this.uploadService.refreshPrivateUrl(vendor.selfieUrl),
+      sampleProductUrls: vendor.sampleProductUrls ?? [],
       user: u
         ? {
             id:         u.id,
@@ -1497,6 +1587,11 @@ export class VendorsService {
         'vendor.categoryIds',
         'vendor.submittedAt',
         'vendor.submissionCount',
+        // Pièces à vérifier par l'admin (route réservée aux admins) : pièce
+        // d'identité, selfie, photos d'échantillon — pas de données bancaires.
+        'vendor.idDocumentUrl',
+        'vendor.selfieUrl',
+        'vendor.sampleProductUrls',
         'user.id',
         'user.prenom',
         'user.name',
@@ -1507,6 +1602,15 @@ export class VendorsService {
       .getMany();
 
     const pendingViews = await this.loadCategoryViews(pending, false);
-    return pending.map((v) => ({ ...v, categories: this.categoriesOf(v, pendingViews) }));
+    return Promise.all(
+      pending.map(async (v) => ({
+        ...v,
+        // Documents privés : URL fraîches (les URL signées expirent).
+        idDocumentUrl:     await this.uploadService.refreshPrivateUrl(v.idDocumentUrl),
+        selfieUrl:         await this.uploadService.refreshPrivateUrl(v.selfieUrl),
+        sampleProductUrls: v.sampleProductUrls ?? [],
+        categories:        this.categoriesOf(v, pendingViews),
+      })),
+    );
   }
 }

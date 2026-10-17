@@ -5,10 +5,17 @@ import {
   ManyToOne,
   JoinColumn,
   CreateDateColumn,
+  Index,
 } from 'typeorm';
 import { Conversation } from './conversation.entity';
 import { User } from '../../users/entities/user.entity';
 
+// Index (créés par la migration 1791810000000-AddPerformanceIndexes, et
+// DÉCLARÉS ICI pour que DB_SYNCHRONIZE=true ne les supprime pas) :
+//  - messages d'une conversation, du plus récent au plus ancien ;
+//  - décompte des messages non lus (index partiel, migration 1791200000000).
+@Index('IDX_messages_conversationId_createdAt', ['conversationId', 'createdAt'])
+@Index('IDX_messages_conversation_unread', ['conversationId'], { where: '"isRead" = false' })
 @Entity('messages')
 export class Message {
 

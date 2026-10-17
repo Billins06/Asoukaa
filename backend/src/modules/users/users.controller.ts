@@ -185,6 +185,22 @@ export class UsersController {
     );
   }
 
+  @ApiOperation({ summary: "[ADMIN] Acquitter l'alerte de sécurité (« Ce n'est pas moi ») d'un utilisateur" })
+  @UseGuards(RolesGuard)
+  @Roles(Role.ADMIN)
+  @Patch(':id/security-alert/ack')
+  @HttpCode(HttpStatus.OK)
+  ackSecurityAlert(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Req() req: Request,
+  ) {
+    return this.usersService.ackSecurityAlert(
+      id,
+      getUser(req).id,
+      getIp(req),
+    );
+  }
+
   @ApiOperation({ summary: '[ADMIN] Bloquer un utilisateur' })
   @UseGuards(RolesGuard)
   @Roles(Role.ADMIN)

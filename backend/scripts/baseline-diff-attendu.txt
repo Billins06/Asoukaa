@@ -1,0 +1,10 @@
+< CON delivery_earnings FOREIGN KEY ("processedById") REFERENCES admin_accounts(id)
+> CON delivery_earnings FOREIGN KEY ("processedById") REFERENCES admin_accounts(id) ON DELETE SET NULL
+> CON support_tickets FOREIGN KEY ("assignedAdminId") REFERENCES admin_accounts(id) ON DELETE SET NULL
+> CON support_tickets FOREIGN KEY ("orderId") REFERENCES orders(id) ON DELETE SET NULL
+< CON vendor_withdrawals FOREIGN KEY ("processedById") REFERENCES admin_accounts(id)
+> CON vendor_withdrawals FOREIGN KEY ("processedById") REFERENCES admin_accounts(id) ON DELETE SET NULL
+> EXT pg_trgm
+> IDX product_tags CREATE INDEX ON public.product_tags USING gin (tag gin_trgm_ops)
+> IDX products CREATE INDEX ON public.products USING gin (prod_name gin_trgm_ops)
+> SEQ orders_number_seq start=1

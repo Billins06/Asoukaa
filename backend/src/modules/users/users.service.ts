@@ -22,6 +22,7 @@ import { CreateAddressDto }  from './dto/create-address.dto';
 import { UpdateAddressDto }  from './dto/update-address.dto';
 
 import { ActivityLogService } from '../../common/services/activity-log.service';
+import { TokenService } from '../../common/services/token.service';
 import { UploadService, UploadType } from '../upload/upload.service';
 import {
   ActorType,
@@ -50,6 +51,8 @@ export class UsersService {
     private readonly logService: ActivityLogService,
 
     private readonly uploadService: UploadService,
+
+    private readonly tokenService: TokenService,
   ) {}
 
   // ─────────────────────────────────────────────────────
@@ -90,6 +93,7 @@ export class UsersService {
       tokensValidAfter,
       securityAlertAt,
       securityAlertReason,
+      securityAlertAckedAt,
       ...userSafe
     } = user;
 
@@ -178,6 +182,7 @@ export class UsersService {
       tokensValidAfter,
       securityAlertAt,
       securityAlertReason,
+      securityAlertAckedAt,
       ...userSafe
     } = user;
     return userSafe;
@@ -219,6 +224,12 @@ export class UsersService {
 
     // 4. Hasher et sauvegarder
     user.passwordHash = await bcrypt.hash(newPassword, 12);
+    // Coupe toutes les AUTRES sessions (tous les jetons émis avant cet
+    // instant, accès comme rafraîchissement, sont refusés par JwtStrategy et
+    // par POST /auth/refresh). Le jeton utilisé pour cet appel est donc
+    // révoqué lui aussi : on renvoie un NOUVEAU couple de jetons que
+    // l'appli doit enregistrer à la place des anciens.
+    user.tokensValidAfter = new Date();
     await this.userRepo.save(user);
 
     await this.logService.log({
@@ -230,7 +241,8 @@ export class UsersService {
       ipAddress:  ip,
     });
 
-    return { message: 'Mot de passe modifié avec succès' };
+    const tokens = this.tokenService.issueUserTokens(user);
+    return { message: 'Mot de passe modifié avec succès', ...tokens };
   }
 
   // ─────────────────────────────────────────────────────
@@ -380,8 +392,16 @@ export class UsersService {
       take:      limit,
     });
 
-    // Supprimer les passwordHash de tous les utilisateurs
-    const safeUsers = users.map(({ passwordHash, ...u }) => u);
+    // Supprimer les passwordHash de tous les utilisateurs.
+    // L'alerte « Ce n'est pas moi » est exposée À L'ADMIN seulement (cette
+    // route est réservée aux admins) : valeurs explicites (date ISO ou null)
+    // pour que le site admin affiche le badge et le bouton « Acquitter ».
+    const safeUsers = users.map(({ passwordHash, ...u }) => ({
+      ...u,
+      securityAlertAt:      u.securityAlertAt      ?? null,
+      securityAlertReason:  u.securityAlertReason  ?? null,
+      securityAlertAckedAt: u.securityAlertAckedAt ?? null,
+    }));
 
     return {
       data:  safeUsers,
@@ -410,9 +430,52 @@ export class UsersService {
 
     return {
       ...userSafe,
+      // Alerte « Ce n'est pas moi » (admin seulement) : date ISO ou null.
+      securityAlertAt:      user.securityAlertAt      ?? null,
+      securityAlertReason:  user.securityAlertReason  ?? null,
+      securityAlertAckedAt: user.securityAlertAckedAt ?? null,
       vendorProfile: vendorProfile ?? null,
       agentProfile:  agentProfile  ?? null,
     };
+  }
+
+  // ─────────────────────────────────────────────────────
+  // ADMIN — ACQUITTER L'ALERTE DE SÉCURITÉ D'UN UTILISATEUR
+  // PATCH /users/:id/security-alert/ack
+  // ─────────────────────────────────────────────────────
+  // « Acquitter » = un admin a pris connaissance de l'alerte (« Ce n'est pas
+  // moi »). On ne supprime RIEN : securityAlertAt / Reason restent comme
+  // preuve, seule la date d'acquittement est posée. Si une NOUVELLE alerte
+  // survient plus tard (securityAlertAt > securityAlertAckedAt), elle
+  // redevient active d'elle-même.
+  async ackSecurityAlert(userId: string, adminId: string, ip: string) {
+    const user = await this.userRepo.findOne({
+      where:  { id: userId },
+      select: ['id', 'securityAlertAt', 'securityAlertAckedAt'],
+    });
+    if (!user) throw new NotFoundException('Utilisateur introuvable');
+
+    if (!user.securityAlertAt) {
+      throw new BadRequestException(
+        "Cet utilisateur n'a aucune alerte de sécurité à acquitter",
+      );
+    }
+
+    const ackedAt = new Date();
+    await this.userRepo.update({ id: userId }, { securityAlertAckedAt: ackedAt });
+
+    await this.logService.log({
+      actorId:    adminId,
+      actorType:  ActorType.ADMIN,
+      action:     LogAction.SECURITY_ALERT_ACKED,
+      entityType: 'user',
+      entityId:   userId,
+      oldValue:   { securityAlertAckedAt: user.securityAlertAckedAt ?? null },
+      newValue:   { securityAlertAckedAt: ackedAt.toISOString() },
+      ipAddress:  ip,
+    });
+
+    return { id: userId, securityAlertAckedAt: ackedAt.toISOString() };
   }
 
   // ─────────────────────────────────────────────────────

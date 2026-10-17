@@ -11,6 +11,7 @@ import { ProductTierPrice }   from './entities/product-tier-price.entity';
 import { Category }           from '../categories/entities/category.entity';
 import { VendorProfile }      from '../users/entities/vendor-profile.entity';
 import { CommonModule }       from '../../common/common.module';
+import { UploadModule }       from '../upload/upload.module';
 
 @Module({
   imports: [
@@ -24,6 +25,9 @@ import { CommonModule }       from '../../common/common.module';
       VendorProfile,
     ]),
     CommonModule,
+    // UploadService : contrôle « URL issue de notre stockage » des images de
+    // produit / de variante (assertIsOwnUploadUrl).
+    UploadModule,
   ],
   controllers: [ProductsController],
   providers:   [ProductsService],

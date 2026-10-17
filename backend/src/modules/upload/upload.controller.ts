@@ -17,10 +17,7 @@ import {
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { existsSync } from 'fs';
-import {
-  FileInterceptor,
-  FilesInterceptor,
-} from '@nestjs/platform-express';
+import { Throttle } from '@nestjs/throttler';
 import {
   ApiTags,
   ApiBearerAuth,
@@ -32,6 +29,7 @@ import {
 import { UploadService, UploadType } from './upload.service';
 import { JwtAuthGuard }              from '../auth/guards/jwt-auth.guard';
 import { Role }                      from '../../common/enums/role.enum';
+import { UploadParseInterceptor }    from './upload.interceptor';
 
 // Seuls les comptes du back-office (AdminAccount) portent un champ scalaire
 // `role` ('admin' | 'superadmin') — voir RolesGuard.extractRoles. Les
@@ -41,6 +39,14 @@ const isAdminPrincipal = (req: Request): boolean => {
   const role = (req as any).user?.role;
   return role === Role.ADMIN || role === Role.SUPERADMIN;
 };
+
+// 🛡️ Limites d'envoi (en plus du quota PAR UTILISATEUR de UploadQuotaService,
+// 60 fichiers/heure par défaut) :
+//  - rafale par IP : 30 requêtes d'envoi / minute (le ThrottlerGuard global
+//    s'exécute avant l'authentification, il ne connaît que l'IP) ;
+//  - taille : limite PAR TYPE appliquée par Multer pendant la réception
+//    (images/documents 5 Mo, vidéos 50 Mo — voir UploadService.maxBytesFor).
+const UPLOAD_BURST_THROTTLE = { default: { limit: 30, ttl: 60_000 } };
 
 @ApiTags('Upload')
 @ApiBearerAuth()
@@ -62,7 +68,8 @@ export class UploadController {
     },
   })
   @Post(':type')
-  @UseInterceptors(FileInterceptor('file'))
+  @Throttle(UPLOAD_BURST_THROTTLE)
+  @UseInterceptors(UploadParseInterceptor('single'))
   @HttpCode(HttpStatus.CREATED)
   uploadFile(
     @Param('type') type: string,
@@ -96,7 +103,8 @@ export class UploadController {
     },
   })
   @Post(':type/multiple')
-  @UseInterceptors(FilesInterceptor('files', 10))
+  @Throttle(UPLOAD_BURST_THROTTLE)
+  @UseInterceptors(UploadParseInterceptor('multiple'))
   @HttpCode(HttpStatus.CREATED)
   uploadMultiple(
     @Param('type') type: string,
@@ -129,15 +137,32 @@ export class UploadController {
   // documents/selfies (KYC) doivent rester derrière l'authentification —
   // d'où cette route dédiée au lieu d'une URL publique.
 
-  @ApiOperation({ summary: 'Récupérer un fichier privé (stockage local, dev)' })
+  // ⚠️ Accès : un ADMIN/SUPERADMIN (vérification des demandes vendeur/livreur)
+  // ou le PROPRIÉTAIRE du fichier (son profil vendeur/livreur le référence).
+  // Tout autre compte reçoit EXACTEMENT la même réponse qu'un fichier
+  // inexistant (404) : on ne révèle jamais qu'un fichier existe. Avant, tout
+  // compte connecté pouvait lire n'importe quel document d'identité dont il
+  // connaissait le nom.
+  @ApiOperation({ summary: 'Récupérer un fichier privé (admin ou propriétaire ; stockage local)' })
   @Get('file/:type/:filename')
-  getPrivateFile(
+  async getPrivateFile(
     @Param('type') type: string,
     @Param('filename') filename: string,
+    @Req() req: Request,
     @Res() res: Response,
   ) {
     if (!this.uploadService.isPrivateType(type)) {
       throw new BadRequestException('Ce type de fichier n\'est pas servi par cette route');
+    }
+    const allowed =
+      isAdminPrincipal(req)
+      || await this.uploadService.isPrivateFileOwner(
+        (req as any).user?.id,
+        type,
+        filename,
+      );
+    if (!allowed) {
+      throw new NotFoundException('Fichier introuvable');
     }
     const filePath = this.uploadService.resolveLocalFilePath(type, filename);
     if (!existsSync(filePath)) {

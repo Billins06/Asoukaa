@@ -10,6 +10,9 @@ import {
 import { UserRole } from './user-role.entity';
 import { Address } from './address.entity';
 
+// Alertes sécurité actives (migration 1791700000000) — déclaré ici pour que
+// DB_SYNCHRONIZE=true ne le supprime pas.
+@Index('IDX_users_security_alert', ['securityAlertAt'], { where: '"securityAlertAt" IS NOT NULL' })
 @Entity('users')
 export class User {
 
@@ -65,6 +68,12 @@ export class User {
 
   @Column({ type: 'varchar', length: 255, nullable: true })
   securityAlertReason: string | null;
+
+  // Date à laquelle un admin a acquitté l'alerte ci-dessus (PATCH
+  // /users/:id/security-alert/ack). Alerte « active » = securityAlertAt non nul
+  // ET (securityAlertAckedAt nul OU antérieur à securityAlertAt).
+  @Column({ type: 'timestamptz', nullable: true })
+  securityAlertAckedAt: Date | null;
 
   // ─── Présence « En ligne / Vu à … » ───
 

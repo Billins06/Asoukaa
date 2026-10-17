@@ -8,6 +8,8 @@ import {
 } from 'typeorm';
 import { Product } from './product.entity';
 
+// Variantes d'un produit (clé étrangère) — migration 1791810000000.
+@Index('IDX_product_variants_productId', ['productId'])
 @Entity('product_variants')
 export class ProductVariant {
 

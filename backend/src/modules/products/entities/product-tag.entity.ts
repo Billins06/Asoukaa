@@ -8,6 +8,9 @@ import {
 } from 'typeorm';
 import { Product } from './product.entity';
 
+// Recherche par étiquette (trigrammes GIN, migration 1757800000000) : géré par
+// migration — TypeORM ne doit ni le créer ni le supprimer.
+@Index('idx_product_tags_tag_trgm', ['tag'], { synchronize: false } as any)
 @Entity('product_tags')
 export class ProductTag {
 

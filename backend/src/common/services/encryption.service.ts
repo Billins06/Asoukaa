@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as crypto from 'crypto';
 
@@ -12,8 +12,10 @@ export class EncryptionService {
    * Chiffre un objet sensible (données bancaires, etc.)
    */
   encrypt(data: any): string {
+    // La clé est lue HORS du try/catch : une clé invalide doit remonter comme
+    // erreur de configuration claire (503), pas comme « Encryption failed ».
+    const key = this.getEncryptionKey();
     try {
-      const key = this.getEncryptionKey();
       const iv = crypto.randomBytes(16);
       const cipher = crypto.createCipheriv(this.algorithm, key, iv);
 
@@ -34,8 +36,8 @@ export class EncryptionService {
    * Déchiffre un objet sensible
    */
   decrypt(encryptedData: string): any {
+    const key = this.getEncryptionKey();
     try {
-      const key = this.getEncryptionKey();
       const parts = encryptedData.split(':');
 
       if (parts.length !== 3) {
@@ -63,8 +65,16 @@ export class EncryptionService {
    */
   private getEncryptionKey(): Buffer {
     const keyEnv = this.configService.get<string>('ENCRYPTION_KEY');
-    if (!keyEnv || keyEnv.length !== 64) {
-      throw new Error('ENCRYPTION_KEY must be 32 bytes (64 hex chars)');
+    // Exactement 64 caractères hexadécimaux (= 32 octets pour AES-256).
+    // Une clé de 60 caractères ou contenant des caractères non hexadécimaux
+    // est refusée ici : AUCUNE donnée n'a donc jamais pu être chiffrée avec
+    // une telle clé (voir aussi la vérification au démarrage :
+    // src/config/env.validation.ts).
+    if (!keyEnv || !/^[0-9a-fA-F]{64}$/.test(keyEnv)) {
+      throw new ServiceUnavailableException(
+        'Le chiffrement n\'est pas configuré correctement sur le serveur ' +
+        '(ENCRYPTION_KEY invalide). Contactez l\'administrateur.',
+      );
     }
     return Buffer.from(keyEnv, 'hex');
   }

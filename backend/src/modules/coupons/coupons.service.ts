@@ -107,7 +107,10 @@ export class CouponsService {
     coupon.isActive               = true;
     coupon.vendorId               = vendorId;
     coupon.createdByAdminId       = isAdmin  ? creatorId : null;
-    coupon.createdByVendorId      = !isAdmin ? creatorId : null;
+    // ⚠️ createdByVendorId référence vendor_profiles.id (clé étrangère), PAS
+    // l'id de l'utilisateur : y mettre creatorId (userId) faisait échouer la
+    // création (violation de clé étrangère) et empêchait de retrouver ses coupons.
+    coupon.createdByVendorId      = !isAdmin ? vendorId : null;
 
     await this.couponRepo.save(coupon);
 
@@ -126,65 +129,103 @@ export class CouponsService {
 
   // ─────────────────────────────────────────────────────
   // VÉRIFIER UN COUPON AVANT APPLICATION
-  // (utilisé par le module orders)
+  // (POST /coupons/validate — aperçu de la remise dans le panier)
   // ─────────────────────────────────────────────────────
+  // Réponse volontairement UNIFORME : code inconnu, désactivé, expiré,
+  // épuisé, non applicable à ce panier ou montant minimum non atteint →
+  // toujours « Code invalide ». Un message différent selon le cas
+  // permettrait de deviner quels codes existent. (« Vous avez déjà utilisé
+  // ce code » reste distinct : seul un client qui l'a réellement utilisé peut
+  // le recevoir.)
+  // On ne renvoie jamais l'objet coupon : seulement { valid, code, discount,
+  // message, scope }. L'application lit `discount` et `message`.
   async validateCoupon(
     code:      string,
     userId:    string,
-    subtotal:  number,
+    subtotal?: number,
   ) {
+    const invalid = () => new BadRequestException('Code invalide');
+
+    const normalized = typeof code === 'string' ? code.trim().toUpperCase() : '';
+    if (!normalized || normalized.length > 50) throw invalid();
+
     const coupon = await this.couponRepo.findOne({
-      where: { code, isActive: true },
+      where: { code: normalized, isActive: true },
     });
 
-    if (!coupon) {
-      throw new BadRequestException('Code coupon invalide ou inactif');
-    }
+    if (!coupon) throw invalid();
 
-    // Vérifier expiration
-    if (coupon.expiresAt && new Date() > coupon.expiresAt) {
-      throw new BadRequestException('Ce code coupon a expiré');
-    }
+    // Expiré
+    if (coupon.expiresAt && new Date() > coupon.expiresAt) throw invalid();
 
-    // Vérifier maxUses
+    // Épuisé
     if (
       coupon.maxUses !== null &&
       coupon.usedCount >= coupon.maxUses
     ) {
-      throw new BadRequestException(
-        'Ce code coupon a atteint son nombre maximum d\'utilisations'
-      );
+      throw invalid();
     }
 
-    // Vérifier usage unique par client
+    // Usage unique par client
     const alreadyUsed = await this.usageRepo.findOne({
       where: { couponId: coupon.id, userId },
     });
 
     if (alreadyUsed) {
-      throw new BadRequestException(
-        'Vous avez déjà utilisé ce code coupon'
-      );
+      throw new BadRequestException('Vous avez déjà utilisé ce code');
     }
 
-    // Vérifier le montant minimum
-    if (
-      coupon.minOrderAmount &&
-      subtotal < Number(coupon.minOrderAmount)
-    ) {
-      throw new BadRequestException(
-        `Commande minimum de ${coupon.minOrderAmount} FCFA requise`
-      );
+    // Base de calcul de la remise :
+    //  - coupon d'une boutique → sous-total des seules lignes de CETTE boutique
+    //    dans le panier du client (les autres boutiques n'ont rien offert) ;
+    //  - coupon plateforme → sous-total du panier (celui fourni par
+    //    l'application, sinon calculé ici).
+    const scopeVendorId = coupon.vendorId ?? coupon.createdByVendorId ?? null;
+    let base: number;
+    if (scopeVendorId) {
+      base = await this.cartSubtotal(userId, scopeVendorId);
+      if (base <= 0) throw invalid(); // aucun article de cette boutique
+    } else if (typeof subtotal === 'number' && Number.isFinite(subtotal)) {
+      base = subtotal;
+    } else {
+      base = await this.cartSubtotal(userId, null);
     }
 
-    // Calculer la remise
-    const discount = this.calculateDiscount(coupon, subtotal);
+    // Montant minimum non atteint
+    if (coupon.minOrderAmount && base < Number(coupon.minOrderAmount)) {
+      throw invalid();
+    }
+
+    const discount = this.calculateDiscount(coupon, base);
 
     return {
-      coupon,
+      valid:    true,
+      code:     coupon.code,
       discount,
-      message: `Coupon appliqué : -${discount} FCFA`,
+      message:  `Coupon appliqué : -${discount} FCFA`,
+      scope:    scopeVendorId ? 'boutique' : 'plateforme',
     };
+  }
+
+  // Sous-total du panier du client (toutes boutiques, ou seulement celles du
+  // vendeur donné) à partir des prix enregistrés dans le panier.
+  private async cartSubtotal(
+    userId:   string,
+    vendorId: string | null,
+  ): Promise<number> {
+    const rows = await this.usageRepo.manager.query(
+      `
+      SELECT COALESCE(SUM(ci."unitPrice" * ci."quantity"), 0)::float8 AS "subtotal"
+      FROM "carts" c
+      JOIN "cart_items" ci      ON ci."cartId" = c."id"
+      JOIN "product_variants" v ON v."id" = ci."variantId"
+      JOIN "products" p         ON p."id" = v."productId"
+      WHERE c."userId" = $1
+        AND ($2::uuid IS NULL OR p."vendorId" = $2::uuid)
+      `,
+      [userId, vendorId],
+    );
+    return Number(rows?.[0]?.subtotal ?? 0);
   }
 
   // ─────────────────────────────────────────────────────

@@ -28,8 +28,10 @@ import { emailChangeAlertTemplate, EmailChangeAlertData } from './templates/emai
 import { emailChangeConfirmedTemplate } from './templates/email-change-confirmed.template';
 import { emailChangeSecuredTemplate } from './templates/email-change-secured.template';
 import { emailChangeCancelledTemplate } from './templates/email-change-cancelled.template';
+import { securityAlertTeamTemplate, SecurityAlertTeamData } from './templates/security-alert-team.template';
 import { supportTicketReplyTemplate, SupportTicketReplyData } from './templates/support-ticket-reply.template';
 import { supportTicketTeamTemplate, SupportTicketTeamData } from './templates/support-ticket-team.template';
+import { withdrawalNumberAlertTemplate, WithdrawalNumberAlertData } from './templates/withdrawal-number-alert.template';
 
 @Injectable()
 export class MailService {
@@ -284,11 +286,16 @@ export class MailService {
   }
 
   // ─── Remboursement refusé ─────────────────────────────────────────────────
-  async sendRefundRejected(to: string, prenom: string, orderNumber: string): Promise<void> {
+  async sendRefundRejected(
+    to: string,
+    prenom: string,
+    orderNumber: string,
+    motif?: string | null,
+  ): Promise<void> {
     await this.send(
       to,
       'Demande de remboursement',
-      refundRejectedTemplate(prenom, orderNumber),
+      refundRejectedTemplate(prenom, orderNumber, motif),
     );
   }
 
@@ -365,6 +372,15 @@ export class MailService {
     );
   }
 
+  /** Alerte « Ce n'est pas moi » : e-mail à l'équipe (adresses déjà masquées). */
+  async sendSecurityAlertToTeam(to: string, data: SecurityAlertTeamData): Promise<void> {
+    await this.send(
+      to,
+      `[Sécurité] Alerte « Ce n'est pas moi » - ${this.cleanHeader(data.prenom, 40)}`,
+      securityAlertTeamTemplate(data),
+    );
+  }
+
   /** Nouveau ticket / ticket rouvert : email à l'équipe support. */
   async sendSupportTicketToTeam(to: string, data: SupportTicketTeamData): Promise<void> {
     const prefix = data.kind === 'reopened' ? 'Ticket rouvert' : 'Nouveau ticket';
@@ -372,6 +388,15 @@ export class MailService {
       to,
       `[Support] ${prefix} ${this.cleanHeader(data.reference, 20)} - ${this.cleanHeader(data.subject, 100)}`,
       supportTicketTeamTemplate(data),
+    );
+  }
+
+  /** Information au vendeur : retrait demandé vers un numéro inhabituel (numéro déjà masqué). */
+  async sendWithdrawalNumberAlert(to: string, data: WithdrawalNumberAlertData): Promise<void> {
+    await this.send(
+      to,
+      'Retrait vers un nouveau numéro Mobile Money - Asoukaa',
+      withdrawalNumberAlertTemplate(data),
     );
   }
 }

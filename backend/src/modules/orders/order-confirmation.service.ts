@@ -404,6 +404,26 @@ export class OrderConfirmationService {
   }
 
   // ─────────────────────────────────────────────────────
+  // Nombre de commandes en retard de confirmation = le `total` de la liste
+  // GET /admin/orders/late-confirmation au niveau par défaut (« reminder » :
+  // délai de rappel dépassé, tous vendeurs). Même WHERE (AWAITING_SQL +
+  // REF_SQL) : le compteur du menu admin ne peut donc pas diverger de la liste.
+  // ─────────────────────────────────────────────────────
+  async countLateConfirmation(): Promise<number> {
+    const { reminderHours } = this.getDelays();
+    const [row] = rowsOf(
+      await this.dataSource.query(
+        `SELECT COUNT(*)::int AS "total"
+         FROM "orders" o JOIN "payments" p ON p."orderId" = o."id"
+         WHERE ${AWAITING_SQL}
+           AND ${REF_SQL} <= now() - ($1::double precision * interval '1 hour')`,
+        [reminderHours],
+      ),
+    );
+    return Number(row?.total ?? 0);
+  }
+
+  // ─────────────────────────────────────────────────────
   // ADMIN — COMMANDES EN RETARD DE CONFIRMATION
   // GET /api/v1/admin/orders/late-confirmation
   // ─────────────────────────────────────────────────────

@@ -25,6 +25,15 @@ export enum ProductStatus {
   OUT_OF_STOCK = 'out_of_stock', // toutes les variantes épuisées
 }
 
+// Index (migration 1791810000000-AddPerformanceIndexes) — DÉCLARÉS ICI pour que
+// DB_SYNCHRONIZE=true ne les supprime pas :
+//  - catalogue : produits actifs, les plus récents d'abord ;
+//  - produits d'une boutique.
+@Index('IDX_products_status_createdAt', ['status', 'createdAt'])
+@Index('IDX_products_vendorId', ['vendorId'])
+// Recherche par nom (trigrammes GIN, migration 1757800000000) : créé et géré
+// par migration — `synchronize: false` dit à TypeORM de ne ni le créer ni le supprimer.
+@Index('idx_products_prod_name_trgm', ['prod_name'], { synchronize: false } as any)
 @Entity('products')
 export class Product {
 

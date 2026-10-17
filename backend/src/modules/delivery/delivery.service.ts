@@ -9,7 +9,7 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository }       from 'typeorm';
+import { Repository, IsNull } from 'typeorm';
 import { MailService }      from '../mail/mail.service';
 
 import { Delivery, DeliveryStatus }                        from './entities/delivery.entity';
@@ -32,6 +32,10 @@ import { CreateIndependentDeliveryDto }  from './dto/create-independent-delivery
 import { SubmitPickupProofDto }          from './dto/submit-pickup-proof.dto';
 import { SubmitHandoffProofDto }         from './dto/submit-handoff-proof.dto';
 import { ActivityLogService }            from '../../common/services/activity-log.service';
+import {
+  assertHandoverCode,
+  HANDOVER_PROOF_MARKER,
+} from '../../common/utils/handover-code.util';
 import {
   ActorType,
   LogAction,
@@ -290,19 +294,53 @@ export class DeliveryService {
       );
     }
 
-    const oldStatus     = delivery.status;
-    delivery.agentId    = dto.agentId;
-    delivery.status     = DeliveryStatus.ASSIGNED;
+    const oldStatus = delivery.status;
 
-    // Marquer le livreur comme indisponible
-    agent.isAvailableNow = false;
-    await this.agentRepo.save(agent);
+    // Affectation ATOMIQUE : une transaction et trois mises à jour
+    // conditionnelles, dont on vérifie le nombre de lignes modifiées. Avant,
+    // deux affectations simultanées (deux onglets, deux clics) lisaient la
+    // livraison encore « en attente » : la dernière écrasait la première et
+    // les deux livreurs devenaient indisponibles.
+    await this.deliveryRepo.manager.transaction(async (manager) => {
+      const d = await manager.update(
+        Delivery,
+        { id: delivery.id, status: DeliveryStatus.PENDING, agentId: IsNull() },
+        { agentId: dto.agentId, status: DeliveryStatus.ASSIGNED },
+      );
+      if (!d.affected) {
+        throw new BadRequestException(
+          'Cette livraison vient d\'être affectée : actualisez la page.'
+        );
+      }
 
-    await this.deliveryRepo.save(delivery);
+      // Le livreur doit toujours être approuvé ET disponible à cet instant.
+      const a = await manager.update(
+        DeliveryAgentProfile,
+        { id: dto.agentId, status: AgentStatus.APPROVED, isAvailableNow: true },
+        { isAvailableNow: false },
+      );
+      if (!a.affected) {
+        throw new BadRequestException(
+          'Ce livreur n\'est plus disponible actuellement'
+        );
+      }
 
-    // Le client/vendeur voient désormais "Livreur affecté".
+      // Le client/vendeur voient désormais "Livreur affecté".
+      const o = await manager.update(
+        Order,
+        { id: delivery.orderId, status: OrderStatus.PREPARING },
+        { status: OrderStatus.AGENT_ASSIGNED },
+      );
+      if (!o.affected) {
+        throw new BadRequestException(
+          'La commande n\'est plus "En préparation" : actualisez la page.'
+        );
+      }
+    });
+
+    delivery.agentId      = dto.agentId;
+    delivery.status       = DeliveryStatus.ASSIGNED;
     delivery.order.status = OrderStatus.AGENT_ASSIGNED;
-    await this.orderRepo.save(delivery.order);
 
     // Notifier le livreur par email (best-effort)
     try {
@@ -387,21 +425,47 @@ export class DeliveryService {
       );
     }
 
-    // Vérifier les transitions autorisées
+    // Vérifier les transitions autorisées (seul « en cours de livraison » →
+    // « livraison echouée » est possible pour un livreur).
     this.validateDeliveryTransition(delivery.status, dto.status);
 
-    const oldStatus  = delivery.status;
-    delivery.status  = dto.status;
+    // La commande doit encore être « en transit » : l'admin a pu l'annuler
+    // entre-temps (le livreur ne doit alors plus rien déclarer dessus).
+    if (delivery.order.status !== OrderStatus.IN_TRANSIT) {
+      throw new BadRequestException(
+        'Cette commande n\'est plus en transit (elle a peut-être été annulée) : '
+        + 'aucune action possible.'
+      );
+    }
 
-    // Remettre le livreur disponible même en cas d'échec
-    agent.isAvailableNow   = true;
-    agent.totalLivraisons += 1;
-    await this.agentRepo.save(agent);
+    const oldStatus  = delivery.status;
+
+    // Changement ATOMIQUE et conditionnel (statut encore « en cours de
+    // livraison », bien CE livreur) + livreur de nouveau disponible.
+    // ⚠️ Le compteur totalLivraisons n'est PAS incrémenté en cas d'échec : il
+    // ne compte que les vraies livraisons validées (remise confirmée avec le
+    // code du client, voir submitHandoffProof).
+    await this.deliveryRepo.manager.transaction(async (manager) => {
+      const moved = await manager.update(
+        Delivery,
+        { id: delivery.id, agentId: agent.id, status: DeliveryStatus.IN_TRANSIT },
+        { status: DeliveryStatus.FAILED },
+      );
+      if (!moved.affected) {
+        throw new BadRequestException(
+          'Cette livraison n\'est plus en cours : actualisez la page.'
+        );
+      }
+      await manager.update(
+        DeliveryAgentProfile,
+        { id: agent.id },
+        { isAvailableNow: true },
+      );
+    });
+    delivery.status = dto.status;
 
     // Recalculer le taux de réussite (livraison échouée)
     await this.recalculateSuccessRate(agent.id);
-
-    await this.deliveryRepo.save(delivery);
 
     await this.logService.log({
       actorId:    userId,
@@ -618,42 +682,72 @@ export class DeliveryService {
       );
     }
 
-    // Le QR scanné doit correspondre à CETTE commande — sans quoi
-    // n'importe quel QR récupéré ailleurs vaudrait "preuve".
-    const expected = order.orderNumber.replace(/^ASK-/, '');
-    const scanned  = dto.qrScanValue.replace(/^ASK-/, '');
-    if (scanned !== expected) {
-      throw new BadRequestException(
-        'Le QR code scanné ne correspond pas à cette commande'
-      );
-    }
+    // Le code de remise saisi / scanné doit être celui de CETTE commande : code
+    // aléatoire que seul le client connaît (affiché dans son suivi de commande),
+    // comparé en temps constant, avec blocage temporaire après 3 essais ratés.
+    // Avant, le « QR » était le numéro de commande, visible du livreur : il
+    // pouvait valider la remise sans le client.
+    await assertHandoverCode(this.orderRepo.manager, order.id, dto.qrScanValue);
 
-    const oldStatus = delivery.status;
-    delivery.status      = DeliveryStatus.DELIVERED;
-    delivery.deliveredAt = new Date();
-    await this.deliveryRepo.save(delivery);
-
+    const oldStatus      = delivery.status;
     const oldOrderStatus = order.status;
-    order.status = OrderStatus.DELIVERED;
-    await this.orderRepo.save(order);
+    const deliveredAt    = new Date();
+
+    // Validation ATOMIQUE de la remise : livraison, commande, preuve et
+    // compteur du livreur dans une seule transaction, avec des mises à jour
+    // conditionnelles. Deux validations simultanées : une seule passe, donc le
+    // compteur de livraisons n'est incrémenté qu'UNE fois, à la vraie remise.
+    await this.deliveryRepo.manager.transaction(async (manager) => {
+      const d = await manager.update(
+        Delivery,
+        { id: delivery.id, agentId: agent.id, status: DeliveryStatus.IN_TRANSIT },
+        { status: DeliveryStatus.DELIVERED, deliveredAt },
+      );
+      if (!d.affected) {
+        throw new BadRequestException(
+          'Cette livraison a déjà été traitée : actualisez la page.'
+        );
+      }
+
+      const o = await manager.update(
+        Order,
+        { id: order.id, status: OrderStatus.IN_TRANSIT },
+        { status: OrderStatus.DELIVERED },
+      );
+      if (!o.affected) {
+        throw new BadRequestException(
+          'La commande n\'est plus "En transit" (elle a peut-être été annulée).'
+        );
+      }
+
+      // On ne conserve JAMAIS le code lui-même dans la preuve (lisible par le
+      // vendeur et l'admin) : seulement la mention qu'il a été vérifié.
+      await manager.save(manager.create(DeliveryProof, {
+        orderId:         order.id,
+        deliveryId:      delivery.id,
+        role:            ProofRole.LIVREUR,
+        stage:           ProofStage.REMISE_CLIENT,
+        qrScanValue:     HANDOVER_PROOF_MARKER,
+        latitude:        dto.latitude,
+        longitude:       dto.longitude,
+        signatureData:   dto.signatureData,
+        createdByUserId: userId,
+      }));
+
+      // Remettre le livreur disponible, +1 livraison réussie.
+      await manager.update(
+        DeliveryAgentProfile,
+        { id: agent.id },
+        { isAvailableNow: true },
+      );
+      await manager.increment(DeliveryAgentProfile, { id: agent.id }, 'totalLivraisons', 1);
+    });
+
+    delivery.status      = DeliveryStatus.DELIVERED;
+    delivery.deliveredAt = deliveredAt;
+    order.status         = OrderStatus.DELIVERED;
+
     await this.incrementProductSales(order.id);
-
-    await this.proofRepo.save(this.proofRepo.create({
-      orderId:         order.id,
-      deliveryId:      delivery.id,
-      role:            ProofRole.LIVREUR,
-      stage:           ProofStage.REMISE_CLIENT,
-      qrScanValue:     dto.qrScanValue,
-      latitude:        dto.latitude,
-      longitude:       dto.longitude,
-      signatureData:   dto.signatureData,
-      createdByUserId: userId,
-    }));
-
-    // Remettre le livreur disponible
-    agent.isAvailableNow   = true;
-    agent.totalLivraisons += 1;
-    await this.agentRepo.save(agent);
     await this.recalculateSuccessRate(agent.id);
 
     // Calculer le gain du livreur sur cette livraison (best-effort : un

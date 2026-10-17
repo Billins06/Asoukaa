@@ -4,6 +4,7 @@ import { memoryStorage } from 'multer';
 
 import { UploadController } from './upload.controller';
 import { UploadService, DEFAULT_MAX_VIDEO_FILE_SIZE } from './upload.service';
+import { UploadQuotaService } from './upload-quota.service';
 
 @Module({
   imports: [
@@ -26,7 +27,7 @@ import { UploadService, DEFAULT_MAX_VIDEO_FILE_SIZE } from './upload.service';
     }),
   ],
   controllers: [UploadController],
-  providers:   [UploadService],
+  providers:   [UploadService, UploadQuotaService],
   exports:     [UploadService],
 })
 export class UploadModule {}

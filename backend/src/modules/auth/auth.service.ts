@@ -11,11 +11,11 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { MailService } from '../mail/mail.service';
 import { InjectRepository } from '@nestjs/typeorm';
-import type { StringValue } from 'ms';
 import * as bcrypt from 'bcrypt';
 import { randomInt, randomUUID } from 'crypto';
 import { Repository } from 'typeorm';
 import { ActivityLogService } from '../../common/services/activity-log.service';
+import { TokenService } from '../../common/services/token.service';
 import {
   ActorType,
   LogAction,
@@ -26,6 +26,7 @@ import { UserRole, UserRoleEnum } from '../users/entities/user-role.entity';
 import { CreateAdminDto } from './dto/create-admin.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
+import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { RegisterDto } from './dto/register.dto';
 import { ResendOtpDto } from './dto/resend-otp.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
@@ -61,6 +62,7 @@ export class AuthService {
     private readonly configService: ConfigService,
     private readonly mailService: MailService,
     private readonly logService: ActivityLogService,
+    private readonly tokenService: TokenService,
   ) {}
 
   async register(dto: RegisterDto, ip: string) {
@@ -271,6 +273,7 @@ export class AuthService {
       tokensValidAfter,
       securityAlertAt,
       securityAlertReason,
+      securityAlertAckedAt,
       ...userSafe
     } = user;
 
@@ -333,6 +336,11 @@ export class AuthService {
     }
 
     user.passwordHash = await bcrypt.hash(dto.newPassword, 12);
+    // Réinitialisation = on ne sait pas qui avait la session : toutes les
+    // sessions ouvertes (jetons d'accès ET de rafraîchissement émis avant cet
+    // instant) sont coupées. L'utilisateur se reconnecte avec son nouveau
+    // mot de passe (les nouveaux jetons, émis après, fonctionnent).
+    user.tokensValidAfter = new Date();
     await this.userRepo.save(user);
 
     await this.logService.log({
@@ -525,26 +533,36 @@ export class AuthService {
   }
 
   private async generateTokens(user: User) {
-    const payload = {
-      sub: user.id,
-      email: user.email,
-      type: 'user' as const,
-    };
+    return this.tokenService.issueUserTokens(user);
+  }
 
-    const accessToken = this.jwtService.sign(payload, {
-      secret: this.configService.getOrThrow<string>('JWT_SECRET'),
-      expiresIn:
-        this.configService.getOrThrow<number | StringValue>('JWT_EXPIRES_IN'),
-    });
+  /**
+   * Renouvelle la session : échange un jeton de rafraîchissement valide
+   * contre un nouveau couple { accessToken, refreshToken } (rotation).
+   *
+   * Contrôles : signature (secret de refresh) + expiration + claim
+   * `typ = 'refresh'` ; l'utilisateur existe, est actif et vérifié ; le jeton
+   * n'a pas été émis avant `tokensValidAfter` (changement de mot de passe,
+   * blocage, « Ce n'est pas moi »...). Tout échec → 401 au même message.
+   *
+   * ⚠️ Pas de détection de réutilisation : un ancien refresh token reste
+   * utilisable jusqu'à son expiration ou jusqu'à la prochaine révocation
+   * globale (changement/réinitialisation de mot de passe, blocage).
+   */
+  async refresh(dto: RefreshTokenDto) {
+    const payload = this.tokenService.verifyRefreshToken(dto.refreshToken);
 
-    const refreshToken = this.jwtService.sign(payload, {
-      secret: this.configService.getOrThrow<string>('JWT_REFRESH_SECRET'),
-      expiresIn: this.configService.getOrThrow<number | StringValue>(
-        'JWT_REFRESH_EXPIRES_IN',
-      ),
-    });
+    const user = await this.userRepo.findOne({ where: { id: payload.sub } });
+    if (
+      !user ||
+      !user.isActive ||
+      !user.isVerified ||
+      TokenService.isRevoked(payload.iat, user.tokensValidAfter)
+    ) {
+      throw new UnauthorizedException('Session expirée, reconnectez-vous');
+    }
 
-    return { accessToken, refreshToken };
+    return this.tokenService.issueUserTokens(user);
   }
 
   async sendOtp(user: User, type: OtpType): Promise<void> {

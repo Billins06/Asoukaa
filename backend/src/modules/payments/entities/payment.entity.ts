@@ -98,6 +98,18 @@ export class Payment {
   @Column({ nullable: true, type: 'timestamp' })
   paidAt: Date;
 
+  // « Paiements à examiner » : renseignés quand un admin a traité le dossier
+  // (migration 1791840000000). Un paiement avec reviewedAt sort de la liste.
+  // select:false = jamais renvoyé par les lectures normales (note interne de l'admin).
+  @Column({ nullable: true, type: 'timestamp', select: false })
+  reviewedAt: Date | null;
+
+  @Column({ type: 'uuid', nullable: true, select: false })
+  reviewedBy: string | null;
+
+  @Column({ type: 'varchar', length: 500, nullable: true, select: false })
+  reviewNote: string | null;
+
   @CreateDateColumn()
   createdAt: Date;
 }

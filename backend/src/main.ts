@@ -1,6 +1,6 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule }   from './app.module';
-import { ValidationPipe } from '@nestjs/common';
+import { LogLevel, ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
 import { AllExceptionsFilter } from './common/filters/http-exception.filter';
@@ -10,9 +10,21 @@ import compression from 'compression';
 import { join } from 'path';
 
 async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  // 🔒 En production : pas de niveau « debug » (il imprimait les réponses brutes
+  // de FeexPay : numéros de téléphone, références de transaction). En
+  // développement : comportement inchangé (tous les niveaux).
+  const productionLevels: LogLevel[] = ['log', 'warn', 'error'];
+  const app = await NestFactory.create<NestExpressApplication>(
+    AppModule,
+    process.env.NODE_ENV === 'production' ? { logger: productionLevels } : {},
+  );
   const config = app.get(ConfigService);
   const isProduction = config.get<string>('NODE_ENV') === 'production';
+  // NODE_ENV défini seulement dans le fichier .env (pas dans l'environnement du
+  // processus) : on applique quand même les niveaux de production.
+  if (isProduction && process.env.NODE_ENV !== 'production') {
+    app.useLogger(productionLevels);
+  }
 
   // ⚠️ Indispensable derrière un reverse proxy (Nginx, Render, Railway...).
   // Sans ça, Express ignore X-Forwarded-For et :
@@ -63,9 +75,13 @@ async function bootstrap() {
   // CORS - Stricte en prod, permissif en dev
   app.enableCors({
     origin: isProduction
-      ? [config.get<string>('FRONTEND_WEB_URL')].filter(
-          (o): o is string => !!o,
-        )
+      ? [
+          config.get<string>('FRONTEND_WEB_URL'),
+          // autres sites autorisés (ex. version web de l'appli), séparés par des virgules
+          ...(config.get<string>('CORS_EXTRA_ORIGINS') ?? '').split(','),
+        ]
+          .map((o) => (o ?? '').trim().replace(/\/+$/, ''))
+          .filter((o) => !!o)
       : true, // Accepte toutes les origines en développement
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     credentials: true,

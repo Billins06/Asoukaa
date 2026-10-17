@@ -51,13 +51,10 @@ export class DashboardController {
   @UseGuards(RolesGuard)
   @Roles(Role.ADMIN)
   @Get('admin/top-products')
-  getAdminTopProducts(
-    @Query() query: DashboardQueryDto,
-    @Query('limit') limit?: number,
-  ) {
+  getAdminTopProducts(@Query() query: DashboardQueryDto) {
     return this.dashboardService.getAdminTopProducts(
       query,
-      clampLimit(limit, 10),
+      clampLimit(query.limit, 10),
     );
   }
 
@@ -65,13 +62,10 @@ export class DashboardController {
   @UseGuards(RolesGuard)
   @Roles(Role.ADMIN)
   @Get('admin/top-vendors')
-  getAdminTopVendors(
-    @Query() query: DashboardQueryDto,
-    @Query('limit') limit?: number,
-  ) {
+  getAdminTopVendors(@Query() query: DashboardQueryDto) {
     return this.dashboardService.getAdminTopVendors(
       query,
-      clampLimit(limit, 10),
+      clampLimit(query.limit, 10),
     );
   }
 
@@ -103,12 +97,11 @@ export class DashboardController {
   getVendorTopProducts(
     @Req() req: Request,
     @Query() query: DashboardQueryDto,
-    @Query('limit') limit?: number,
   ) {
     return this.dashboardService.getVendorTopProducts(
       getUser(req).id,
       query,
-      clampLimit(limit, 10),
+      clampLimit(query.limit, 10),
     );
   }
 }

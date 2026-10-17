@@ -1,0 +1,310 @@
+# Catégories proposées pour Asoukaa
+
+**Total : 293 catégories** (26 racines, 229 de niveau 2, 38 de niveau 3) : **11 existent déjà** en base, **282 sont nouvelles**.
+
+_Relis cette liste ; pour retirer ou renommer une ligne, modifie `categories_arbre.txt` puis relance `python3 generer_categories.py`._
+
+## Arbre
+
+- **Alimentation** — _existe déjà_
+  - MAIS — _existe déjà_
+  - Riz — _nouveau_
+  - Farines, gari et semoules — _nouveau_
+    - Gari — _nouveau_
+    - Tapioca — _nouveau_
+    - Semoule et couscous — _nouveau_
+    - Farine de blé — _nouveau_
+  - Igname et tubercules — _nouveau_
+  - Haricots et légumineuses — _nouveau_
+  - Huiles alimentaires — _nouveau_
+  - Épices et condiments — _nouveau_
+  - Fruits et légumes — _nouveau_
+  - Viandes et poissons — _nouveau_
+    - Poisson frais — _nouveau_
+    - Poisson fumé et séché — _nouveau_
+    - Viande de bovins et ovins — _nouveau_
+    - Volaille et oeufs — _nouveau_
+  - Boissons — _nouveau_
+  - Produits du terroir — _nouveau_
+    - Afitin et soumbala — _nouveau_
+    - Miel — _nouveau_
+    - Noix de cajou — _nouveau_
+    - Arachides — _nouveau_
+    - Gombo et feuilles séchées — _nouveau_
+  - Snacks et biscuits — _nouveau_
+- **Beauté** — _existe déjà_
+  - Soins du visage — _nouveau_
+  - Soins du corps — _nouveau_
+  - Soins des cheveux — _nouveau_
+    - Shampoings et après-shampoings — _nouveau_
+    - Huiles et beurres capillaires — _nouveau_
+    - Perruques et tissages — _nouveau_
+    - Mèches et rajouts — _nouveau_
+  - Maquillage — _nouveau_
+  - Parfums et déodorants — _nouveau_
+  - Karité et produits naturels — _nouveau_
+    - Beurre de karité — _nouveau_
+    - Savon noir africain — _nouveau_
+    - Huiles végétales naturelles — _nouveau_
+  - Hygiène et bain — _nouveau_
+  - Soins des ongles — _nouveau_
+  - Soins pour hommes — _nouveau_
+  - Matériel de coiffure et de beauté — _nouveau_
+- **Électronique** — _existe déjà_
+  - Téléviseurs et vidéo — _nouveau_
+  - Audio et son — _nouveau_
+    - Enceintes et haut-parleurs — _nouveau_
+    - Casques et écouteurs — _nouveau_
+    - Radios — _nouveau_
+  - Appareils photo et caméras — _nouveau_
+  - Jeux vidéo et consoles — _nouveau_
+  - Chargeurs et câbles — _nouveau_
+  - Sécurité et surveillance — _nouveau_
+  - Objets connectés — _nouveau_
+  - Décodeurs et antennes — _nouveau_
+- **Jouets** — _existe déjà_
+  - Jouets d'éveil — _nouveau_
+  - Poupées et peluches — _nouveau_
+  - Voitures et véhicules miniatures — _nouveau_
+  - Jeux de construction — _nouveau_
+  - Jeux de société et puzzles — _nouveau_
+  - Jeux d'extérieur — _nouveau_
+  - Jouets éducatifs — _nouveau_
+  - Déguisements — _nouveau_
+  - Jouets électroniques et télécommandés — _nouveau_
+- **Livres** — _existe déjà_
+  - Romans et littérature — _nouveau_
+  - Livres scolaires — _nouveau_
+  - Livres universitaires — _nouveau_
+  - Bandes dessinées et mangas — _nouveau_
+  - Livres pour enfants — _nouveau_
+  - Religion et spiritualité — _nouveau_
+  - Développement personnel — _nouveau_
+  - Dictionnaires et langues — _nouveau_
+  - Économie et gestion — _nouveau_
+- **Maison** — _existe déjà_
+  - Meubles — _nouveau_
+  - Décoration — _nouveau_
+  - Literie et linge de maison — _nouveau_
+  - Moustiquaires — _nouveau_
+  - Rideaux et tapis — _nouveau_
+  - Éclairage et luminaires — _nouveau_
+  - Salle de bain — _nouveau_
+  - Jardin et extérieur — _nouveau_
+  - Produits d'entretien — _nouveau_
+  - Rangement et organisation — _nouveau_
+- **Mode** — _existe déjà_
+  - Mode femme — _nouveau_
+  - Mode homme — _nouveau_
+  - Mode enfant — _nouveau_
+  - Tenues traditionnelles — _nouveau_
+    - Boubous et grands boubous — _nouveau_
+    - Complets bazin — _nouveau_
+    - Kaba et robes en pagne — _nouveau_
+    - Tenues en wax — _nouveau_
+  - Lingerie et sous-vêtements — _nouveau_
+  - Accessoires de mode — _nouveau_
+  - Uniformes et vêtements de travail — _nouveau_
+  - Friperie — _nouveau_
+- **Sports** — _existe déjà_
+  - Gym — _existe déjà_
+  - Padel — _existe déjà_
+  - Football — _nouveau_
+  - Basketball — _nouveau_
+  - Course et athlétisme — _nouveau_
+  - Musculation et haltères — _nouveau_
+  - Arts martiaux — _nouveau_
+  - Cyclisme — _nouveau_
+  - Natation — _nouveau_
+  - Vêtements de sport — _nouveau_
+  - Camping et randonnée — _nouveau_
+- **Téléphones et tablettes** — _nouveau_
+  - Smartphones — _nouveau_
+  - Téléphones basiques — _nouveau_
+  - Téléphones reconditionnés — _nouveau_
+  - Tablettes — _nouveau_
+  - Accessoires téléphones — _nouveau_
+- **Informatique** — _nouveau_
+  - Ordinateurs portables — _nouveau_
+  - Ordinateurs de bureau — _nouveau_
+  - Écrans et moniteurs — _nouveau_
+  - Imprimantes et scanners — _nouveau_
+  - Stockage — _nouveau_
+  - Claviers et souris — _nouveau_
+  - Routeurs et modems — _nouveau_
+  - Composants informatiques — _nouveau_
+  - Sacoches d'ordinateur — _nouveau_
+- **Électroménager** — _nouveau_
+  - Réfrigérateurs et congélateurs — _nouveau_
+  - Climatiseurs et ventilateurs — _nouveau_
+  - Machines à laver — _nouveau_
+  - Cuisinières et gazinières — _nouveau_
+  - Petit électroménager — _nouveau_
+  - Fontaines à eau — _nouveau_
+  - Aspirateurs — _nouveau_
+  - Réchauds et accessoires gaz — _nouveau_
+- **Bébé et maternité** — _nouveau_
+  - Vêtements de bébé — _nouveau_
+  - Couches et lingettes — _nouveau_
+  - Alimentation de bébé — _nouveau_
+  - Poussettes et porte-bébés — _nouveau_
+  - Berceaux et lits bébé — _nouveau_
+  - Bain et soins de bébé — _nouveau_
+  - Articles de maternité — _nouveau_
+  - Babyphones et sécurité enfant — _nouveau_
+- **Santé et bien-être** — _nouveau_
+  - Vitamines et compléments — _nouveau_
+  - Premiers soins — _nouveau_
+  - Appareils de mesure santé — _nouveau_
+  - Hygiène féminine — _nouveau_
+  - Soins dentaires — _nouveau_
+  - Tisanes et plantes — _nouveau_
+  - Protection anti-moustiques — _nouveau_
+- **Bricolage et outillage** — _nouveau_
+  - Outils à main — _nouveau_
+  - Outillage électrique — _nouveau_
+  - Quincaillerie — _nouveau_
+  - Plomberie — _nouveau_
+  - Électricité — _nouveau_
+  - Peinture et revêtements — _nouveau_
+  - Matériaux de construction — _nouveau_
+    - Carrelage — _nouveau_
+    - Tôles et toitures — _nouveau_
+    - Portes et fenêtres — _nouveau_
+    - Ciment et sable — _nouveau_
+  - Sécurité de chantier — _nouveau_
+  - Échelles et escabeaux — _nouveau_
+  - Soudure et accessoires — _nouveau_
+- **Automobile et moto** — _nouveau_
+  - Pièces détachées auto — _nouveau_
+  - Pneus et jantes — _nouveau_
+  - Huiles et lubrifiants — _nouveau_
+  - Accessoires auto — _nouveau_
+  - Batteries de véhicules — _nouveau_
+  - Motos et scooters — _nouveau_
+  - Pièces moto — _nouveau_
+  - Casques et équipements de motard — _nouveau_
+  - Autoradios et GPS — _nouveau_
+  - Entretien et lavage auto — _nouveau_
+- **Agriculture et élevage** — _nouveau_
+  - Semences et plants — _nouveau_
+  - Engrais et fertilisants — _nouveau_
+  - Matériel agricole — _nouveau_
+  - Irrigation et arrosage — _nouveau_
+  - Alimentation animale — _nouveau_
+  - Matériel d'élevage — _nouveau_
+  - Apiculture — _nouveau_
+  - Pisciculture — _nouveau_
+  - Machines de transformation — _nouveau_
+- **Animaux de compagnie** — _nouveau_
+  - Nourriture pour animaux — _nouveau_
+  - Accessoires pour chiens — _nouveau_
+  - Accessoires pour chats — _nouveau_
+  - Oiseaux et cages — _nouveau_
+  - Aquariums et accessoires — _nouveau_
+  - Hygiène et soins animaux — _nouveau_
+  - Couchages pour animaux — _nouveau_
+- **Papeterie et fournitures** — _nouveau_
+  - Cahiers et carnets — _nouveau_
+  - Stylos et écriture — _nouveau_
+  - Fournitures scolaires — _nouveau_
+  - Fournitures de bureau — _nouveau_
+  - Papier et rames — _nouveau_
+  - Classement et archivage — _nouveau_
+  - Dessin et peinture — _nouveau_
+  - Matériel de classe — _nouveau_
+- **Instruments de musique** — _nouveau_
+  - Guitares et basses — _nouveau_
+  - Claviers et pianos — _nouveau_
+  - Batteries et percussions — _nouveau_
+  - Percussions africaines — _nouveau_
+    - Djembés — _nouveau_
+    - Tam-tams — _nouveau_
+    - Balafons — _nouveau_
+    - Calebasses et shékérés — _nouveau_
+  - Instruments à vent — _nouveau_
+  - Violons et instruments à cordes — _nouveau_
+  - Sonorisation — _nouveau_
+  - Studio et enregistrement — _nouveau_
+  - Accessoires musicaux — _nouveau_
+- **Art et artisanat** — _nouveau_
+  - Sculptures et statuettes — _nouveau_
+  - Masques décoratifs — _nouveau_
+  - Peintures et tableaux — _nouveau_
+  - Poterie et céramique — _nouveau_
+  - Vannerie et paniers — _nouveau_
+  - Objets en bois — _nouveau_
+  - Batik et teinture — _nouveau_
+  - Calebasses et objets décorés — _nouveau_
+  - Bronzes et objets en laiton — _nouveau_
+  - Appliqués et tentures d'Abomey — _nouveau_
+  - Loisirs créatifs — _nouveau_
+- **Cuisine et ustensiles** — _nouveau_
+  - Casseroles et marmites — _nouveau_
+  - Poêles et plats — _nouveau_
+  - Vaisselle et couverts — _nouveau_
+  - Couteaux et ustensiles — _nouveau_
+  - Mortiers et ustensiles traditionnels — _nouveau_
+  - Boîtes de conservation — _nouveau_
+  - Thermos et glacières — _nouveau_
+  - Linge de table — _nouveau_
+  - Bassines, seaux et bidons — _nouveau_
+- **Chaussures et maroquinerie** — _nouveau_
+  - Chaussures femme — _nouveau_
+  - Chaussures homme — _nouveau_
+  - Chaussures enfant — _nouveau_
+  - Sandales et tongs — _nouveau_
+  - Baskets — _nouveau_
+  - Sacs à main — _nouveau_
+  - Sacs à dos — _nouveau_
+  - Valises et bagages — _nouveau_
+  - Portefeuilles et petite maroquinerie — _nouveau_
+- **Bijoux et montres** — _nouveau_
+  - Colliers et pendentifs — _nouveau_
+  - Bracelets — _nouveau_
+  - Bagues — _nouveau_
+  - Boucles d'oreilles — _nouveau_
+  - Chaînes et gourmettes — _nouveau_
+  - Montres homme — _nouveau_
+  - Montres femme — _nouveau_
+  - Perles et bijoux traditionnels — _nouveau_
+  - Bijoux en or et argent — _nouveau_
+  - Parures et coffrets — _nouveau_
+- **Pagnes et tissus** — _nouveau_
+  - Wax — _nouveau_
+  - Bazin et brocart — _nouveau_
+  - Dentelle et tulle — _nouveau_
+  - Pagnes tissés et bogolan — _nouveau_
+  - Tissus de coton — _nouveau_
+  - Satin, soie et velours — _nouveau_
+  - Tissus d'ameublement — _nouveau_
+  - Fournitures de couture — _nouveau_
+  - Machines à coudre — _nouveau_
+- **Mariage et événements** — _nouveau_
+  - Décoration de fête — _nouveau_
+  - Tenues de mariage — _nouveau_
+    - Robes de mariée — _nouveau_
+    - Costumes et smokings — _nouveau_
+    - Tenues de cortège — _nouveau_
+  - Cadeaux et coffrets — _nouveau_
+  - Faire-part et papeterie événementielle — _nouveau_
+  - Vaisselle jetable — _nouveau_
+  - Chapiteaux, bâches et chaises — _nouveau_
+- **Énergie solaire** — _nouveau_
+  - Panneaux solaires — _nouveau_
+  - Batteries solaires — _nouveau_
+  - Onduleurs et régulateurs — _nouveau_
+  - Kits solaires complets — _nouveau_
+  - Lampes et lanternes solaires — _nouveau_
+  - Groupes électrogènes — _nouveau_
+  - Stabilisateurs de tension — _nouveau_
+  - Accessoires d'installation solaire — _nouveau_
+
+## Comment l'utiliser
+
+1. Aperçu : ouvre `src/database/seeders/sql/categories_catalogue.sql` dans pgAdmin, sélectionne de « PARTIE 1 » à la fin de « APERÇU » et exécute : tu vois ce qui serait ajouté (rien n'est écrit).
+2. Exécution SQL : exécute ensuite le script entier dans pgAdmin (Query Tool) sur la bonne base.
+3. Ou, avec le seeder : `npm run seed:categories` (même résultat que le SQL, avec les compteurs inséré/ignoré).
+4. Tu peux relancer sans risque : aucun doublon, aucune catégorie existante modifiée ni déplacée.
+5. Les nouvelles catégories n'ont pas d'image : ajoute-les ensuite depuis le site admin (une image est attendue pour les catégories principales).
+6. Les images actuelles pointent vers localhost : elles seront à renvoyer (ré-uploader) après la mise en ligne.

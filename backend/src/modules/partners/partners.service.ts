@@ -10,6 +10,7 @@ import { Partner }            from './entities/partner.entity';
 import { CreatePartnerDto }   from './dto/create-partner.dto';
 import { UpdatePartnerDto }   from './dto/update-partner.dto';
 import { ActivityLogService } from '../../common/services/activity-log.service';
+import { UploadService, UploadType } from '../upload/upload.service';
 import {
   ActorType,
   LogAction,
@@ -23,7 +24,22 @@ export class PartnersService {
     private readonly partnerRepo: Repository<Partner>,
 
     private readonly logService: ActivityLogService,
+
+    private readonly uploadService: UploadService,
   ) {}
+
+  // Logo d'un partenaire : toute NOUVELLE valeur doit être une image de NOTRE
+  // stockage, dossier « vitrine » (type d'envoi réservé aux admins, le seul
+  // que le back-office propose : POST /upload/vitrine). Une valeur identique
+  // à celle déjà enregistrée n'est pas re-contrôlée (partenaires existants).
+  private assertOwnLogo(
+    url:      string | null | undefined,
+    current?: string | null,
+  ): void {
+    if (url && url !== current) {
+      this.uploadService.assertIsOwnUploadUrl(url, UploadType.VITRINE);
+    }
+  }
 
   // ─────────────────────────────────────────────────────
   // ADMIN — CRÉER UN PARTENAIRE
@@ -43,6 +59,8 @@ export class PartnersService {
         `Un partenaire avec le nom "${dto.part_name}" existe déjà`
       );
     }
+
+    this.assertOwnLogo(dto.part_logoUrl);
 
     const partner               = this.partnerRepo.create();
     partner.part_name           = dto.part_name;
@@ -142,6 +160,8 @@ export class PartnersService {
         );
       }
     }
+
+    this.assertOwnLogo(dto.part_logoUrl, partner.part_logoUrl);
 
     const oldValue = {
       name:     partner.part_name,

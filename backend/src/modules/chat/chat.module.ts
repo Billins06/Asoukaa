@@ -8,6 +8,7 @@ import { Message }        from './entities/message.entity';
 import { VendorProfile }  from '../users/entities/vendor-profile.entity';
 import { Product }        from '../products/entities/product.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { UploadModule } from '../upload/upload.module';
 
 @Module({
   imports: [
@@ -18,6 +19,9 @@ import { NotificationsModule } from '../notifications/notifications.module';
       Product,
     ]),
     NotificationsModule,
+    // UploadService : contrôle « image issue de notre stockage » (sendMessage).
+    // UploadModule n'importe pas ChatModule → pas de dépendance circulaire.
+    UploadModule,
   ],
   controllers: [ChatController],
   providers:   [ChatService],

@@ -22,6 +22,9 @@ export enum NotificationType {
   TICKET     = 'ticket',     // réponse de l'équipe à un ticket de support
 }
 
+// Mes notifications, les plus récentes d'abord (liste + sondage « since ») —
+// migration 1791810000000.
+@Index('IDX_notifications_userId_createdAt', ['userId', 'createdAt'])
 @Entity('notifications')
 export class Notification {
 

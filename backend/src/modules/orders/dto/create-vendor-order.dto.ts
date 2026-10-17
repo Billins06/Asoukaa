@@ -11,6 +11,7 @@ import {
   IsEnum,
   Matches,
   MaxLength,
+  ValidateIf,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { OrderDeliveryMode, OrderTransportMode } from '../entities/order.entity';
@@ -34,9 +35,17 @@ export class VendorOrderItemDto {
 // GET /orders/vendor/find-client.
 export class CreateVendorOrderDto {
 
+  // Le client est désigné par son id (renvoyé par GET /orders/vendor/find-client
+  // — seule façon de choisir un client SANS commande antérieure chez ce
+  // vendeur, dont le téléphone est masqué) OU par son numéro complet.
+  @IsOptional()
+  @IsUUID('4', { message: 'ID client invalide' })
+  clientId?: string;
+
+  @ValidateIf((o) => !o.clientId)
   @IsNotEmpty({ message: 'Le téléphone du client est obligatoire' })
   @Matches(/^(\+?[0-9]{8,15})$/, { message: 'Format de téléphone invalide' })
-  clientPhone: string;
+  clientPhone?: string;
 
   @IsArray()
   @ArrayMinSize(1, { message: 'Au moins un article est requis' })

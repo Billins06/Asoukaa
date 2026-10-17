@@ -1,0 +1,294 @@
+﻿niveau;categorie_parente;nom;statut
+1;;Alimentation;existe déjà
+2;Alimentation;MAIS;existe déjà
+2;Alimentation;Riz;nouveau
+2;Alimentation;Farines, gari et semoules;nouveau
+3;Farines, gari et semoules;Gari;nouveau
+3;Farines, gari et semoules;Tapioca;nouveau
+3;Farines, gari et semoules;Semoule et couscous;nouveau
+3;Farines, gari et semoules;Farine de blé;nouveau
+2;Alimentation;Igname et tubercules;nouveau
+2;Alimentation;Haricots et légumineuses;nouveau
+2;Alimentation;Huiles alimentaires;nouveau
+2;Alimentation;Épices et condiments;nouveau
+2;Alimentation;Fruits et légumes;nouveau
+2;Alimentation;Viandes et poissons;nouveau
+3;Viandes et poissons;Poisson frais;nouveau
+3;Viandes et poissons;Poisson fumé et séché;nouveau
+3;Viandes et poissons;Viande de bovins et ovins;nouveau
+3;Viandes et poissons;Volaille et oeufs;nouveau
+2;Alimentation;Boissons;nouveau
+2;Alimentation;Produits du terroir;nouveau
+3;Produits du terroir;Afitin et soumbala;nouveau
+3;Produits du terroir;Miel;nouveau
+3;Produits du terroir;Noix de cajou;nouveau
+3;Produits du terroir;Arachides;nouveau
+3;Produits du terroir;Gombo et feuilles séchées;nouveau
+2;Alimentation;Snacks et biscuits;nouveau
+1;;Beauté;existe déjà
+2;Beauté;Soins du visage;nouveau
+2;Beauté;Soins du corps;nouveau
+2;Beauté;Soins des cheveux;nouveau
+3;Soins des cheveux;Shampoings et après-shampoings;nouveau
+3;Soins des cheveux;Huiles et beurres capillaires;nouveau
+3;Soins des cheveux;Perruques et tissages;nouveau
+3;Soins des cheveux;Mèches et rajouts;nouveau
+2;Beauté;Maquillage;nouveau
+2;Beauté;Parfums et déodorants;nouveau
+2;Beauté;Karité et produits naturels;nouveau
+3;Karité et produits naturels;Beurre de karité;nouveau
+3;Karité et produits naturels;Savon noir africain;nouveau
+3;Karité et produits naturels;Huiles végétales naturelles;nouveau
+2;Beauté;Hygiène et bain;nouveau
+2;Beauté;Soins des ongles;nouveau
+2;Beauté;Soins pour hommes;nouveau
+2;Beauté;Matériel de coiffure et de beauté;nouveau
+1;;Électronique;existe déjà
+2;Électronique;Téléviseurs et vidéo;nouveau
+2;Électronique;Audio et son;nouveau
+3;Audio et son;Enceintes et haut-parleurs;nouveau
+3;Audio et son;Casques et écouteurs;nouveau
+3;Audio et son;Radios;nouveau
+2;Électronique;Appareils photo et caméras;nouveau
+2;Électronique;Jeux vidéo et consoles;nouveau
+2;Électronique;Chargeurs et câbles;nouveau
+2;Électronique;Sécurité et surveillance;nouveau
+2;Électronique;Objets connectés;nouveau
+2;Électronique;Décodeurs et antennes;nouveau
+1;;Jouets;existe déjà
+2;Jouets;Jouets d'éveil;nouveau
+2;Jouets;Poupées et peluches;nouveau
+2;Jouets;Voitures et véhicules miniatures;nouveau
+2;Jouets;Jeux de construction;nouveau
+2;Jouets;Jeux de société et puzzles;nouveau
+2;Jouets;Jeux d'extérieur;nouveau
+2;Jouets;Jouets éducatifs;nouveau
+2;Jouets;Déguisements;nouveau
+2;Jouets;Jouets électroniques et télécommandés;nouveau
+1;;Livres;existe déjà
+2;Livres;Romans et littérature;nouveau
+2;Livres;Livres scolaires;nouveau
+2;Livres;Livres universitaires;nouveau
+2;Livres;Bandes dessinées et mangas;nouveau
+2;Livres;Livres pour enfants;nouveau
+2;Livres;Religion et spiritualité;nouveau
+2;Livres;Développement personnel;nouveau
+2;Livres;Dictionnaires et langues;nouveau
+2;Livres;Économie et gestion;nouveau
+1;;Maison;existe déjà
+2;Maison;Meubles;nouveau
+2;Maison;Décoration;nouveau
+2;Maison;Literie et linge de maison;nouveau
+2;Maison;Moustiquaires;nouveau
+2;Maison;Rideaux et tapis;nouveau
+2;Maison;Éclairage et luminaires;nouveau
+2;Maison;Salle de bain;nouveau
+2;Maison;Jardin et extérieur;nouveau
+2;Maison;Produits d'entretien;nouveau
+2;Maison;Rangement et organisation;nouveau
+1;;Mode;existe déjà
+2;Mode;Mode femme;nouveau
+2;Mode;Mode homme;nouveau
+2;Mode;Mode enfant;nouveau
+2;Mode;Tenues traditionnelles;nouveau
+3;Tenues traditionnelles;Boubous et grands boubous;nouveau
+3;Tenues traditionnelles;Complets bazin;nouveau
+3;Tenues traditionnelles;Kaba et robes en pagne;nouveau
+3;Tenues traditionnelles;Tenues en wax;nouveau
+2;Mode;Lingerie et sous-vêtements;nouveau
+2;Mode;Accessoires de mode;nouveau
+2;Mode;Uniformes et vêtements de travail;nouveau
+2;Mode;Friperie;nouveau
+1;;Sports;existe déjà
+2;Sports;Gym;existe déjà
+2;Sports;Padel;existe déjà
+2;Sports;Football;nouveau
+2;Sports;Basketball;nouveau
+2;Sports;Course et athlétisme;nouveau
+2;Sports;Musculation et haltères;nouveau
+2;Sports;Arts martiaux;nouveau
+2;Sports;Cyclisme;nouveau
+2;Sports;Natation;nouveau
+2;Sports;Vêtements de sport;nouveau
+2;Sports;Camping et randonnée;nouveau
+1;;Téléphones et tablettes;nouveau
+2;Téléphones et tablettes;Smartphones;nouveau
+2;Téléphones et tablettes;Téléphones basiques;nouveau
+2;Téléphones et tablettes;Téléphones reconditionnés;nouveau
+2;Téléphones et tablettes;Tablettes;nouveau
+2;Téléphones et tablettes;Accessoires téléphones;nouveau
+1;;Informatique;nouveau
+2;Informatique;Ordinateurs portables;nouveau
+2;Informatique;Ordinateurs de bureau;nouveau
+2;Informatique;Écrans et moniteurs;nouveau
+2;Informatique;Imprimantes et scanners;nouveau
+2;Informatique;Stockage;nouveau
+2;Informatique;Claviers et souris;nouveau
+2;Informatique;Routeurs et modems;nouveau
+2;Informatique;Composants informatiques;nouveau
+2;Informatique;Sacoches d'ordinateur;nouveau
+1;;Électroménager;nouveau
+2;Électroménager;Réfrigérateurs et congélateurs;nouveau
+2;Électroménager;Climatiseurs et ventilateurs;nouveau
+2;Électroménager;Machines à laver;nouveau
+2;Électroménager;Cuisinières et gazinières;nouveau
+2;Électroménager;Petit électroménager;nouveau
+2;Électroménager;Fontaines à eau;nouveau
+2;Électroménager;Aspirateurs;nouveau
+2;Électroménager;Réchauds et accessoires gaz;nouveau
+1;;Bébé et maternité;nouveau
+2;Bébé et maternité;Vêtements de bébé;nouveau
+2;Bébé et maternité;Couches et lingettes;nouveau
+2;Bébé et maternité;Alimentation de bébé;nouveau
+2;Bébé et maternité;Poussettes et porte-bébés;nouveau
+2;Bébé et maternité;Berceaux et lits bébé;nouveau
+2;Bébé et maternité;Bain et soins de bébé;nouveau
+2;Bébé et maternité;Articles de maternité;nouveau
+2;Bébé et maternité;Babyphones et sécurité enfant;nouveau
+1;;Santé et bien-être;nouveau
+2;Santé et bien-être;Vitamines et compléments;nouveau
+2;Santé et bien-être;Premiers soins;nouveau
+2;Santé et bien-être;Appareils de mesure santé;nouveau
+2;Santé et bien-être;Hygiène féminine;nouveau
+2;Santé et bien-être;Soins dentaires;nouveau
+2;Santé et bien-être;Tisanes et plantes;nouveau
+2;Santé et bien-être;Protection anti-moustiques;nouveau
+1;;Bricolage et outillage;nouveau
+2;Bricolage et outillage;Outils à main;nouveau
+2;Bricolage et outillage;Outillage électrique;nouveau
+2;Bricolage et outillage;Quincaillerie;nouveau
+2;Bricolage et outillage;Plomberie;nouveau
+2;Bricolage et outillage;Électricité;nouveau
+2;Bricolage et outillage;Peinture et revêtements;nouveau
+2;Bricolage et outillage;Matériaux de construction;nouveau
+3;Matériaux de construction;Carrelage;nouveau
+3;Matériaux de construction;Tôles et toitures;nouveau
+3;Matériaux de construction;Portes et fenêtres;nouveau
+3;Matériaux de construction;Ciment et sable;nouveau
+2;Bricolage et outillage;Sécurité de chantier;nouveau
+2;Bricolage et outillage;Échelles et escabeaux;nouveau
+2;Bricolage et outillage;Soudure et accessoires;nouveau
+1;;Automobile et moto;nouveau
+2;Automobile et moto;Pièces détachées auto;nouveau
+2;Automobile et moto;Pneus et jantes;nouveau
+2;Automobile et moto;Huiles et lubrifiants;nouveau
+2;Automobile et moto;Accessoires auto;nouveau
+2;Automobile et moto;Batteries de véhicules;nouveau
+2;Automobile et moto;Motos et scooters;nouveau
+2;Automobile et moto;Pièces moto;nouveau
+2;Automobile et moto;Casques et équipements de motard;nouveau
+2;Automobile et moto;Autoradios et GPS;nouveau
+2;Automobile et moto;Entretien et lavage auto;nouveau
+1;;Agriculture et élevage;nouveau
+2;Agriculture et élevage;Semences et plants;nouveau
+2;Agriculture et élevage;Engrais et fertilisants;nouveau
+2;Agriculture et élevage;Matériel agricole;nouveau
+2;Agriculture et élevage;Irrigation et arrosage;nouveau
+2;Agriculture et élevage;Alimentation animale;nouveau
+2;Agriculture et élevage;Matériel d'élevage;nouveau
+2;Agriculture et élevage;Apiculture;nouveau
+2;Agriculture et élevage;Pisciculture;nouveau
+2;Agriculture et élevage;Machines de transformation;nouveau
+1;;Animaux de compagnie;nouveau
+2;Animaux de compagnie;Nourriture pour animaux;nouveau
+2;Animaux de compagnie;Accessoires pour chiens;nouveau
+2;Animaux de compagnie;Accessoires pour chats;nouveau
+2;Animaux de compagnie;Oiseaux et cages;nouveau
+2;Animaux de compagnie;Aquariums et accessoires;nouveau
+2;Animaux de compagnie;Hygiène et soins animaux;nouveau
+2;Animaux de compagnie;Couchages pour animaux;nouveau
+1;;Papeterie et fournitures;nouveau
+2;Papeterie et fournitures;Cahiers et carnets;nouveau
+2;Papeterie et fournitures;Stylos et écriture;nouveau
+2;Papeterie et fournitures;Fournitures scolaires;nouveau
+2;Papeterie et fournitures;Fournitures de bureau;nouveau
+2;Papeterie et fournitures;Papier et rames;nouveau
+2;Papeterie et fournitures;Classement et archivage;nouveau
+2;Papeterie et fournitures;Dessin et peinture;nouveau
+2;Papeterie et fournitures;Matériel de classe;nouveau
+1;;Instruments de musique;nouveau
+2;Instruments de musique;Guitares et basses;nouveau
+2;Instruments de musique;Claviers et pianos;nouveau
+2;Instruments de musique;Batteries et percussions;nouveau
+2;Instruments de musique;Percussions africaines;nouveau
+3;Percussions africaines;Djembés;nouveau
+3;Percussions africaines;Tam-tams;nouveau
+3;Percussions africaines;Balafons;nouveau
+3;Percussions africaines;Calebasses et shékérés;nouveau
+2;Instruments de musique;Instruments à vent;nouveau
+2;Instruments de musique;Violons et instruments à cordes;nouveau
+2;Instruments de musique;Sonorisation;nouveau
+2;Instruments de musique;Studio et enregistrement;nouveau
+2;Instruments de musique;Accessoires musicaux;nouveau
+1;;Art et artisanat;nouveau
+2;Art et artisanat;Sculptures et statuettes;nouveau
+2;Art et artisanat;Masques décoratifs;nouveau
+2;Art et artisanat;Peintures et tableaux;nouveau
+2;Art et artisanat;Poterie et céramique;nouveau
+2;Art et artisanat;Vannerie et paniers;nouveau
+2;Art et artisanat;Objets en bois;nouveau
+2;Art et artisanat;Batik et teinture;nouveau
+2;Art et artisanat;Calebasses et objets décorés;nouveau
+2;Art et artisanat;Bronzes et objets en laiton;nouveau
+2;Art et artisanat;Appliqués et tentures d'Abomey;nouveau
+2;Art et artisanat;Loisirs créatifs;nouveau
+1;;Cuisine et ustensiles;nouveau
+2;Cuisine et ustensiles;Casseroles et marmites;nouveau
+2;Cuisine et ustensiles;Poêles et plats;nouveau
+2;Cuisine et ustensiles;Vaisselle et couverts;nouveau
+2;Cuisine et ustensiles;Couteaux et ustensiles;nouveau
+2;Cuisine et ustensiles;Mortiers et ustensiles traditionnels;nouveau
+2;Cuisine et ustensiles;Boîtes de conservation;nouveau
+2;Cuisine et ustensiles;Thermos et glacières;nouveau
+2;Cuisine et ustensiles;Linge de table;nouveau
+2;Cuisine et ustensiles;Bassines, seaux et bidons;nouveau
+1;;Chaussures et maroquinerie;nouveau
+2;Chaussures et maroquinerie;Chaussures femme;nouveau
+2;Chaussures et maroquinerie;Chaussures homme;nouveau
+2;Chaussures et maroquinerie;Chaussures enfant;nouveau
+2;Chaussures et maroquinerie;Sandales et tongs;nouveau
+2;Chaussures et maroquinerie;Baskets;nouveau
+2;Chaussures et maroquinerie;Sacs à main;nouveau
+2;Chaussures et maroquinerie;Sacs à dos;nouveau
+2;Chaussures et maroquinerie;Valises et bagages;nouveau
+2;Chaussures et maroquinerie;Portefeuilles et petite maroquinerie;nouveau
+1;;Bijoux et montres;nouveau
+2;Bijoux et montres;Colliers et pendentifs;nouveau
+2;Bijoux et montres;Bracelets;nouveau
+2;Bijoux et montres;Bagues;nouveau
+2;Bijoux et montres;Boucles d'oreilles;nouveau
+2;Bijoux et montres;Chaînes et gourmettes;nouveau
+2;Bijoux et montres;Montres homme;nouveau
+2;Bijoux et montres;Montres femme;nouveau
+2;Bijoux et montres;Perles et bijoux traditionnels;nouveau
+2;Bijoux et montres;Bijoux en or et argent;nouveau
+2;Bijoux et montres;Parures et coffrets;nouveau
+1;;Pagnes et tissus;nouveau
+2;Pagnes et tissus;Wax;nouveau
+2;Pagnes et tissus;Bazin et brocart;nouveau
+2;Pagnes et tissus;Dentelle et tulle;nouveau
+2;Pagnes et tissus;Pagnes tissés et bogolan;nouveau
+2;Pagnes et tissus;Tissus de coton;nouveau
+2;Pagnes et tissus;Satin, soie et velours;nouveau
+2;Pagnes et tissus;Tissus d'ameublement;nouveau
+2;Pagnes et tissus;Fournitures de couture;nouveau
+2;Pagnes et tissus;Machines à coudre;nouveau
+1;;Mariage et événements;nouveau
+2;Mariage et événements;Décoration de fête;nouveau
+2;Mariage et événements;Tenues de mariage;nouveau
+3;Tenues de mariage;Robes de mariée;nouveau
+3;Tenues de mariage;Costumes et smokings;nouveau
+3;Tenues de mariage;Tenues de cortège;nouveau
+2;Mariage et événements;Cadeaux et coffrets;nouveau
+2;Mariage et événements;Faire-part et papeterie événementielle;nouveau
+2;Mariage et événements;Vaisselle jetable;nouveau
+2;Mariage et événements;Chapiteaux, bâches et chaises;nouveau
+1;;Énergie solaire;nouveau
+2;Énergie solaire;Panneaux solaires;nouveau
+2;Énergie solaire;Batteries solaires;nouveau
+2;Énergie solaire;Onduleurs et régulateurs;nouveau
+2;Énergie solaire;Kits solaires complets;nouveau
+2;Énergie solaire;Lampes et lanternes solaires;nouveau
+2;Énergie solaire;Groupes électrogènes;nouveau
+2;Énergie solaire;Stabilisateurs de tension;nouveau
+2;Énergie solaire;Accessoires d'installation solaire;nouveau

@@ -1,0 +1,295 @@
+# Arbre des catégories Asoukaa. Indentation = 2 espaces par niveau. Max 3 niveaux.
+# Les noms doivent être uniques dans TOUT l'arbre (le slug est unique globalement).
+Alimentation
+  MAIS
+  Riz
+  Farines, gari et semoules
+    Gari
+    Tapioca
+    Semoule et couscous
+    Farine de blé
+  Igname et tubercules
+  Haricots et légumineuses
+  Huiles alimentaires
+  Épices et condiments
+  Fruits et légumes
+  Viandes et poissons
+    Poisson frais
+    Poisson fumé et séché
+    Viande de bovins et ovins
+    Volaille et oeufs
+  Boissons
+  Produits du terroir
+    Afitin et soumbala
+    Miel
+    Noix de cajou
+    Arachides
+    Gombo et feuilles séchées
+  Snacks et biscuits
+Beauté
+  Soins du visage
+  Soins du corps
+  Soins des cheveux
+    Shampoings et après-shampoings
+    Huiles et beurres capillaires
+    Perruques et tissages
+    Mèches et rajouts
+  Maquillage
+  Parfums et déodorants
+  Karité et produits naturels
+    Beurre de karité
+    Savon noir africain
+    Huiles végétales naturelles
+  Hygiène et bain
+  Soins des ongles
+  Soins pour hommes
+  Matériel de coiffure et de beauté
+Électronique
+  Téléviseurs et vidéo
+  Audio et son
+    Enceintes et haut-parleurs
+    Casques et écouteurs
+    Radios
+  Appareils photo et caméras
+  Jeux vidéo et consoles
+  Chargeurs et câbles
+  Sécurité et surveillance
+  Objets connectés
+  Décodeurs et antennes
+Jouets
+  Jouets d'éveil
+  Poupées et peluches
+  Voitures et véhicules miniatures
+  Jeux de construction
+  Jeux de société et puzzles
+  Jeux d'extérieur
+  Jouets éducatifs
+  Déguisements
+  Jouets électroniques et télécommandés
+Livres
+  Romans et littérature
+  Livres scolaires
+  Livres universitaires
+  Bandes dessinées et mangas
+  Livres pour enfants
+  Religion et spiritualité
+  Développement personnel
+  Dictionnaires et langues
+  Économie et gestion
+Maison
+  Meubles
+  Décoration
+  Literie et linge de maison
+  Moustiquaires
+  Rideaux et tapis
+  Éclairage et luminaires
+  Salle de bain
+  Jardin et extérieur
+  Produits d'entretien
+  Rangement et organisation
+Mode
+  Mode femme
+  Mode homme
+  Mode enfant
+  Tenues traditionnelles
+    Boubous et grands boubous
+    Complets bazin
+    Kaba et robes en pagne
+    Tenues en wax
+  Lingerie et sous-vêtements
+  Accessoires de mode
+  Uniformes et vêtements de travail
+  Friperie
+Sports
+  Gym
+  Padel
+  Football
+  Basketball
+  Course et athlétisme
+  Musculation et haltères
+  Arts martiaux
+  Cyclisme
+  Natation
+  Vêtements de sport
+  Camping et randonnée
+Téléphones et tablettes
+  Smartphones
+  Téléphones basiques
+  Téléphones reconditionnés
+  Tablettes
+  Accessoires téléphones
+Informatique
+  Ordinateurs portables
+  Ordinateurs de bureau
+  Écrans et moniteurs
+  Imprimantes et scanners
+  Stockage
+  Claviers et souris
+  Routeurs et modems
+  Composants informatiques
+  Sacoches d'ordinateur
+Électroménager
+  Réfrigérateurs et congélateurs
+  Climatiseurs et ventilateurs
+  Machines à laver
+  Cuisinières et gazinières
+  Petit électroménager
+  Fontaines à eau
+  Aspirateurs
+  Réchauds et accessoires gaz
+Bébé et maternité
+  Vêtements de bébé
+  Couches et lingettes
+  Alimentation de bébé
+  Poussettes et porte-bébés
+  Berceaux et lits bébé
+  Bain et soins de bébé
+  Articles de maternité
+  Babyphones et sécurité enfant
+Santé et bien-être
+  Vitamines et compléments
+  Premiers soins
+  Appareils de mesure santé
+  Hygiène féminine
+  Soins dentaires
+  Tisanes et plantes
+  Protection anti-moustiques
+Bricolage et outillage
+  Outils à main
+  Outillage électrique
+  Quincaillerie
+  Plomberie
+  Électricité
+  Peinture et revêtements
+  Matériaux de construction
+    Carrelage
+    Tôles et toitures
+    Portes et fenêtres
+    Ciment et sable
+  Sécurité de chantier
+  Échelles et escabeaux
+  Soudure et accessoires
+Automobile et moto
+  Pièces détachées auto
+  Pneus et jantes
+  Huiles et lubrifiants
+  Accessoires auto
+  Batteries de véhicules
+  Motos et scooters
+  Pièces moto
+  Casques et équipements de motard
+  Autoradios et GPS
+  Entretien et lavage auto
+Agriculture et élevage
+  Semences et plants
+  Engrais et fertilisants
+  Matériel agricole
+  Irrigation et arrosage
+  Alimentation animale
+  Matériel d'élevage
+  Apiculture
+  Pisciculture
+  Machines de transformation
+Animaux de compagnie
+  Nourriture pour animaux
+  Accessoires pour chiens
+  Accessoires pour chats
+  Oiseaux et cages
+  Aquariums et accessoires
+  Hygiène et soins animaux
+  Couchages pour animaux
+Papeterie et fournitures
+  Cahiers et carnets
+  Stylos et écriture
+  Fournitures scolaires
+  Fournitures de bureau
+  Papier et rames
+  Classement et archivage
+  Dessin et peinture
+  Matériel de classe
+Instruments de musique
+  Guitares et basses
+  Claviers et pianos
+  Batteries et percussions
+  Percussions africaines
+    Djembés
+    Tam-tams
+    Balafons
+    Calebasses et shékérés
+  Instruments à vent
+  Violons et instruments à cordes
+  Sonorisation
+  Studio et enregistrement
+  Accessoires musicaux
+Art et artisanat
+  Sculptures et statuettes
+  Masques décoratifs
+  Peintures et tableaux
+  Poterie et céramique
+  Vannerie et paniers
+  Objets en bois
+  Batik et teinture
+  Calebasses et objets décorés
+  Bronzes et objets en laiton
+  Appliqués et tentures d'Abomey
+  Loisirs créatifs
+Cuisine et ustensiles
+  Casseroles et marmites
+  Poêles et plats
+  Vaisselle et couverts
+  Couteaux et ustensiles
+  Mortiers et ustensiles traditionnels
+  Boîtes de conservation
+  Thermos et glacières
+  Linge de table
+  Bassines, seaux et bidons
+Chaussures et maroquinerie
+  Chaussures femme
+  Chaussures homme
+  Chaussures enfant
+  Sandales et tongs
+  Baskets
+  Sacs à main
+  Sacs à dos
+  Valises et bagages
+  Portefeuilles et petite maroquinerie
+Bijoux et montres
+  Colliers et pendentifs
+  Bracelets
+  Bagues
+  Boucles d'oreilles
+  Chaînes et gourmettes
+  Montres homme
+  Montres femme
+  Perles et bijoux traditionnels
+  Bijoux en or et argent
+  Parures et coffrets
+Pagnes et tissus
+  Wax
+  Bazin et brocart
+  Dentelle et tulle
+  Pagnes tissés et bogolan
+  Tissus de coton
+  Satin, soie et velours
+  Tissus d'ameublement
+  Fournitures de couture
+  Machines à coudre
+Mariage et événements
+  Décoration de fête
+  Tenues de mariage
+    Robes de mariée
+    Costumes et smokings
+    Tenues de cortège
+  Cadeaux et coffrets
+  Faire-part et papeterie événementielle
+  Vaisselle jetable
+  Chapiteaux, bâches et chaises
+Énergie solaire
+  Panneaux solaires
+  Batteries solaires
+  Onduleurs et régulateurs
+  Kits solaires complets
+  Lampes et lanternes solaires
+  Groupes électrogènes
+  Stabilisateurs de tension
+  Accessoires d'installation solaire
