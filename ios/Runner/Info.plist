@@ -25,7 +25,9 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSCameraUsageDescription</key>
-	<string>Cette application utilise la caméra pour scanner les QR codes de livraison.</string>
+	<string>Cette application utilise la caméra pour scanner les QR codes de livraison et prendre des photos (recherche par image, photos de produits).</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Cette application accède à vos photos pour importer des images (recherche par image, photos de produits et de boutique).</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Cette application utilise votre position pour le suivi GPS des livraisons en temps réel.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
@@ -53,5 +55,17 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<!-- Lien profond pour le partage de fiche produit : asoukaa://product?id=... -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.asoukaa.app.deeplink</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>asoukaa</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

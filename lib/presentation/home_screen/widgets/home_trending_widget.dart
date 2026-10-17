@@ -1,20 +1,29 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../../routes/app_routes.dart';
+import '../../../utils/grille_produits.dart';
 import '../../../widgets/custom_image_widget.dart';
 import '../../../services/nest_auth_service.dart';
 import '../../../services/api_service.dart';
+import '../../../services/wishlist_service.dart';
+import '../../../utils/price_range.dart';
 
 class HomeTrendingWidget extends StatefulWidget {
   final void Function(Map<String, dynamic>) onProductTap;
   final List<Map<String, dynamic>> products;
   final VoidCallback? onCartUpdated;
 
+  /// Rayon « Tendances » de la Vitrine (admin) d'où viennent les
+  /// produits : { id, nom, type, ... }. null => produits de repli
+  /// (derniers produits) : titre et « Voir tout » d'origine.
+  final Map<String, dynamic>? rayon;
+
   const HomeTrendingWidget({
     super.key,
     required this.onProductTap,
     this.products = const [],
     this.onCartUpdated,
+    this.rayon,
   });
 
   @override
@@ -22,31 +31,32 @@ class HomeTrendingWidget extends StatefulWidget {
 }
 
 class _HomeTrendingWidgetState extends State<HomeTrendingWidget> {
-  // Fallback mock products only shown when no real data available
-  static final List<Map<String, dynamic>> _fallbackProducts = [
-    {
-      'id': 't1',
-      'name': 'Boubou Brodé Homme Premium',
-      'shop': 'Elegance Cotonou',
-      'price': 45000,
-      'originalPrice': 45000,
-      'discount': 0,
-      'rating': 4.9,
-      'reviewCount': 567,
-      'imageUrl':
-          'https://img.rocket.new/generatedImages/rocket_gen_img_1aa6c2e6b-1773261630993.png',
-      'semanticLabel':
-          'Homme en boubou blanc brodé traditionnel avec broderies bleues debout sur fond neutre',
-      'stockLeft': 45,
-      'badge': 'Tendance',
-    },
-  ];
+  // Plus de faux produits de démonstration : sans vraies données, le bloc
+  // est masqué (voir build).
+  List<Map<String, dynamic>> get _displayProducts =>
+      widget.products.map((p) => _normalizeProduct(p)).toList();
 
-  List<Map<String, dynamic>> get _displayProducts {
-    if (widget.products.isNotEmpty) {
-      return widget.products.map((p) => _normalizeProduct(p)).toList();
+  String get _title {
+    final nom = (widget.rayon?['nom'] ?? '').toString().trim();
+    return nom.isNotEmpty ? nom : 'Tendances';
+  }
+
+  void _openSeeAll() {
+    final rayonId = (widget.rayon?['id'] ?? '').toString();
+    if (rayonId.isNotEmpty) {
+      Navigator.pushNamed(
+        context,
+        AppRoutes.categoryProducts,
+        arguments: <String, dynamic>{
+          'mode': 'rayon',
+          'id': rayonId,
+          'title': _title,
+          'parentTitle': 'La Vitrine',
+        },
+      );
+      return;
     }
-    return _fallbackProducts;
+    Navigator.pushNamed(context, AppRoutes.allProducts);
   }
 
   Map<String, dynamic> _normalizeProduct(Map<String, dynamic> p) {
@@ -93,7 +103,10 @@ class _HomeTrendingWidgetState extends State<HomeTrendingWidget> {
       'name': p['name'] ?? p['title'] ?? '',
       'shop': shopName,
       'price': price,
-      'minPrice': p['min_price'] as int? ?? p['minPrice'] as int?,
+      // Paliers dégressifs bruts : la carte affiche une fourchette
+      // « meilleur palier – prix normal » via priceRangeLabel().
+      'tierPrices':
+          p['tierPrices'] ?? p['price_tiers'] ?? p['priceTiers'],
       'originalPrice': originalPrice,
       'discount': discount,
       'rating': (p['rating'] as num? ?? p['averageRating'] as num? ?? 4.5).toDouble(),
@@ -145,6 +158,14 @@ class _HomeTrendingWidgetState extends State<HomeTrendingWidget> {
           ),
         ),
       );
+      // ⚠️ Filet de sécurité : sur certains environnements (onglet Chrome
+      // arrière-plan, TickerMode suspendu par une navigation), le timer
+      // interne du SnackBar ne se déclenche pas de façon fiable et le
+      // message reste affiché indéfiniment. On force sa disparition avec
+      // un vrai minuteur, indépendant de l'état d'animation du Scaffold.
+      Future.delayed(const Duration(seconds: 2), () {
+        if (mounted) ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      });
       widget.onCartUpdated?.call();
     } catch (_) {
       if (!context.mounted) return;
@@ -174,37 +195,40 @@ class _HomeTrendingWidgetState extends State<HomeTrendingWidget> {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Row(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(6),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFFFEDE3),
-                      borderRadius: BorderRadius.circular(8),
+              Expanded(
+                child: Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(6),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFFEDE3),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Icon(
+                        Icons.trending_up_rounded,
+                        size: 16,
+                        color: Color(0xFFFF6210),
+                      ),
                     ),
-                    child: const Icon(
-                      Icons.trending_up_rounded,
-                      size: 16,
-                      color: Color(0xFFFF6210),
+                    const SizedBox(width: 10),
+                    Flexible(
+                      child: Text(
+                        _title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: GoogleFonts.outfit(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w700,
+                          color: const Color(0xFF1A1A1A),
+                        ),
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 10),
-                  Text(
-                    'Tendances',
-                    style: GoogleFonts.outfit(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w700,
-                      color: const Color(0xFF1A1A1A),
-                    ),
-                  ),
-                ],
-              ),
-              GestureDetector(
-                onTap: () => Navigator.pushNamed(
-                  context,
-                  AppRoutes.searchResults,
-                  arguments: '',
+                  ],
                 ),
+              ),
+              const SizedBox(width: 12),
+              GestureDetector(
+                onTap: _openSeeAll,
                 child: Text(
                   'Voir tout',
                   style: GoogleFonts.outfit(
@@ -225,9 +249,9 @@ class _HomeTrendingWidgetState extends State<HomeTrendingWidget> {
             physics: const NeverScrollableScrollPhysics(),
             gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
               crossAxisCount: crossAxisCount,
-              childAspectRatio: 0.62,
-              crossAxisSpacing: 10,
-              mainAxisSpacing: 10,
+              childAspectRatio: kProductGridRatio,
+              crossAxisSpacing: kProductGridSpacing,
+              mainAxisSpacing: kProductGridSpacing,
             ),
             itemCount: products.length,
             itemBuilder: (_, index) {
@@ -317,12 +341,17 @@ class _TrendingProductCardState extends State<_TrendingProductCard>
         if (mounted) {
           setState(() { _isInWishlist = false; _wishlistLoading = false; });
         }
+        // Le badge cœur de l'accueil écoute ce service : sans cet appel
+        // il resterait affiché avec l'ancien nombre jusqu'au prochain
+        // rechargement de l'écran d'accueil.
+        WishlistService.instance.refreshCount();
       } else {
         await ApiService.instance.client
             .post('/api/v1/wishlist', data: {'productId': id});
         if (mounted) {
           setState(() { _isInWishlist = true; _wishlistLoading = false; });
         }
+        WishlistService.instance.refreshCount();
       }
     } catch (_) {
       if (mounted) setState(() => _wishlistLoading = false);
@@ -348,9 +377,10 @@ class _TrendingProductCardState extends State<_TrendingProductCard>
   @override
   Widget build(BuildContext context) {
     final p = widget.product;
-    final minPrice = p['minPrice'] as int?;
-    final price = p['price'] as int? ?? 0;
-    final hasPriceRange = minPrice != null && minPrice < price;
+    // « 14 000 – 18 500 F » dès qu'un palier dégressif est moins cher,
+    // sinon le prix normal seul. Carte étroite : suffixe de fourchette
+    // abrégé en « F » pour tenir sur une ligne.
+    final priceLabel = priceRangeLabel(p, rangeCurrency: 'F');
     final discount = p['discount'] as int? ?? 0;
     final badge = p['badge'] as String? ?? '';
 
@@ -556,9 +586,7 @@ class _TrendingProductCardState extends State<_TrendingProductCard>
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text(
-                                  hasPriceRange
-                                      ? '${_formatPrice(minPrice)}-${_formatPrice(price)} F'
-                                      : '${_formatPrice(price)} FCFA',
+                                  priceLabel,
                                   style: GoogleFonts.outfit(
                                     fontSize: 12,
                                     fontWeight: FontWeight.w700,

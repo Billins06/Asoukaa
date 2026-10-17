@@ -15,6 +15,21 @@ class ProductResult<T> {
       ProductResult._(success: false, error: error);
 }
 
+/// Une page de GET /products (défilement infini de l'accueil).
+class ProductsPage {
+  final List<Map<String, dynamic>> items;
+  final int page;
+  final int total;
+  final bool hasMore;
+
+  const ProductsPage({
+    required this.items,
+    required this.page,
+    required this.total,
+    required this.hasMore,
+  });
+}
+
 class ProductService {
   static ProductService? _instance;
   static ProductService get instance => _instance ??= ProductService._();
@@ -80,6 +95,62 @@ class ProductService {
     }
   }
 
+  /// Une page de produits pour le défilement infini de l'accueil
+  /// (GET /products?page=N&limit=20 → { data, total, page, limit, pages,
+  /// hasMore }). Les produits sont normalisés comme ceux de getProducts().
+  Future<ProductResult<ProductsPage>> getProductsPage({
+    int page = 1,
+    int limit = 20,
+  }) async {
+    try {
+      final response = await _client.get(
+        '/api/v1/products',
+        queryParameters: <String, dynamic>{'page': page, 'limit': limit},
+      );
+
+      final body = response.data;
+      List<dynamic> rawList = const [];
+      var total = 0;
+      var hasMore = false;
+      if (body is List) {
+        rawList = body;
+        hasMore = rawList.length >= limit;
+      } else if (body is Map) {
+        final data = body['data'];
+        if (data is List) rawList = data;
+        total = int.tryParse('${body['total'] ?? ''}') ?? 0;
+        final more = body['hasMore'];
+        hasMore = more is bool ? more : rawList.length >= limit;
+      }
+      // Une page vide met fin au défilement, quoi que dise le serveur
+      // (évite de redemander indéfiniment la même page vide).
+      if (rawList.isEmpty) hasMore = false;
+
+      final items = rawList
+          .whereType<Map>()
+          .map((e) => _normalize(Map<String, dynamic>.from(e)))
+          .toList();
+
+      return ProductResult.success(
+        ProductsPage(
+          items: items,
+          page: page,
+          total: total,
+          hasMore: hasMore,
+        ),
+      );
+    } on DioException catch (e) {
+      return ProductResult.failure(_extractError(e));
+    } catch (_) {
+      return ProductResult.failure('Erreur lors du chargement des produits.');
+    }
+  }
+
+  /// Version publique de la normalisation, pour les autres services
+  /// (Vitrine, boutiques) qui reçoivent des produits du serveur.
+  static Map<String, dynamic> normalizeProduct(Map<String, dynamic> raw) =>
+      _normalize(raw);
+
   static Map<String, dynamic> _normalize(Map<String, dynamic> raw) {
     final variants = raw['variants'] as List? ?? [];
     final firstVariant = variants.isNotEmpty ? (variants.first as Map?) : null;
@@ -93,16 +164,57 @@ class ProductService {
       price = double.tryParse(firstVariant['price']?.toString() ?? '0') ?? 0;
     }
 
-    // Image : variants[0].imageUrl > images[0] > vide
+    // Galerie : toutes les images du produit (les vidéos, isVideo: true,
+    // sont exclues), image principale d'abord puis sortOrder.
+    // ⚠️ Avant : 'images' était remplacé par [imageUrl] dès qu'une image
+    // existait → la fiche produit n'affichait qu'UNE photo même quand le
+    // vendeur en avait publié 5 (GET /products/:id les renvoie toutes).
     final imagesList = raw['images'] as List? ?? [];
+    int byPrimaryThenOrder(dynamic a, dynamic b) {
+      final aPrimary = a is Map && a['isPrimary'] == true ? 0 : 1;
+      final bPrimary = b is Map && b['isPrimary'] == true ? 0 : 1;
+      if (aPrimary != bPrimary) return aPrimary - bPrimary;
+      final aOrder = a is Map ? (a['sortOrder'] as num? ?? 0) : 0;
+      final bOrder = b is Map ? (b['sortOrder'] as num? ?? 0) : 0;
+      return aOrder.compareTo(bOrder);
+    }
+
+    List<String> urlsOf(List<dynamic> entries) {
+      final urls = <String>[];
+      for (final e in entries) {
+        final url = (e is Map ? (e['url'] ?? e['imageUrl'] ?? '') : e)
+            .toString()
+            .trim();
+        if (url.isNotEmpty && !urls.contains(url)) urls.add(url);
+      }
+      return urls;
+    }
+
+    final photoEntries = imagesList
+        .where((e) => !(e is Map && e['isVideo'] == true))
+        .toList()
+      ..sort(byPrimaryThenOrder);
+    final galleryUrls = urlsOf(photoEntries);
+
+    // Vidéos du produit (isVideo: true), même ordre que les photos. Liste
+    // séparée : 'images' reste une liste de photos pour les cartes produit,
+    // seule la galerie de la fiche produit lit 'videos'.
+    final videoEntries = imagesList
+        .where((e) => e is Map && e['isVideo'] == true)
+        .toList()
+      ..sort(byPrimaryThenOrder);
+    final videoUrls = urlsOf(videoEntries);
+
+    // Image principale (cartes produit) : variants[0].imageUrl > images[0] > vide
     String imageUrl = '';
     if (firstVariant != null && firstVariant['imageUrl'] != null) {
       imageUrl = firstVariant['imageUrl'].toString();
-    } else if (imagesList.isNotEmpty) {
-      final first = imagesList.first;
-      imageUrl = first is Map
-          ? (first['url'] ?? first['imageUrl'] ?? '').toString()
-          : first.toString();
+    } else if (galleryUrls.isNotEmpty) {
+      imageUrl = galleryUrls.first;
+    }
+    // L'image de la variante reste en tête de galerie si elle n'y est pas déjà
+    if (imageUrl.isNotEmpty && !galleryUrls.contains(imageUrl)) {
+      galleryUrls.insert(0, imageUrl);
     }
 
     return {
@@ -110,7 +222,12 @@ class ProductService {
       'name': raw['prod_name'] ?? raw['name'] ?? raw['title'] ?? '',
       'price': price,
       'image_url': imageUrl,
-      'images': imageUrl.isNotEmpty ? [imageUrl] : imagesList,
+      // Liste d'URL (String) : les écrans lisent images.first comme String
+      // ou Map, les deux formats restent supportés partout.
+      'images': galleryUrls,
+      // Liste d'URL (String) des vidéos du produit, affichées après les
+      // photos dans la galerie de la fiche produit.
+      'videos': videoUrls,
       'sold_count': raw['totalVentes'] ?? raw['sold_count'] ?? 0,
       'rating': double.tryParse(raw['noteMoyenne']?.toString() ?? '0') ?? 0,
       'reviews_count': raw['nbreAvis'] ?? raw['reviews_count'] ?? 0,

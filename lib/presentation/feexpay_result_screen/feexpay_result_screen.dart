@@ -135,7 +135,7 @@ class _FeexpayResultScreenState extends State<FeexpayResultScreen> {
                       const SizedBox(height: 10),
                       Text(
                         widget.success
-                            ? 'Votre paiement a été traité avec succès. Votre commande est confirmée et en cours de préparation.'
+                            ? 'Votre paiement a été traité avec succès. Votre commande a été transmise au vendeur pour confirmation.'
                             : 'Le paiement n\'a pas pu être traité. Votre panier a été conservé. Veuillez réessayer.',
                         textAlign: TextAlign.center,
                         style: GoogleFonts.outfit(
@@ -156,7 +156,7 @@ class _FeexpayResultScreenState extends State<FeexpayResultScreen> {
                             borderRadius: BorderRadius.circular(10),
                           ),
                           child: Text(
-                            'Commande confirmée',
+                            'Transmise au vendeur',
                             style: GoogleFonts.outfit(
                               fontSize: 13,
                               fontWeight: FontWeight.w600,

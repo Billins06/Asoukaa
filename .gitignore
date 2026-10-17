@@ -72,3 +72,7 @@ android/app/.cxx
 
 # Dossier de sauvegardes QA locales
 _sauvegardes_qa/
+
+# Dossiers de sauvegarde / aperçus temporaires de travail
+_sauvegardes*/
+_apercus_temp/

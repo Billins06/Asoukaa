@@ -8,6 +8,7 @@ import '../../routes/app_routes.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/app_toast.dart';
 import '../../services/nest_auth_service.dart';
+import '../../services/mode_service.dart';
 import './widgets/account_type_selector_widget.dart';
 import './widgets/auth_form_widget.dart';
 import './widgets/auth_logo_widget.dart';
@@ -34,14 +35,14 @@ class _SignUpLoginScreenState extends State<SignUpLoginScreen>
   // Vendeur data (stocké pour onboarding post-login)
   String _shopName = '';
   String _shopAddress = '';
-  String _activityType = '';
+  List<String> _categoryIds = [];
   String _shopDescription = '';
 
   // Livreur data
   String _ville = '';
   String _quartier = '';
   String _preciseAddress = '';
-  String _vehicleType = 'MOTO';
+  String _vehicleType = 'moto';
   String _availability = 'Temps_plein';
   String _licensePlate = '';
 
@@ -112,7 +113,7 @@ class _SignUpLoginScreenState extends State<SignUpLoginScreen>
     // Vendeur
     String? shopName,
     String? shopAddress,
-    String? activityType,
+    List<String>? categoryIds,
     String? shopDescription,
     // Livreur
     String? ville,
@@ -128,7 +129,7 @@ class _SignUpLoginScreenState extends State<SignUpLoginScreen>
     if (phone != null) _phone = phone;
     if (shopName != null) _shopName = shopName;
     if (shopAddress != null) _shopAddress = shopAddress;
-    if (activityType != null) _activityType = activityType;
+    if (categoryIds != null) _categoryIds = categoryIds;
     if (shopDescription != null) _shopDescription = shopDescription;
     if (ville != null) _ville = ville;
     if (quartier != null) _quartier = quartier;
@@ -203,7 +204,7 @@ class _SignUpLoginScreenState extends State<SignUpLoginScreen>
               'accountType': _selectedAccountType,
               'shopName': _shopName,
               'shopAddress': _shopAddress,
-              'activityType': _activityType,
+              'categoryIds': _categoryIds,
               'shopDescription': _shopDescription,
               'ville': _ville,
               'quartier': _quartier,
@@ -241,7 +242,9 @@ class _SignUpLoginScreenState extends State<SignUpLoginScreen>
   Future<void> _navigateByRole() async {
     String role;
     try {
-      role = await NestAuthService.instance.getUserRole();
+      // Rôle effectif : un vendeur dont le dernier mode est « client »
+      // retrouve l'accueil client (voir ModeService).
+      role = await ModeService.instance.getEffectiveRole();
     } catch (_) {
       role = 'acheteur';
     }
@@ -363,6 +366,7 @@ class _SignUpLoginScreenState extends State<SignUpLoginScreen>
                     isLoading: _isLoading,
                     onSubmit: _handleSubmit,
                     onFormDataChanged: _onFormDataChanged,
+                    onFilesChanged: _onFilesChanged,
                   ),
                   const SizedBox(height: 20),
                   _buildSwitchModeRow(),

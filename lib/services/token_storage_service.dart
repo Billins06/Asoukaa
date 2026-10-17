@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -65,7 +67,34 @@ class TokenStorageService {
 
   Future<bool> hasValidSession() async {
     final token = await getAccessToken();
-    return token != null && token.isNotEmpty;
+    if (token == null || token.isEmpty) return false;
+    return !_estExpire(token);
+  }
+
+  /// Lit la date d'expiration inscrite dans le JWT.
+  ///
+  /// Un token illisible est traité comme expiré : mieux vaut renvoyer vers la
+  /// connexion que router l'utilisateur vers un tableau de bord où chaque
+  /// requête échouera en 401.
+  static bool _estExpire(String token) {
+    final parts = token.split('.');
+    if (parts.length != 3) return true;
+    try {
+      final payload =
+          json.decode(utf8.decode(base64Url.decode(base64Url.normalize(parts[1]))))
+              as Map<String, dynamic>;
+      final exp = payload['exp'];
+      if (exp is! int) return true;
+      final expiration =
+          DateTime.fromMillisecondsSinceEpoch(exp * 1000, isUtc: true);
+      // Marge de 10 s : un token qui expire pendant le trajet réseau ne doit
+      // pas être considéré comme encore valide.
+      return DateTime.now().toUtc().isAfter(
+        expiration.subtract(const Duration(seconds: 10)),
+      );
+    } catch (_) {
+      return true;
+    }
   }
 
   // ── Suppression ─────────────────────────────────────────────────────────────

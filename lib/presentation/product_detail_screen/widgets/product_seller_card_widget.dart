@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../../widgets/custom_image_widget.dart';
 import '../../../routes/app_routes.dart';
+import '../../../utils/last_seen_format.dart';
 
 class ProductSellerCardWidget extends StatelessWidget {
   final Map<String, dynamic> product;
@@ -10,7 +11,11 @@ class ProductSellerCardWidget extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isOnline = product['shopIsOnline'] as bool? ?? false;
+    // Présence réelle du vendeur : tant qu'elle n'est pas connue (chargement
+    // ou échec), on n'affiche rien plutôt qu'un faux « Hors ligne ».
+    final presenceKnown = product['shopPresenceKnown'] == true;
+    final isOnline = presenceKnown && product['shopIsOnline'] == true;
+    final lastSeenAt = product['shopLastSeenAt'] as String?;
     final shopRating = product['shopRating'] as double? ?? 4.5;
     final shopSales = product['shopSales'] as int? ?? 0;
 
@@ -38,21 +43,22 @@ class ProductSellerCardWidget extends StatelessWidget {
                     borderRadius: BorderRadius.circular(12),
                     child: _buildShopLogo(product),
                   ),
-                  Positioned(
-                    bottom: 2,
-                    right: 2,
-                    child: Container(
-                      width: 12,
-                      height: 12,
-                      decoration: BoxDecoration(
-                        color: isOnline
-                            ? const Color(0xFF16A34A)
-                            : const Color(0xFF9E9E9E),
-                        shape: BoxShape.circle,
-                        border: Border.all(color: Colors.white, width: 2),
+                  if (presenceKnown)
+                    Positioned(
+                      bottom: 2,
+                      right: 2,
+                      child: Container(
+                        width: 12,
+                        height: 12,
+                        decoration: BoxDecoration(
+                          color: isOnline
+                              ? const Color(0xFF16A34A)
+                              : const Color(0xFF9E9E9E),
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white, width: 2),
+                        ),
                       ),
                     ),
-                  ),
                 ],
               ),
               const SizedBox(width: 12),
@@ -96,32 +102,38 @@ class ProductSellerCardWidget extends StatelessWidget {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 3),
-                    Row(
-                      children: [
-                        Container(
-                          width: 6,
-                          height: 6,
-                          decoration: BoxDecoration(
-                            color: isOnline
-                                ? const Color(0xFF16A34A)
-                                : const Color(0xFF9E9E9E),
-                            shape: BoxShape.circle,
+                    if (presenceKnown) ...[
+                      const SizedBox(height: 3),
+                      Row(
+                        children: [
+                          Container(
+                            width: 6,
+                            height: 6,
+                            decoration: BoxDecoration(
+                              color: isOnline
+                                  ? const Color(0xFF16A34A)
+                                  : const Color(0xFF9E9E9E),
+                              shape: BoxShape.circle,
+                            ),
                           ),
-                        ),
-                        const SizedBox(width: 4),
-                        Text(
-                          isOnline ? 'En ligne maintenant' : 'Hors ligne',
-                          style: GoogleFonts.outfit(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w400,
-                            color: isOnline
-                                ? const Color(0xFF16A34A)
-                                : const Color(0xFF9E9E9E),
+                          const SizedBox(width: 4),
+                          Flexible(
+                            child: Text(
+                              formatLastSeen(lastSeenAt, isOnline: isOnline),
+                              style: GoogleFonts.outfit(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w400,
+                                color: isOnline
+                                    ? const Color(0xFF16A34A)
+                                    : const Color(0xFF9E9E9E),
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
                           ),
-                        ),
-                      ],
-                    ),
+                        ],
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -186,12 +198,16 @@ class ProductSellerCardWidget extends StatelessWidget {
                     context,
                     AppRoutes.boutiqueVendeur,
                     arguments: {
+                      // 'id' manquait ici : sans lui, BoutiqueVendeurScreen
+                      // ne pouvait JAMAIS appeler le serveur pour les vraies
+                      // infos boutique (ni produits, ni avis) — elle
+                      // retombait systématiquement sur ces quelques champs.
+                      'id': product['shopId'] ?? product['shop_id'],
                       'name': product['shop'],
                       'logo': product['shopLogo'],
                       'logoSemanticLabel': product['shopLogoSemanticLabel'],
                       'rating': product['shopRating'],
                       'salesCount': product['shopSales'],
-                      'isOnline': product['shopIsOnline'],
                     },
                   ),
                   icon: const Icon(Icons.storefront_outlined, size: 16),

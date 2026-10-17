@@ -1,13 +1,21 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import './core/session_navigator.dart';
+import './services/api_service.dart';
 import './services/nest_auth_service.dart';
+import './services/mode_service.dart';
 import './services/notification_service.dart';
+import './services/presence_service.dart';
 import './widgets/custom_error_widget.dart';
+import './services/deep_link_service.dart';
 import 'core/app_export.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Adresse du serveur éventuellement modifiée dans l'appli (tunnel, nouvelle IP)
+  await ApiService.instance.chargerAdresseEnregistree();
 
   // Initialize push notifications
   try {
@@ -39,6 +47,14 @@ void main() async {
     await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
   }
   runApp(MyApp());
+
+  // Liens profonds (partage de fiche produit) — initialisé après runApp
+  // pour que le Navigator existe déjà si un lien est reçu tout de suite.
+  DeepLinkService.instance.init();
+
+  // Présence « En ligne / Vu à … » : ping toutes les 45 s tant que l'app est
+  // au premier plan et qu'un utilisateur est connecté.
+  PresenceService.instance.start();
 }
 
 class MyApp extends StatelessWidget {
@@ -50,6 +66,7 @@ class MyApp extends StatelessWidget {
       builder: (context, orientation, screenType) {
         return MaterialApp(
           title: 'asoukaa',
+          navigatorKey: rootNavigatorKey,
           theme: AppTheme.lightTheme,
           themeMode: ThemeMode.light,
           // 🚨 CRITICAL: NEVER REMOVE OR MODIFY
@@ -102,7 +119,9 @@ class _AuthGateState extends State<AuthGate> {
           NotificationService.instance.subscribeToUserNotifications();
         } catch (_) {}
 
-        final role = await NestAuthService.instance.getUserRole()
+        // Rôle effectif : un vendeur dont le dernier mode est « client »
+        // retrouve l'accueil client (voir ModeService).
+        final role = await ModeService.instance.getEffectiveRole()
             .timeout(const Duration(seconds: 5));
         if (!mounted) return;
         switch (role) {

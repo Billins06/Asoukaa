@@ -9,9 +9,14 @@ import '../../theme/app_theme.dart';
 import '../../widgets/app_toast.dart';
 import '../../services/api_service.dart';
 import '../../services/nest_auth_service.dart';
+import '../../services/upload_service.dart';
 
 class PublierProduitScreen extends StatefulWidget {
-  const PublierProduitScreen({super.key});
+  // Produit existant (donnees brutes du serveur, via GET /products/:id) a
+  // modifier. null = creation d'un nouveau produit.
+  final Map<String, dynamic>? editProduct;
+
+  const PublierProduitScreen({super.key, this.editProduct});
 
   @override
   State<PublierProduitScreen> createState() => _PublierProduitScreenState();
@@ -40,19 +45,25 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
   bool _categoryValid = false;
 
   String? _selectedCategory;
+  // Categorie parente choisie dans le premier menu (niveau 1). Sert a
+  // filtrer les sous-categories proposees dans le second menu : sans ca,
+  // le dropdown listait toutes les categories (parents ET enfants) a plat,
+  // ce qui faisait apparaitre les sous-categories comme si elles etaient
+  // elles-memes des categories principales.
+  String? _selectedParentCategoryId;
   String? _selectedSize;
   String? _selectedColor;
-  final List<String> _categories = [
-    'Mode & Vêtements',
-    'Électronique',
-    'Alimentation',
-    'Beauté & Cosmétiques',
-    'Maison & Décoration',
-    'Sport & Loisirs',
-    'Artisanat',
-    'Agriculture',
-    'Autres',
-  ];
+
+  // Mode edition : produit/variante en cours de modification, et vraies
+  // categories recuperees du serveur (remplace l'ancienne liste figee qui
+  // ne correspondait a aucun identifiant reel cote backend).
+  List<Map<String, dynamic>> _categoryOptions = [];
+  bool _loadingCategories = true;
+  String? _editingProductId;
+  String? _editingVariantId;
+  List<Map<String, dynamic>> _existingImages = [];
+  List<Map<String, dynamic>> _existingVideos = [];
+  bool get _isEditMode => widget.editProduct != null;
 
   final List<String> _sizes = ['XS', 'S', 'M', 'L', 'XL', 'XXL', 'Unique'];
 
@@ -74,11 +85,22 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
   // Image slots with real URLs from Supabase Storage
   final List<String?> _imageSlots = List.filled(8, null);
   final List<bool> _imageUploading = List.filled(8, false);
-  // Mock video slots (up to 2)
+  // Video slots (up to 2) — memes URLs reelles que les images une fois
+  // uploadees (POST /upload/product-videos puis POST /products/:id/images
+  // avec isVideo: true).
   final List<String?> _videoSlots = List.filled(2, null);
+  final List<bool> _videoUploading = List.filled(2, false);
+  // Doit rester <= MAX_VIDEO_FILE_SIZE cote backend (UploadService) : sert
+  // juste a donner un message d'erreur immediat avant meme d'envoyer la
+  // requete pour une video trop lourde.
+  static const int _maxVideoSizeBytes = 50 * 1024 * 1024;
 
   // Tiered pricing rows
   final List<Map<String, TextEditingController>> _tiers = [];
+  // Mode edition : le produit avait deja des paliers enregistres. Sert a
+  // envoyer un PUT avec une liste vide quand le vendeur les retire tous
+  // (sinon aucun appel n'etait fait et les anciens paliers restaient).
+  bool _hadExistingTiers = false;
 
   bool _isSubmitting = false;
   bool _isSuccess = false;
@@ -91,6 +113,206 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
     _prixController.addListener(_validatePrix);
     _stockController.addListener(_validateStock);
     _lieuController.addListener(_validateLieu);
+    _loadCategories();
+    if (widget.editProduct != null) {
+      _prefillFromProduct(widget.editProduct!);
+    }
+  }
+
+  Future<void> _loadCategories() async {
+    try {
+      final r = await ApiService.instance.client.get('/api/v1/categories/flat');
+      final raw = r.data;
+      final list = raw is List
+          ? raw
+          : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) as List : []);
+      if (mounted) {
+        setState(() {
+          _categoryOptions = list
+              .whereType<Map>()
+              .map((e) => Map<String, dynamic>.from(e))
+              .toList();
+          _loadingCategories = false;
+          // Si une categorie etait deja selectionnee (mode edition, prefill
+          // execute avant la fin de ce chargement), on retrouve sa categorie
+          // parente pour pre-selectionner le premier menu correctement.
+          if (_selectedCategory != null) {
+            final match = _categoryOptions.firstWhere(
+              (c) => (c['id'] ?? '').toString() == _selectedCategory,
+              orElse: () => <String, dynamic>{},
+            );
+            final parentId = match['parentId'];
+            _selectedParentCategoryId = (parentId != null && parentId.toString().isNotEmpty)
+                ? parentId.toString()
+                : _selectedCategory;
+          }
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _loadingCategories = false);
+    }
+  }
+
+  // Categories de niveau 1 (parentId null) : premier menu.
+  List<Map<String, dynamic>> get _parentCategoryOptions => _categoryOptions
+      .where((c) => c['parentId'] == null || c['parentId'].toString().isEmpty)
+      .toList();
+
+  // Sous-categories directes d'une categorie parente donnee : second menu,
+  // affiche uniquement quand la categorie choisie en a.
+  List<Map<String, dynamic>> _childCategoryOptions(String? parentId) {
+    if (parentId == null) return [];
+    return _categoryOptions
+        .where((c) => (c['parentId'] ?? '').toString() == parentId)
+        .toList();
+  }
+
+  // Pre-remplit le formulaire a partir d'un produit existant
+  // (GET /products/:id). NB: la marque et le lieu ne sont pas des champs
+  // dedies cote serveur pour l'instant, ils sont simplement ranges dans la
+  // liste generique "tags" a la creation. On les retrouve donc ici de facon
+  // approximative : fiable pour le nom, la description, le prix, la
+  // categorie, le stock et les images ; moins pour marque/lieu.
+  void _prefillFromProduct(Map<String, dynamic> p) {
+    _editingProductId = (p['id'] ?? '').toString();
+    _nomController.text = p['prod_name'] as String? ?? '';
+    _descriptionController.text = p['description'] as String? ?? '';
+    final basePrice = p['basePrice'];
+    final priceValue = basePrice is num
+        ? basePrice
+        : double.tryParse(basePrice?.toString() ?? '') ?? 0;
+    _prixController.text = priceValue == priceValue.roundToDouble()
+        ? priceValue.toInt().toString()
+        : priceValue.toString();
+
+    final categories =
+        (p['categories'] as List?)?.whereType<Map>().toList() ?? [];
+    if (categories.isNotEmpty) {
+      _selectedCategory = (categories.first['id'] ?? '').toString();
+      _categoryValid = true;
+    }
+
+    final variants = (p['variants'] as List?)?.whereType<Map>().toList() ?? [];
+    if (variants.isNotEmpty) {
+      final v = variants.first;
+      _editingVariantId = (v['id'] ?? '').toString();
+      _stockController.text =
+          ((v['stockQuantity'] as num?)?.toInt() ?? 0).toString();
+      _selectedSize = v['size'] as String?;
+      _selectedColor = v['color'] as String?;
+    }
+
+    // product.images contient a la fois les photos et les videos
+    // (distinguees par isVideo) : on les separe avant de remplir les slots
+    // pour ne pas afficher une video dans la galerie photo (et vice versa).
+    final allMedia = (p['images'] as List?)?.whereType<Map>().toList() ?? [];
+    final images = allMedia.where((e) => e['isVideo'] != true).toList();
+    final videos = allMedia.where((e) => e['isVideo'] == true).toList();
+
+    _existingImages = images.map((e) => Map<String, dynamic>.from(e)).toList();
+    for (var i = 0; i < images.length && i < _imageSlots.length; i++) {
+      _imageSlots[i] = images[i]['url'] as String?;
+    }
+
+    _existingVideos = videos.map((e) => Map<String, dynamic>.from(e)).toList();
+    for (var i = 0; i < videos.length && i < _videoSlots.length; i++) {
+      _videoSlots[i] = videos[i]['url'] as String?;
+    }
+
+    _prefillTiers(p['tierPrices']);
+
+    final tags = (p['tags'] as List?)
+            ?.whereType<Map>()
+            .map((t) => t['tag'] as String? ?? '')
+            .where((t) => t.isNotEmpty)
+            .toList() ??
+        [];
+    final leftoverTags =
+        tags.where((t) => t != _selectedSize && t != _selectedColor).toList();
+    if (leftoverTags.isNotEmpty) _lieuController.text = leftoverTags.first;
+    if (leftoverTags.length > 1) _marqueController.text = leftoverTags[1];
+
+    _nomValid = _nomController.text.trim().length >= 3;
+    _prixValid = _prixController.text.isNotEmpty;
+    _stockValid = _stockController.text.isNotEmpty;
+    _lieuValid = _lieuController.text.trim().length >= 2;
+  }
+
+  // Recharge les prix degressifs deja enregistres (GET /products/:id renvoie
+  // tierPrices tries par minQuantity, avec price en chaine decimale, ex.
+  // "1500.00"). Sans ca, le vendeur voyait une liste vide en modification.
+  // Tous les paliers existants sont repris (meme au-dela de 5) pour ne pas
+  // en supprimer silencieusement au prochain enregistrement.
+  void _prefillTiers(dynamic rawTiers) {
+    final tiers = (rawTiers as List?)?.whereType<Map>().toList() ?? [];
+    final rows = <Map<String, String>>[];
+    for (final t in tiers) {
+      final min = t['minQuantity'];
+      final minValue = min is num ? min.toInt() : int.tryParse(min?.toString() ?? '');
+      final price = t['price'];
+      final priceValue = price is num
+          ? price.toDouble()
+          : double.tryParse(price?.toString() ?? '');
+      if (minValue == null || priceValue == null) continue;
+      rows.add({
+        'qte': minValue.toString(),
+        'prix': priceValue == priceValue.roundToDouble()
+            ? priceValue.toInt().toString()
+            : priceValue.toString(),
+      });
+    }
+    rows.sort((a, b) => int.parse(a['qte']!).compareTo(int.parse(b['qte']!)));
+    if (rows.isEmpty) return;
+
+    _hadExistingTiers = true;
+    for (final t in _tiers) {
+      t['qte']!.dispose();
+      t['prix']!.dispose();
+    }
+    _tiers.clear();
+    for (final r in rows) {
+      _tiers.add({
+        'qte': TextEditingController(text: r['qte']),
+        'prix': TextEditingController(text: r['prix']),
+      });
+    }
+  }
+
+  // Controle des prix degressifs avant envoi. Renvoie un message d'erreur
+  // (en francais, affiche tel quel) ou null si tout est correct. Une ligne
+  // entierement vide est ignoree ; une ligne a moitie remplie est refusee.
+  String? _validateTiers() {
+    final unitPrice = double.tryParse(_prixController.text.trim());
+    final seen = <int>{};
+    int? previousMin;
+    for (var i = 0; i < _tiers.length; i++) {
+      final qteText = _tiers[i]['qte']!.text.trim();
+      final prixText = _tiers[i]['prix']!.text.trim();
+      if (qteText.isEmpty && prixText.isEmpty) continue;
+      final label = 'Palier ${i + 1}';
+      if (qteText.isEmpty || prixText.isEmpty) {
+        return '$label : renseignez la quantité minimale et le prix, ou videz la ligne.';
+      }
+      final min = int.tryParse(qteText);
+      if (min == null || min < 2) {
+        return '$label : la quantité minimale doit être d\'au moins 2.';
+      }
+      final price = double.tryParse(prixText);
+      if (price == null || price <= 0) {
+        return '$label : le prix doit être supérieur à 0.';
+      }
+      if (unitPrice != null && unitPrice > 0 && price >= unitPrice) {
+        return '$label : le prix ($prixText FCFA) doit être inférieur au prix unitaire (${_prixController.text.trim()} FCFA).';
+      }
+      if (!seen.add(min)) {
+        return 'Deux paliers ont la même quantité minimale ($min).';
+      }
+      if (previousMin != null && min <= previousMin) {
+        return 'Les quantités minimales doivent être croissantes d\'un palier à l\'autre.';
+      }
+      previousMin = min;
+    }
+    return null;
   }
 
   // ── Real-time validators ──────────────────────────────────────────────────
@@ -204,6 +426,13 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
 
   void _removeTier(int index) {
     setState(() {
+      // On garde toujours au moins une ligne (vide) a l'ecran : retirer le
+      // dernier palier revient a vider ses champs.
+      if (_tiers.length <= 1) {
+        _tiers[index]['qte']!.clear();
+        _tiers[index]['prix']!.clear();
+        return;
+      }
       _tiers[index]['qte']!.dispose();
       _tiers[index]['prix']!.dispose();
       _tiers.removeAt(index);
@@ -244,11 +473,24 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
 
     try {
       final bytes = await picked.readAsBytes();
-      final fileName = 'product_${DateTime.now().millisecondsSinceEpoch}.jpg';
+      // Type d'après le vrai format choisi (JPG par défaut) : sans type, le
+      // serveur refuse le fichier. L'extension du nom suit le type.
+      final mime = UploadService.mimeDepuisNom(
+        picked.name.isNotEmpty ? picked.name : picked.path,
+      );
+      final extPhoto = mime == 'image/png'
+          ? 'png'
+          : (mime == 'image/webp' ? 'webp' : 'jpg');
+      final fileName =
+          'product_${DateTime.now().millisecondsSinceEpoch}.$extPhoto';
       final formData = FormData.fromMap({
-        'file': MultipartFile.fromBytes(bytes, filename: fileName),
+        'file': MultipartFile.fromBytes(
+          bytes,
+          filename: fileName,
+          contentType: DioMediaType.parse(mime),
+        ),
       });
-      final res = await ApiService.instance.client.post('/api/v1/uploads/image', data: formData);
+      final res = await ApiService.instance.client.post('/api/v1/upload/products', data: formData);
       final url = res.data['url'] as String?;
       if (!mounted) return;
       setState(() {
@@ -309,6 +551,132 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
     );
   }
 
+  // ── Pick and upload video ─────────────────────────────────────────────────
+
+  Future<void> _pickAndUploadVideo(
+    int index, {
+    ImageSource source = ImageSource.gallery,
+  }) async {
+    final picker = ImagePicker();
+    XFile? picked;
+    try {
+      picked = await picker.pickVideo(source: source);
+    } catch (_) {
+      if (!mounted) return;
+      AppToast.show(context, message: 'Impossible de sélectionner la vidéo.', type: ToastType.error);
+      return;
+    }
+    if (picked == null) return;
+
+    final sizeBytes = await picked.length();
+    if (sizeBytes > _maxVideoSizeBytes) {
+      if (!mounted) return;
+      AppToast.show(
+        context,
+        message:
+            'Vidéo trop volumineuse (max ${_maxVideoSizeBytes ~/ (1024 * 1024)} Mo). Choisissez une vidéo plus courte.',
+        type: ToastType.error,
+        duration: const Duration(seconds: 6),
+      );
+      return;
+    }
+
+    setState(() => _videoUploading[index] = true);
+
+    try {
+      final bytes = await picked.readAsBytes();
+      final dotIndex = picked.path.lastIndexOf('.');
+      final ext = dotIndex != -1 ? picked.path.substring(dotIndex + 1).toLowerCase() : 'mp4';
+      final fileName = 'product_video_${DateTime.now().millisecondsSinceEpoch}.$ext';
+      final formData = FormData.fromMap({
+        'file': MultipartFile.fromBytes(
+          bytes,
+          filename: fileName,
+          // Type d'après l'extension (mp4 / mov / webm), mp4 par défaut.
+          contentType: DioMediaType.parse(
+            ['video/mp4', 'video/quicktime', 'video/webm']
+                    .contains(UploadService.mimeDepuisNom(fileName))
+                ? UploadService.mimeDepuisNom(fileName)
+                : 'video/mp4',
+          ),
+        ),
+      });
+      // Une vidéo (jusqu'à 50 Mo) met bien plus longtemps qu'une photo à
+      // partir puis à être stockée côté serveur : le délai global de 30 s
+      // d'ApiService ferait échouer l'envoi sur une connexion mobile lente.
+      final res = await ApiService.instance.client.post(
+        '/api/v1/upload/product-videos',
+        data: formData,
+        options: Options(
+          sendTimeout: const Duration(minutes: 5),
+          receiveTimeout: const Duration(minutes: 5),
+        ),
+      );
+      final url = res.data['url'] as String?;
+      if (!mounted) return;
+      setState(() {
+        _videoUploading[index] = false;
+        if (url != null) {
+          _videoSlots[index] = url;
+        } else {
+          AppToast.show(context, message: 'Échec de l\'upload de la vidéo. Réessayez.', type: ToastType.error);
+        }
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _videoUploading[index] = false);
+      AppToast.show(
+        context,
+        message: 'Échec de l\'upload de la vidéo : ${_describeError(e)}',
+        type: ToastType.error,
+        duration: const Duration(seconds: 6),
+      );
+    }
+  }
+
+  void _showVideoSourceDialog(int index) {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 8),
+            Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: AppTheme.outlineVariant,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(height: 16),
+            ListTile(
+              leading: const Icon(Icons.video_library_outlined),
+              title: Text('Galerie', style: GoogleFonts.outfit()),
+              onTap: () {
+                Navigator.pop(ctx);
+                _pickAndUploadVideo(index, source: ImageSource.gallery);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.videocam_outlined),
+              title: Text('Caméra', style: GoogleFonts.outfit()),
+              onTap: () {
+                Navigator.pop(ctx);
+                _pickAndUploadVideo(index, source: ImageSource.camera);
+              },
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
   void _submitForm() async {
     _validateNom();
     _validatePrix();
@@ -323,58 +691,269 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
       return;
     }
 
+    if (_selectedCategory == null || _selectedCategory!.isEmpty) {
+      setState(() => _categoryValid = false);
+      AppToast.show(context, message: 'Sélectionnez une catégorie.', type: ToastType.error);
+      return;
+    }
+
+    final tierError = _validateTiers();
+    if (tierError != null) {
+      AppToast.show(
+        context,
+        message: 'Prix dégressifs : $tierError',
+        type: ToastType.error,
+        duration: const Duration(seconds: 6),
+      );
+      return;
+    }
+
     setState(() => _isSubmitting = true);
 
     try {
-      final images = _imageSlots.where((s) => s != null).map((s) => s!).toList();
+      final priceValue = double.tryParse(_prixController.text.trim()) ?? 0;
+      final stockValue = int.tryParse(_stockController.text.trim()) ?? 0;
+
+      // Contrat reel attendu par le backend (CreateProductDto / UpdateProductDto) :
+      // prod_name, description, basePrice, categoryIds (UUIDs), tags, status.
+      final productPayload = {
+        'prod_name': _nomController.text.trim(),
+        'description': _descriptionController.text.trim(),
+        'basePrice': priceValue,
+        'status': 'active',
+        'categoryIds': [_selectedCategory],
+        'tags': [
+          if (_marqueController.text.trim().isNotEmpty) _marqueController.text.trim(),
+          if (_lieuController.text.trim().isNotEmpty) _lieuController.text.trim(),
+        ],
+      };
+
+      String productId;
+      if (_isEditMode && _editingProductId != null && _editingProductId!.isNotEmpty) {
+        productId = _editingProductId!;
+        await ApiService.instance.client.put(
+          '/api/v1/products/$productId',
+          data: productPayload,
+        );
+      } else {
+        final res = await ApiService.instance.client.post(
+          '/api/v1/products',
+          data: productPayload,
+        );
+        final data = res.data;
+        productId = (data is Map ? data['id'] : null)?.toString() ?? '';
+        if (productId.isEmpty) {
+          throw Exception('Produit créé mais identifiant manquant dans la réponse');
+        }
+      }
+
+      // Le stock/prix vivent sur la variante, pas sur le produit lui-même.
+      final variantPayload = <String, dynamic>{
+        'color': _selectedColor,
+        'size': _selectedSize,
+        'price': priceValue,
+        'stockQuantity': stockValue,
+      }..removeWhere((key, value) => value == null);
+
+      if (_isEditMode && _editingVariantId != null && _editingVariantId!.isNotEmpty) {
+        await ApiService.instance.client.put(
+          '/api/v1/products/$productId/variants/$_editingVariantId',
+          data: variantPayload,
+        );
+      } else {
+        await ApiService.instance.client.post(
+          '/api/v1/products/$productId/variants',
+          data: {
+            'sku': 'SKU-${DateTime.now().millisecondsSinceEpoch}',
+            ...variantPayload,
+          },
+        );
+      }
+
+      // Images : on ajoute les nouvelles, on retire celles retirées de la fiche.
+      final currentUrls =
+          _imageSlots.where((s) => s != null).map((s) => s!).toSet();
+      final existingUrls = _existingImages
+          .map((e) => e['url'] as String?)
+          .whereType<String>()
+          .toSet();
+
+      for (var i = 0; i < _imageSlots.length; i++) {
+        final url = _imageSlots[i];
+        if (url == null || existingUrls.contains(url)) continue;
+        try {
+          await ApiService.instance.client.post(
+            '/api/v1/products/$productId/images',
+            data: {'imageUrl': url, 'isPrimary': i == 0},
+          );
+        } catch (e) {
+          // Ne pas avaler l'erreur en silence : l'upload du fichier (voir
+          // _pickAndUploadImage) a pu reussir alors que ce rattachement au
+          // produit echoue ensuite (reseau, session expiree, etc.) - sans ce
+          // toast le vendeur croit la photo enregistree alors qu'elle
+          // manque sur la fiche produit.
+          debugPrint('[PublierProduit][image attach] Exception: $e');
+          if (mounted) {
+            AppToast.show(
+              context,
+              message: "Échec de l'envoi de la photo ${i + 1} : ${_describeError(e)}",
+              type: ToastType.error,
+              duration: const Duration(seconds: 6),
+            );
+          }
+        }
+      }
+      for (final existing in _existingImages) {
+        final url = existing['url'] as String?;
+        final imageId = existing['id'] as String?;
+        if (url == null || imageId == null) continue;
+        if (!currentUrls.contains(url)) {
+          try {
+            await ApiService.instance.client.delete(
+              '/api/v1/products/$productId/images/$imageId',
+            );
+          } catch (_) {}
+        }
+      }
+
+      // Videos : meme logique que les images (meme endpoint), avec
+      // isVideo: true et jamais isPrimary (une video n'est jamais l'image
+      // principale de la fiche).
+      final currentVideoUrls =
+          _videoSlots.where((s) => s != null).map((s) => s!).toSet();
+      final existingVideoUrls = _existingVideos
+          .map((e) => e['url'] as String?)
+          .whereType<String>()
+          .toSet();
+
+      for (var i = 0; i < _videoSlots.length; i++) {
+        final url = _videoSlots[i];
+        if (url == null || existingVideoUrls.contains(url)) continue;
+        try {
+          await ApiService.instance.client.post(
+            '/api/v1/products/$productId/images',
+            data: {'imageUrl': url, 'isVideo': true, 'isPrimary': false},
+          );
+        } catch (e) {
+          debugPrint('[PublierProduit][video attach] Exception: $e');
+          if (mounted) {
+            AppToast.show(
+              context,
+              message: "Échec de l'envoi de la vidéo ${i + 1} : ${_describeError(e)}",
+              type: ToastType.error,
+              duration: const Duration(seconds: 6),
+            );
+          }
+        }
+      }
+      for (final existing in _existingVideos) {
+        final url = existing['url'] as String?;
+        final imageId = existing['id'] as String?;
+        if (url == null || imageId == null) continue;
+        if (!currentVideoUrls.contains(url)) {
+          try {
+            await ApiService.instance.client.delete(
+              '/api/v1/products/$productId/images/$imageId',
+            );
+          } catch (_) {}
+        }
+      }
+
+      // Lignes deja validees par _validateTiers (les lignes vides sont
+      // ignorees). PUT remplace tous les paliers : on l'envoie aussi avec
+      // une liste vide quand le vendeur a retire tous les paliers existants.
       final priceTiers = _tiers
-          .where((t) => t['qte']!.text.isNotEmpty && t['prix']!.text.isNotEmpty)
+          .where((t) =>
+              t['qte']!.text.trim().isNotEmpty &&
+              t['prix']!.text.trim().isNotEmpty)
           .map(
             (t) => {
-              'minQty': int.tryParse(t['qte']!.text) ?? 0,
-              'price': int.tryParse(t['prix']!.text) ?? 0,
+              'minQuantity': int.tryParse(t['qte']!.text.trim()) ?? 0,
+              'price': double.tryParse(t['prix']!.text.trim()) ?? 0,
             },
           )
           .toList();
-
-      await ApiService.instance.client.post('/api/v1/products', data: {
-        'name': _nomController.text.trim(),
-        'description': _descriptionController.text.trim(),
-        'category': _selectedCategory ?? '',
-        'price': int.tryParse(_prixController.text) ?? 0,
-        'originalPrice': int.tryParse(_prixController.text) ?? 0,
-        'stockQuantity': int.tryParse(_stockController.text) ?? 0,
-        'images': images,
-        'priceTiers': priceTiers,
-        'isActive': true,
-        'tags': [
-          if (_marqueController.text.trim().isNotEmpty) _marqueController.text.trim(),
-          if (_selectedSize != null) _selectedSize!,
-          if (_selectedColor != null) _selectedColor!,
-          if (_lieuController.text.trim().isNotEmpty) _lieuController.text.trim(),
-        ],
-      });
+      String? tierSaveError;
+      if (priceTiers.isNotEmpty || (_isEditMode && _hadExistingTiers)) {
+        try {
+          await ApiService.instance.client.put(
+            '/api/v1/products/$productId/tier-prices',
+            data: priceTiers,
+          );
+          _hadExistingTiers = priceTiers.isNotEmpty;
+        } catch (e) {
+          debugPrint('[PublierProduit][tier-prices] Exception: $e');
+          tierSaveError = _describeError(e);
+        }
+      }
 
       if (!mounted) return;
       setState(() {
         _isSubmitting = false;
         _isSuccess = true;
       });
-      AppToast.show(
-        context,
-        message: 'Produit publié avec succès ! Il sera visible sous peu.',
-        type: ToastType.success,
-        actionLabel: 'OK',
-      );
-      Future.delayed(const Duration(seconds: 2), () {
+      if (tierSaveError != null) {
+        // Le produit lui-meme est bien enregistre : on le dit, mais on
+        // previent clairement que les paliers n'ont pas ete pris en compte.
+        AppToast.show(
+          context,
+          message:
+              'Produit enregistré, mais les prix dégressifs n\'ont pas pu être enregistrés : $tierSaveError',
+          type: ToastType.error,
+          duration: const Duration(seconds: 8),
+        );
+      } else {
+        AppToast.show(
+          context,
+          message: _isEditMode
+              ? 'Produit mis à jour avec succès !'
+              : 'Produit publié avec succès ! Il sera visible sous peu.',
+          type: ToastType.success,
+          actionLabel: 'OK',
+        );
+      }
+      Future.delayed(Duration(seconds: tierSaveError != null ? 3 : 2), () {
         if (!mounted) return;
-        Navigator.pop(context);
+        Navigator.pop(context, true);
       });
-    } catch (_) {
+    } catch (e, st) {
+      debugPrint('[PublierProduit][_submitForm] Exception: $e');
+      debugPrint('[PublierProduit][_submitForm] Stack: $st');
       if (!mounted) return;
       setState(() => _isSubmitting = false);
-      AppToast.show(context, message: 'Erreur lors de la publication. Réessayez.', type: ToastType.error);
+      AppToast.show(
+        context,
+        message: _isEditMode
+            ? 'Erreur lors de la mise à jour : ${_describeError(e)}'
+            : 'Erreur lors de la publication : ${_describeError(e)}',
+        type: ToastType.error,
+        duration: const Duration(seconds: 8),
+      );
     }
+  }
+
+  // Extrait le vrai message d'erreur renvoye par le backend au lieu d'un
+  // texte generique — sans ca, un rejet legitime (boutique pas encore
+  // approuvee, categorie invalide, SKU en double...) ressemblait a une
+  // panne et restait impossible a diagnostiquer depuis l'appli.
+  String _describeError(Object e) {
+    if (e is DioException) {
+      final status = e.response?.statusCode;
+      final data = e.response?.data;
+      String? backendMsg;
+      if (data is Map) {
+        final m = data['message'];
+        backendMsg = m is List ? m.join(', ') : m?.toString();
+      } else if (data is String && data.isNotEmpty) {
+        backendMsg = data;
+      }
+      if (backendMsg != null && backendMsg.isNotEmpty) {
+        return backendMsg;
+      }
+      if (status != null) return 'HTTP $status';
+      return e.message ?? 'erreur réseau';
+    }
+    return e.toString();
   }
 
   @override
@@ -418,7 +997,7 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
         onPressed: () => Navigator.pop(context),
       ),
       title: Text(
-        'Publier un produit',
+        _isEditMode ? 'Modifier le produit' : 'Publier un produit',
         style: GoogleFonts.outfit(
           fontSize: 18,
           fontWeight: FontWeight.w700,
@@ -791,12 +1370,9 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
 
   Widget _buildVideoSlot(int index) {
     final hasVideo = _videoSlots[index] != null;
+    final isUploading = _videoUploading[index];
     return GestureDetector(
-      onTap: () {
-        setState(() {
-          _videoSlots[index] = 'video_${index + 1}.mp4';
-        });
-      },
+      onTap: isUploading ? null : () => _showVideoSourceDialog(index),
       child: Container(
         width: 120,
         height: 72,
@@ -808,7 +1384,18 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
             width: hasVideo ? 2 : 1,
           ),
         ),
-        child: hasVideo
+        child: isUploading
+            ? const Center(
+                child: SizedBox(
+                  width: 22,
+                  height: 22,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2.5,
+                    color: AppTheme.primary,
+                  ),
+                ),
+              )
+            : hasVideo
             ? Stack(
                 alignment: Alignment.center,
                 children: [
@@ -943,59 +1530,140 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
     );
   }
 
+  // Style commun des deux menus (bordure rouge si invalide, memes couleurs
+  // / rayon que le reste du formulaire) pour eviter de dupliquer la deco.
+  InputDecoration _categoryFieldDecoration({
+    required String label,
+    required bool hasError,
+  }) {
+    return InputDecoration(
+      labelText: label,
+      prefixIcon: Icon(
+        Icons.category_outlined,
+        size: 20,
+        color: hasError ? const Color(0xFFDC2626) : AppTheme.muted,
+      ),
+      filled: true,
+      fillColor: AppTheme.surface,
+      labelStyle: GoogleFonts.outfit(fontSize: 14, color: AppTheme.muted),
+      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: BorderSide(
+          color: hasError ? const Color(0xFFDC2626) : AppTheme.outline,
+        ),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: const BorderSide(color: AppTheme.primary, width: 2),
+      ),
+    );
+  }
+
+  // Menu a deux niveaux : categorie principale, puis sous-categorie si la
+  // categorie choisie en possede. Avant ce correctif, les categories et
+  // sous-categories etaient toutes listees a plat dans un seul menu, ce qui
+  // faisait apparaitre les sous-categories comme si elles etaient elles-memes
+  // des categories principales.
   Widget _buildCategoryDropdown() {
-    final showCategoryError = !_categoryValid && _selectedCategory == null;
+    final children = _childCategoryOptions(_selectedParentCategoryId);
+    final needsChild = children.isNotEmpty;
+    final showParentError = !_categoryValid && _selectedParentCategoryId == null;
+    final showChildError = !_categoryValid && needsChild && _selectedCategory == null;
+    // La valeur du second menu ne doit pointer que vers une sous-categorie
+    // de la categorie parente actuellement choisie (sinon Flutter plante
+    // si la valeur ne correspond a aucun item de la liste).
+    final childValue = children.any((c) => (c['id'] ?? '').toString() == _selectedCategory)
+        ? _selectedCategory
+        : null;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         DropdownButtonFormField<String>(
-          initialValue: _selectedCategory,
-          decoration: InputDecoration(
-            labelText: 'Catégorie *',
-            prefixIcon: Icon(
-              Icons.category_outlined,
-              size: 20,
-              color: showCategoryError
-                  ? const Color(0xFFDC2626)
-                  : AppTheme.muted,
-            ),
-            filled: true,
-            fillColor: AppTheme.surface,
-            labelStyle: GoogleFonts.outfit(fontSize: 14, color: AppTheme.muted),
-            border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-            enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
-              borderSide: BorderSide(
-                color: showCategoryError
-                    ? const Color(0xFFDC2626)
-                    : AppTheme.outline,
-              ),
-            ),
-            focusedBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
-              borderSide: const BorderSide(color: AppTheme.primary, width: 2),
-            ),
+          // initialValue n'est lu qu'à la création du champ : la clé force
+          // sa reconstruction quand la catégorie parente est fixée après
+          // coup (mode modification : chargement asynchrone des catégories).
+          key: ValueKey('parent-cat-$_selectedParentCategoryId'),
+          initialValue: _selectedParentCategoryId,
+          decoration: _categoryFieldDecoration(
+            label: 'Catégorie *',
+            hasError: showParentError,
           ),
           hint: Text(
-            'Sélectionner une catégorie',
+            _loadingCategories
+                ? 'Chargement des catégories...'
+                : 'Sélectionner une catégorie',
             style: GoogleFonts.outfit(fontSize: 14, color: AppTheme.muted),
           ),
-          items: _categories
+          items: _parentCategoryOptions
               .map(
                 (c) => DropdownMenuItem(
-                  value: c,
-                  child: Text(c, style: GoogleFonts.outfit(fontSize: 14)),
+                  value: (c['id'] ?? '').toString(),
+                  child: Text(
+                    (c['name'] ?? '').toString(),
+                    style: GoogleFonts.outfit(fontSize: 14),
+                  ),
                 ),
               )
               .toList(),
-          onChanged: (val) {
-            setState(() {
-              _selectedCategory = val;
-              _categoryValid = val != null;
-            });
-          },
+          onChanged: _loadingCategories
+              ? null
+              : (val) {
+                  setState(() {
+                    _selectedParentCategoryId = val;
+                    final newChildren = _childCategoryOptions(val);
+                    // Une categorie sans sous-categorie est directement
+                    // utilisable comme categorie finale du produit ; sinon
+                    // on attend que l'utilisateur precise la sous-categorie.
+                    if (newChildren.isEmpty) {
+                      _selectedCategory = val;
+                      _categoryValid = val != null;
+                    } else {
+                      _selectedCategory = null;
+                      _categoryValid = false;
+                    }
+                  });
+                },
           validator: (v) => v == null ? 'Catégorie requise' : null,
         ),
+        if (needsChild) ...[
+          const SizedBox(height: 12),
+          DropdownButtonFormField<String>(
+            // Clé liée au parent : quand on change de catégorie parente, le
+            // champ repart de zéro. Sans elle, il garderait la sous-catégorie
+            // de l'ancien parent, absente de la nouvelle liste → plantage
+            // Flutter ("There should be exactly one item with value...").
+            key: ValueKey('child-cat-$_selectedParentCategoryId'),
+            initialValue: childValue,
+            decoration: _categoryFieldDecoration(
+              label: 'Sous-catégorie *',
+              hasError: showChildError,
+            ),
+            hint: Text(
+              'Sélectionner une sous-catégorie',
+              style: GoogleFonts.outfit(fontSize: 14, color: AppTheme.muted),
+            ),
+            items: children
+                .map(
+                  (c) => DropdownMenuItem(
+                    value: (c['id'] ?? '').toString(),
+                    child: Text(
+                      (c['name'] ?? '').toString(),
+                      style: GoogleFonts.outfit(fontSize: 14),
+                    ),
+                  ),
+                )
+                .toList(),
+            onChanged: (val) {
+              setState(() {
+                _selectedCategory = val;
+                _categoryValid = val != null;
+              });
+            },
+            validator: (v) => v == null ? 'Sous-catégorie requise' : null,
+          ),
+        ],
       ],
     );
   }
@@ -1287,7 +1955,7 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
             ),
           ),
           const SizedBox(width: 6),
-          if (_tiers.length > 1)
+          if (_tiers.length > 1 || _isEditMode)
             IconButton(
               onPressed: () => _removeTier(index),
               icon: const Icon(
@@ -1345,7 +2013,7 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
           _buildValidatedFormField(
             controller: _lieuController,
             label: 'Lieu *',
-            hintText: 'Ex: Dakar, Sénégal',
+            hintText: 'Ex: Cotonou, Akpakpa (Bénin)',
             prefixIcon: Icons.location_on_outlined,
             textCapitalization: TextCapitalization.words,
             errorText: _lieuError,
@@ -1416,7 +2084,7 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
                         ),
                         const SizedBox(width: 10),
                         Text(
-                          'Produit publié !',
+                          _isEditMode ? 'Produit mis à jour !' : 'Produit publié !',
                           style: GoogleFonts.outfit(
                             fontSize: 16,
                             fontWeight: FontWeight.w700,
@@ -1428,14 +2096,16 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
                   : Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        const Icon(
-                          Icons.rocket_launch_rounded,
+                        Icon(
+                          _isEditMode
+                              ? Icons.save_rounded
+                              : Icons.rocket_launch_rounded,
                           size: 20,
                           color: Colors.white,
                         ),
                         const SizedBox(width: 10),
                         Text(
-                          'Publier le produit',
+                          _isEditMode ? 'Enregistrer les modifications' : 'Publier le produit',
                           style: GoogleFonts.outfit(
                             fontSize: 16,
                             fontWeight: FontWeight.w700,

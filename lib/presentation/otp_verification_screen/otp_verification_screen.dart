@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -17,7 +18,7 @@ class OtpVerificationScreen extends StatefulWidget {
   // Vendeur
   final String? shopName;
   final String? shopAddress;
-  final String? activityType;
+  final List<String>? categoryIds;
   final String? shopDescription;
 
   // Livreur
@@ -41,7 +42,7 @@ class OtpVerificationScreen extends StatefulWidget {
     this.accountType = 'acheteur',
     this.shopName,
     this.shopAddress,
-    this.activityType,
+    this.categoryIds,
     this.shopDescription,
     this.ville,
     this.quartier,
@@ -202,28 +203,29 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
         return;
       }
 
-      // 2. Upload pièce d'identité
+      // 2. Upload pièce d'identité (facultatif désormais)
       setState(() => _processingStep = 'Upload de la pièce d\'identité…');
       final idDocFile = widget.idDocumentFile;
-      if (idDocFile == null) { _fallbackToLogin('Document manquant.'); return; }
-      final idDocUrl = await UploadService.instance.uploadFile(idDocFile, 'documents');
+      final idDocUrl = idDocFile != null
+          ? await UploadService.instance.uploadFile(idDocFile, 'documents')
+          : null;
 
-      // 3. Upload selfie
+      // 3. Upload selfie (facultatif désormais)
       if (!mounted) return;
       setState(() => _processingStep = 'Upload du selfie…');
       final selfieFile = widget.selfieFile;
-      if (selfieFile == null) { _fallbackToLogin('Selfie manquant.'); return; }
-      final selfieUrl = await UploadService.instance.uploadFile(selfieFile, 'selfies');
+      final selfieUrl = selfieFile != null
+          ? await UploadService.instance.uploadFile(selfieFile, 'selfies')
+          : null;
 
       if (!mounted) return;
 
       if (widget.accountType == 'vendeur') {
-        // 4. Upload photos produits
+        // 4. Upload photos produits (facultatif désormais)
         setState(() => _processingStep = 'Upload des photos produits…');
-        final sampleUrls = await UploadService.instance.uploadMultiple(
-          widget.sampleProductFiles ?? [],
-          'products',
-        );
+        final sampleUrls = (widget.sampleProductFiles?.isNotEmpty ?? false)
+            ? await UploadService.instance.uploadMultiple(widget.sampleProductFiles!, 'products')
+            : <String>[];
 
         // 5. Soumettre profil vendeur
         if (!mounted) return;
@@ -231,11 +233,11 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
         final profileResult = await NestAuthService.instance.submitVendorProfile(
           shopName: widget.shopName ?? '',
           shopAddress: widget.shopAddress ?? '',
-          activityType: widget.activityType ?? '',
+          categoryIds: widget.categoryIds,
           description: widget.shopDescription ?? '',
           idDocumentUrl: idDocUrl,
           selfieUrl: selfieUrl,
-          sampleProductUrls: sampleUrls,
+          sampleProductUrls: sampleUrls.isNotEmpty ? sampleUrls : null,
         );
 
         if (!mounted) return;
@@ -247,27 +249,50 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
             type: ToastType.success,
             duration: const Duration(seconds: 5),
           );
+
+          // Dossier incomplet : on prévient tout de suite au lieu de
+          // laisser l'utilisateur découvrir le blocage seulement au
+          // moment de la validation admin.
+          if (!mounted) return;
+          final missingVendor = <String>[
+            if (idDocUrl == null) 'votre pièce d\'identité',
+            if (selfieUrl == null) 'votre selfie',
+            if (sampleUrls.isEmpty) 'au moins une photo de vos produits',
+          ].join(', ');
+          if (missingVendor.isNotEmpty) {
+            final wantsToComplete = await _showIncompleteDossierDialog(
+                missingVendor, AppRoutes.vendorCompleteDocuments);
+            if (wantsToComplete) {
+              if (!mounted) return;
+              Navigator.pushNamedAndRemoveUntil(
+                  context, AppRoutes.vendorCompleteDocuments, (_) => false);
+              return;
+            }
+          }
         } else {
-          AppToast.show(
-            context,
-            message: profileResult.error ?? 'Erreur lors de la soumission.',
-            type: ToastType.error,
-          );
+          // ⚠️ On ne doit PAS retomber sur l'accueil après un échec : sans
+          // ce retour, le code continuait jusqu'au Navigator.pushNamedAndRemoveUntil
+          // final qui renvoyait l'utilisateur vers l'accueil même en cas
+          // d'erreur (dossier jamais soumis, mais l'appli laissait croire
+          // que tout allait bien).
+          _fallbackToLogin(profileResult.error ?? 'Erreur lors de la soumission.');
+          return;
         }
       }
 
       if (widget.accountType == 'livreur') {
-        // 4. Upload photo véhicule
+        // 4. Upload photo véhicule (facultatif désormais)
         setState(() => _processingStep = 'Upload de la photo du véhicule…');
         final vehicleFile = widget.vehiclePhotoFile;
-        if (vehicleFile == null) { _fallbackToLogin('Photo véhicule manquante.'); return; }
-        final vehicleUrl = await UploadService.instance.uploadFile(vehicleFile, 'vehicles');
+        final vehicleUrl = vehicleFile != null
+            ? await UploadService.instance.uploadFile(vehicleFile, 'vehicles')
+            : null;
 
         // 5. Soumettre profil livreur
         if (!mounted) return;
         setState(() => _processingStep = 'Envoi du dossier livreur…');
         final profileResult = await NestAuthService.instance.submitAgentProfile(
-          vehicleType: widget.vehicleType ?? 'MOTO',
+          vehicleType: widget.vehicleType ?? 'moto',
           availability: widget.availability ?? 'Temps_plein',
           ville: widget.ville ?? '',
           quartier: widget.quartier ?? '',
@@ -287,12 +312,26 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
             type: ToastType.success,
             duration: const Duration(seconds: 5),
           );
+
+          if (!mounted) return;
+          final missingAgent = <String>[
+            if (idDocUrl == null) 'votre pièce d\'identité',
+            if (selfieUrl == null) 'votre selfie',
+            if (vehicleUrl == null) 'la photo de votre véhicule',
+          ].join(', ');
+          if (missingAgent.isNotEmpty) {
+            final wantsToComplete = await _showIncompleteDossierDialog(
+                missingAgent, AppRoutes.agentCompleteDocuments);
+            if (wantsToComplete) {
+              if (!mounted) return;
+              Navigator.pushNamedAndRemoveUntil(
+                  context, AppRoutes.agentCompleteDocuments, (_) => false);
+              return;
+            }
+          }
         } else {
-          AppToast.show(
-            context,
-            message: profileResult.error ?? 'Erreur lors de la soumission.',
-            type: ToastType.error,
-          );
+          _fallbackToLogin(profileResult.error ?? 'Erreur lors de la soumission.');
+          return;
         }
       }
 
@@ -300,10 +339,36 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
       await Future.delayed(const Duration(milliseconds: 800));
       if (!mounted) return;
       Navigator.pushNamedAndRemoveUntil(context, AppRoutes.home, (_) => false);
-    } catch (_) {
+    } catch (e, st) {
+      debugPrint('[OTP][_autoLoginAndSubmitProfile] Exception: $e');
+      debugPrint('[OTP][_autoLoginAndSubmitProfile] Stack: $st');
       if (!mounted) return;
-      _fallbackToLogin('Une erreur est survenue. Connectez-vous manuellement.');
+      // On affiche la vraie cause au lieu d'un message generique :
+      // sans ça, toute panne (upload, stockage, droits) ressemblait
+      // a la meme erreur et restait impossible a diagnostiquer.
+      _fallbackToLogin('Échec : ${_describeError(e)}');
     }
+  }
+
+  // Extrait le message d'erreur réel (backend) au lieu d'un texte générique
+  String _describeError(Object e) {
+    if (e is DioException) {
+      final status = e.response?.statusCode;
+      final data = e.response?.data;
+      String? backendMsg;
+      if (data is Map) {
+        final m = data['message'];
+        backendMsg = m is List ? m.join(', ') : m?.toString();
+      } else if (data is String && data.isNotEmpty) {
+        backendMsg = data;
+      }
+      if (backendMsg != null && backendMsg.isNotEmpty) {
+        return status != null ? '[$status] $backendMsg' : backendMsg;
+      }
+      if (status != null) return 'HTTP $status sur ${e.requestOptions.path}';
+      return e.message ?? 'erreur réseau';
+    }
+    return e.toString();
   }
 
   Future<void> _autoLoginAcheteur() async {
@@ -332,9 +397,46 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
     }
   }
 
+  Future<bool> _showIncompleteDossierDialog(String missing, String completeRoute) async {
+    if (!mounted) return false;
+    // Retourne true si l'utilisateur choisit "Compléter maintenant", pour que
+    // l'appelant navigue directement vers l'écran de complétion au lieu de
+    // laisser le code retomber ensuite sur la redirection finale vers
+    // l'accueil (qui effaçait cet écran de la pile de navigation).
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogCtx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text('Dossier presque complet', style: GoogleFonts.outfit(fontWeight: FontWeight.w700)),
+        content: Text(
+          "Votre compte est créé et en attente de validation. Il vous manque encore : $missing. "
+          "Sans ces documents, votre compte ne pourra pas être validé.",
+          style: GoogleFonts.outfit(fontSize: 13.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogCtx).pop(false),
+            child: Text('Plus tard', style: GoogleFonts.outfit(color: const Color(0xFF616161))),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(dialogCtx).pop(true),
+            child: const Text('Compléter maintenant'),
+          ),
+        ],
+      ),
+    );
+    return result ?? false;
+  }
+
   void _fallbackToLogin(String message) {
     setState(() => _isProcessing = false);
-    AppToast.show(context, message: message, type: ToastType.info);
+    AppToast.show(
+      context,
+      message: message,
+      type: ToastType.info,
+      duration: const Duration(seconds: 8),
+    );
     Navigator.pushNamedAndRemoveUntil(context, AppRoutes.signUpLogin, (_) => false);
   }
 

@@ -14,7 +14,9 @@ import '../../widgets/loading_skeleton_widget.dart';
 import '../../services/product_service.dart';
 import '../../services/nest_auth_service.dart';
 import '../../services/api_service.dart';
+import '../../services/wishlist_service.dart';
 import '../../routes/app_routes.dart';
+import '../../utils/lecture_json.dart';
 
 class ProductDetailScreen extends StatefulWidget {
   final Map<String, dynamic>? productData;
@@ -28,7 +30,6 @@ class ProductDetailScreen extends StatefulWidget {
 class _ProductDetailScreenState extends State<ProductDetailScreen> {
   // TODO: Replace with [Riverpod/Bloc] for production
   int _quantity = 1;
-  bool _isFavorite = false;
   bool _isInWishlist = false;
   bool _isWishlistLoading = false;
   int _cartCount = 3;
@@ -68,6 +69,7 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
           _isLoading = false;
         });
         _checkWishlistStatus();
+        _loadSellerPresence((_product['shopId'] ?? '').toString());
       } else {
         if (mounted) setState(() => _isLoading = false);
       }
@@ -76,12 +78,42 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
     }
   }
 
+  // Présence du vendeur (« En ligne » / « Vu … ») : GET /products/:id (public)
+  // ne la renvoie plus, on la demande à la route légère
+  // GET /vendors/:id/presence (elle ne compte pas de visite de boutique), en
+  // essai « best-effort » : en cas d'échec (hors connexion, boutique
+  // masquée...), rien n'est affiché plutôt qu'une information fausse.
+  Future<void> _loadSellerPresence(String vendorId) async {
+    if (vendorId.isEmpty) return;
+    try {
+      final loggedIn = await NestAuthService.instance.isLoggedIn();
+      if (!loggedIn) return;
+      final res = await ApiService.instance.client
+          .get('/api/v1/vendors/$vendorId/presence');
+      final data = res.data;
+      if (data is! Map || !mounted) return;
+      // Le produit affiché a pu changer pendant l'appel.
+      if ((_product['shopId'] ?? '').toString() != vendorId) return;
+      final seen = data['lastSeenAt'];
+      setState(() {
+        _product = {
+          ..._product,
+          'shopPresenceKnown': true,
+          'shopIsOnline': data['isOnline'] == true,
+          'shopLastSeenAt': seen is String ? seen : null,
+        };
+      });
+    } catch (_) {}
+  }
+
   Map<String, dynamic> _normalizeNestProduct(Map<String, dynamic> p) {
     // Image
     final images = p['images'];
     List<Map<String, dynamic>> imageList = [];
     if (images is List) {
       for (final img in images) {
+        // Les vidéos (isVideo: true) sont lues à part, voir videoList.
+        if (img is Map && img['isVideo'] == true) continue;
         if (img is Map) {
           imageList.add({
             'url': img['url'] ?? img['imageUrl'] ?? '',
@@ -92,6 +124,29 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
         }
       }
     }
+    // Vidéos du produit : ProductService._normalize() les fournit sous
+    // 'videos' (URL String) ; on accepte aussi des Map et d'éventuelles
+    // entrées isVideo restées dans 'images'. Affichées après les photos.
+    final videoList = <String>[];
+    void addVideo(dynamic v) {
+      final url = (v is Map ? (v['url'] ?? v['imageUrl'] ?? '') : (v ?? ''))
+          .toString()
+          .trim();
+      if (url.isNotEmpty && !videoList.contains(url)) videoList.add(url);
+    }
+
+    final rawVideos = p['videos'];
+    if (rawVideos is List) {
+      for (final v in rawVideos) {
+        addVideo(v);
+      }
+    }
+    if (images is List) {
+      for (final img in images) {
+        if (img is Map && img['isVideo'] == true) addVideo(img);
+      }
+    }
+
     if (imageList.isEmpty) {
       // image_url est défini par ProductService._normalize() depuis variant.imageUrl
       final directUrl = (p['imageUrl'] ?? p['image_url'] ?? '').toString().trim();
@@ -105,12 +160,11 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
       ];
     }
 
-    final price = (p['price'] as num? ?? 0).toInt();
-    final originalPrice = (p['original_price'] as num? ??
-            p['originalPrice'] as num? ??
-            p['compareAtPrice'] as num? ??
-            price)
-        .toInt();
+    final price = lireInt(p['price']);
+    final originalPrice = lireInt(
+      p['original_price'] ?? p['originalPrice'] ?? p['compareAtPrice'],
+      price,
+    );
     final discount = originalPrice > price
         ? (((originalPrice - price) / originalPrice) * 100).round()
         : 0;
@@ -125,7 +179,7 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
         ? (shopData['logoUrl'] as String? ?? shopData['logo_url'] as String? ?? '')
         : '';
     final shopRating = shopData is Map
-        ? (shopData['rating'] as num? ?? 4.5).toDouble()
+        ? lireDouble(shopData['rating'], 4.5)
         : 4.5;
     final shopVerified = shopData is Map
         ? (shopData['isVerified'] as bool? ?? shopData['is_verified'] as bool? ?? false)
@@ -139,13 +193,84 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
       }
     }
 
-    final priceTiers = p['price_tiers'] ?? p['priceTiers'];
-    List<Map<String, dynamic>> tierList = [];
-    if (priceTiers is List) {
-      for (final t in priceTiers) {
-        if (t is Map) tierList.add(Map<String, dynamic>.from(t));
+    // Prix dégressifs : GET /products/:id les renvoie sous `tierPrices`
+    // [{minQuantity, maxQuantity, price: "1500.00"}] (décimal en chaîne).
+    // ⚠️ Avant, seules les clés price_tiers/priceTiers étaient lues : la
+    // section "Prix dégressifs" n'apparaissait donc jamais.
+    final rawTiers = p['tierPrices'] ??
+        p['tier_prices'] ??
+        p['price_tiers'] ??
+        p['priceTiers'];
+    final List<Map<String, int>> parsedTiers = [];
+    if (rawTiers is List) {
+      for (final t in rawTiers) {
+        if (t is! Map) continue;
+        final minQty = int.tryParse(
+          '${t['minQuantity'] ?? t['min_quantity'] ?? t['qty'] ?? ''}',
+        );
+        final tierPrice = double.tryParse('${t['price'] ?? ''}');
+        if (minQty == null || minQty < 1) continue;
+        if (tierPrice == null || tierPrice <= 0) continue;
+        parsedTiers.add({'minQuantity': minQty, 'price': tierPrice.round()});
       }
     }
+    parsedTiers.sort(
+      (a, b) => a['minQuantity']!.compareTo(b['minQuantity']!),
+    );
+    // Lignes affichées par ProductPriceTiersWidget ({qty, label, price}) :
+    // une ligne "prix normal" pour les petites quantités, puis un palier par
+    // ligne. Même règle que le backend (tier-pricing.util.ts) : un palier
+    // plus cher que le prix normal n'est jamais appliqué.
+    final List<Map<String, dynamic>> tierList = [];
+    if (parsedTiers.isNotEmpty) {
+      final firstMin = parsedTiers.first['minQuantity']!;
+      if (firstMin > 1) {
+        tierList.add({
+          'qty': 1,
+          'label': firstMin == 2 ? '1 unité' : '1 à ${firstMin - 1} unités',
+          'price': price,
+        });
+      }
+      for (final t in parsedTiers) {
+        final minQty = t['minQuantity']!;
+        final tierPrice = t['price']!;
+        tierList.add({
+          'qty': minQty,
+          'label': 'À partir de $minQty unité${minQty > 1 ? 's' : ''}',
+          'price': (price > 0 && price < tierPrice) ? price : tierPrice,
+        });
+      }
+    }
+
+    // Localisation : adresse réelle de la boutique (VendorProfile.shopAddress,
+    // renvoyée sous `vendor` par GET /products/:id), sinon le "Lieu" saisi à
+    // la publication, sinon une mention neutre.
+    // ⚠️ Avant : p['location'] ?? 'Bénin' — le produit n'a pas de champ
+    // location côté backend, la fiche affichait donc toujours "Bénin".
+    final shopAddress = shopData is Map
+        ? (shopData['shopAddress'] ?? shopData['shop_address'] ?? '')
+            .toString()
+            .trim()
+        : '';
+    var productLieu = (p['location'] ?? p['lieu'] ?? '').toString().trim();
+    if (productLieu.isEmpty) {
+      // Le "Lieu" n'a pas de colonne dédiée : publier_produit_screen l'envoie
+      // dans `tags` avec la marque (optionnelle), en minuscules. Un seul tag
+      // = forcément le lieu (champ obligatoire) ; avec deux tags on ne peut
+      // pas distinguer la marque du lieu, donc on ne devine pas.
+      final tags = (p['tags'] as List?)
+              ?.whereType<Map>()
+              .map((t) => (t['tag'] ?? '').toString().trim())
+              .where((t) => t.isNotEmpty)
+              .toList() ??
+          const <String>[];
+      if (tags.length == 1) {
+        productLieu = tags.first[0].toUpperCase() + tags.first.substring(1);
+      }
+    }
+    final location = shopAddress.isNotEmpty
+        ? shopAddress
+        : (productLieu.isNotEmpty ? productLieu : 'Localisation non précisée');
 
     return {
       'id': p['id'] ?? '',
@@ -158,17 +283,17 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
       'shopLogoSemanticLabel': 'Logo de la boutique $shopName',
       'shopRating': shopRating,
       'shopSales': 0,
-      'shopIsOnline': true,
       'shopIsVerified': shopVerified,
       'seller_id': (shopData is Map ? shopData['userId'] as String? : null) ?? p['seller_id'] ?? p['vendeurId'] ?? '',
       'price': price,
       'originalPrice': originalPrice,
       'discount': discount,
-      'rating': (p['rating'] as num? ?? p['averageRating'] as num? ?? 4.5).toDouble(),
+      'rating': lireDouble(p['rating'] ?? p['averageRating'], 4.5),
       'reviewCount': p['review_count'] as int? ?? p['reviewCount'] as int? ?? 0,
       'imageUrl': imageList.first['url'] ?? '',
       'semanticLabel': imageList.first['semanticLabel'] ?? '',
       'images': imageList,
+      'videos': videoList,
       'stockLeft': p['stock_quantity'] as int? ?? p['stockQuantity'] as int? ?? 0,
       'isHot': p['is_featured'] as bool? ?? p['isFeatured'] as bool? ?? false,
       'category': p['category'] ?? '',
@@ -177,12 +302,63 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
               ? ((p['categories'] as List).first['id'] ?? '')
               : '')
           : (p['categoryId'] ?? ''),
-      'location': p['location'] ?? 'Bénin',
+      'location': location,
       'minOrder': p['min_order'] as int? ?? p['minOrder'] as int? ?? 1,
       'description': p['description'] ?? '',
       'priceTiers': tierList,
+      // Paliers bruts {minQuantity, price} (int) pour _unitPriceForQty()
+      'tierPrices': parsedTiers,
       'specs': specList,
       'reviews': p['reviews'] ?? [],
+    };
+  }
+
+  static int _toInt(dynamic v) {
+    if (v is num) return v.toInt();
+    return (double.tryParse('${v ?? ''}') ?? 0).toInt();
+  }
+
+  // Prix unitaire applicable à [qty] : palier dont la minQuantity est la
+  // plus haute tout en restant <= qty, plafonné au prix normal. Réplique
+  // pour l'affichage de resolveTierUnitPrice() (backend,
+  // common/utils/tier-pricing.util.ts) — c'est le backend qui fixe le prix
+  // réellement facturé au panier et à la commande.
+  int _unitPriceForQty(int qty) {
+    final base = _toInt(_product['price']);
+    final tiers = _product['tierPrices'];
+    if (tiers is! List) return base;
+    int? bestMin;
+    int? bestPrice;
+    for (final t in tiers) {
+      if (t is! Map) continue;
+      final minQty = int.tryParse('${t['minQuantity'] ?? ''}');
+      final tierPrice = double.tryParse('${t['price'] ?? ''}')?.round();
+      if (minQty == null || tierPrice == null || tierPrice <= 0) continue;
+      if (minQty <= qty && (bestMin == null || minQty > bestMin)) {
+        bestMin = minQty;
+        bestPrice = tierPrice;
+      }
+    }
+    if (bestPrice == null) return base;
+    return (base > 0 && base < bestPrice) ? base : bestPrice;
+  }
+
+  // Produit tel qu'affiché dans l'en-tête prix et la barre d'achat : si la
+  // quantité choisie atteint un palier dégressif, le prix unitaire devient
+  // celui du palier (prix normal barré + % d'économie), et le total de la
+  // barre d'achat suit. Sinon, produit inchangé.
+  Map<String, dynamic> get _pricedProduct {
+    final base = _toInt(_product['price']);
+    final unit = _unitPriceForQty(_quantity);
+    if (unit >= base) return _product;
+    final originalRaw = _toInt(_product['originalPrice']);
+    final original = originalRaw > base ? originalRaw : base;
+    return {
+      ..._product,
+      'price': unit,
+      'originalPrice': original,
+      'discount':
+          original > 0 ? (((original - unit) / original) * 100).round() : 0,
     };
   }
 
@@ -232,6 +408,14 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
           ),
         ),
       );
+      // ⚠️ Filet de sécurité : sur certains environnements (onglet Chrome
+      // arrière-plan, TickerMode suspendu par une navigation), le timer
+      // interne du SnackBar ne se déclenche pas de façon fiable et le
+      // message reste affiché indéfiniment. On force sa disparition avec
+      // un vrai minuteur, indépendant de l'état d'animation du Scaffold.
+      Future.delayed(const Duration(seconds: 2), () {
+        if (mounted) ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      });
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).clearSnackBars();
@@ -290,6 +474,8 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
     try {
       if (_isInWishlist) {
         await ApiService.instance.client.delete('/api/v1/wishlist/$productId');
+        WishlistService.instance.markFavorite(productId, false);
+        WishlistService.instance.refreshCount();
         if (!mounted) return;
         setState(() { _isInWishlist = false; _isWishlistLoading = false; });
         ScaffoldMessenger.of(context).clearSnackBars();
@@ -307,6 +493,8 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
           '/api/v1/wishlist',
           data: {'productId': productId},
         );
+        WishlistService.instance.markFavorite(productId, true);
+        WishlistService.instance.refreshCount();
         if (!mounted) return;
         setState(() { _isInWishlist = true; _isWishlistLoading = false; });
         ScaffoldMessenger.of(context).clearSnackBars();
@@ -398,8 +586,8 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
             SliverToBoxAdapter(
               child: ProductGalleryWidget(
                 product: _product,
-                isFavorite: _isFavorite,
-                onFavoriteTap: () => setState(() => _isFavorite = !_isFavorite),
+                isFavorite: _isInWishlist,
+                onFavoriteTap: _isWishlistLoading ? () {} : _toggleWishlist,
                 onBackTap: () => Navigator.pop(context),
                 cartCount: _cartCount,
               ),
@@ -410,13 +598,14 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
                 child: Column(
                   children: [
                     const SizedBox(height: 4),
-                    ProductInfoWidget(product: _product),
+                    ProductInfoWidget(product: _pricedProduct),
                     const SizedBox(height: 8),
                     ProductPriceTiersWidget(
                       priceTiers:
                           (_product['priceTiers'] as List<dynamic>?)
                               ?.cast<Map<String, dynamic>>() ??
                           [],
+                      basePrice: _toInt(_product['price']),
                       currentQty: _quantity,
                       onQtyChanged: (q) => setState(() => _quantity = q),
                     ),
@@ -439,58 +628,8 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // Wishlist button row
-              Container(
-                color: Colors.white,
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-                child: SizedBox(
-                  width: double.infinity,
-                  height: 42,
-                  child: OutlinedButton.icon(
-                    onPressed: _isWishlistLoading ? null : _toggleWishlist,
-                    icon: _isWishlistLoading
-                        ? const SizedBox(
-                            width: 14,
-                            height: 14,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Color(0xFFDC2626),
-                            ),
-                          )
-                        : Icon(
-                            _isInWishlist
-                                ? Icons.favorite_rounded
-                                : Icons.favorite_border_rounded,
-                            size: 18,
-                            color: const Color(0xFFDC2626),
-                          ),
-                    label: Text(
-                      _isInWishlist
-                          ? 'Dans la liste de souhaits ✓'
-                          : 'Ajouter à la liste de souhaits',
-                      style: GoogleFonts.outfit(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: const Color(0xFFDC2626),
-                      ),
-                    ),
-                    style: OutlinedButton.styleFrom(
-                      backgroundColor: _isInWishlist
-                          ? const Color(0xFFFEE2E2)
-                          : Colors.transparent,
-                      side: const BorderSide(
-                        color: Color(0xFFDC2626),
-                        width: 1.5,
-                      ),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
               ProductActionBarWidget(
-                product: _product,
+                product: _pricedProduct,
                 quantity: _quantity,
                 onAddToCart: () {
                   setState(() => _cartCount++);
@@ -509,7 +648,16 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
                     );
                     return;
                   }
-                  Navigator.pushNamed(context, '/checkout-screen');
+                  // Avant : direction directe vers '/checkout-screen' SANS aucun
+                  // argument. CheckoutScreen ne charge jamais le panier lui-meme (voir
+                  // son commentaire "recus ici via les arguments de navigation") : ca
+                  // atterrissait sur un recapitulatif vide (0 FCFA), un frais de
+                  // livraison toujours a 2500 FCFA par defaut, et surtout aucun moyen
+                  // de choisir sa commune (ce champ n'existe que sur la page panier,
+                  // via DeliverySelectorWidget). On passe donc par le panier, qui
+                  // contient deja cet article, pour que le choix de commune et le vrai
+                  // total soient corrects avant de continuer vers le paiement.
+                  Navigator.pushNamed(context, AppRoutes.cart);
                 },
               ),
             ],
@@ -597,9 +745,9 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
                         children: [
                           ProductGalleryWidget(
                             product: _product,
-                            isFavorite: _isFavorite,
-                            onFavoriteTap: () =>
-                                setState(() => _isFavorite = !_isFavorite),
+                            isFavorite: _isInWishlist,
+                            onFavoriteTap:
+                                _isWishlistLoading ? () {} : _toggleWishlist,
                             onBackTap: null,
                             cartCount: _cartCount,
                             isTablet: true,
@@ -618,13 +766,14 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
                       padding: const EdgeInsets.all(16),
                       child: Column(
                         children: [
-                          ProductInfoWidget(product: _product),
+                          ProductInfoWidget(product: _pricedProduct),
                           const SizedBox(height: 12),
                           ProductPriceTiersWidget(
                             priceTiers:
                                 (_product['priceTiers'] as List<dynamic>?)
                                     ?.cast<Map<String, dynamic>>() ??
                                 [],
+                            basePrice: _toInt(_product['price']),
                             currentQty: _quantity,
                             onQtyChanged: (q) => setState(() => _quantity = q),
                           ),
@@ -632,7 +781,7 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
                           ProductSellerCardWidget(product: _product),
                           const SizedBox(height: 12),
                           ProductActionBarWidget(
-                            product: _product,
+                            product: _pricedProduct,
                             quantity: _quantity,
                             onAddToCart: () {
                               setState(() => _cartCount++);
@@ -651,7 +800,16 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
                                 );
                                 return;
                               }
-                              Navigator.pushNamed(context, '/checkout-screen');
+                              // Avant : direction directe vers '/checkout-screen' SANS aucun
+                              // argument. CheckoutScreen ne charge jamais le panier lui-meme (voir
+                              // son commentaire "recus ici via les arguments de navigation") : ca
+                              // atterrissait sur un recapitulatif vide (0 FCFA), un frais de
+                              // livraison toujours a 2500 FCFA par defaut, et surtout aucun moyen
+                              // de choisir sa commune (ce champ n'existe que sur la page panier,
+                              // via DeliverySelectorWidget). On passe donc par le panier, qui
+                              // contient deja cet article, pour que le choix de commune et le vrai
+                              // total soient corrects avant de continuer vers le paiement.
+                              Navigator.pushNamed(context, AppRoutes.cart);
                             },
                             isInline: true,
                           ),

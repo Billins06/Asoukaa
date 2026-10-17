@@ -11,8 +11,10 @@ import 'package:sizer/sizer.dart';
 import '../../theme/app_theme.dart';
 import '../../routes/app_routes.dart';
 import '../../services/api_service.dart';
+import '../../services/upload_service.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 class OrderTrackingScreen extends StatefulWidget {
   const OrderTrackingScreen({super.key});
@@ -28,8 +30,29 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
 
   // Live order status
   String _liveStatus = 'en attente';
+  // Libellés d'une commande « en attente » (mêmes textes que la liste des
+  // commandes de buyer_dashboard_screen.dart).
+  static const String _libelleConfVendeur =
+      'En attente de confirmation du vendeur';
+  static const String _libellePaiement = 'En attente de paiement';
+  static const String _libelleNeutre = 'En attente';
+
+  // Libellé précis d'une commande « en attente » (paiement réussi ou non).
+  // Transmis par l'écran appelant s'il le connaît ; sinon déduit du paiement
+  // renvoyé par le serveur dans le détail de la commande
+  // (GET /orders/me/:id → `payment`). Null/« En attente » = on reste neutre.
+  String? _pendingLabel;
+  // Vrai si le libellé vient de l'écran appelant (on ne l'écrase alors pas) ;
+  // faux s'il est déduit du serveur (recalculé à chaque rafraîchissement).
+  bool _pendingLabelFromArgs = false;
   String? _productId;
   Timer? _statusPollTimer;
+
+  // Vraie commande recuperee depuis le serveur (adresse reelle avec sa
+  // position GPS, livraison + livreur assigne). Reste null tant que la
+  // premiere requete n'a pas abouti : on affiche alors les valeurs par
+  // defaut/arguments de navigation comme avant.
+  Map<String, dynamic>? _realOrder;
 
   // Deliverer live position
   double? _delivererLat;
@@ -46,12 +69,15 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
       TextEditingController();
   String _ratingPhotoUrl = '';
   bool _isSubmittingRating = false;
+  bool _isSubmittingBusTaxiAction = false;
 
   // Status → step index mapping
   static const Map<String, int> _statusStepMap = {
     'en attente': 0,
     'en cours': 1,
-    'expedié': 3,
+    'livreur affecté': 1,
+    'expedié': 2,
+    'en transit': 3,
     'livré': 4,
   };
 
@@ -61,13 +87,15 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
   final List<_TrackingStep> _steps = [
     _TrackingStep(
       icon: Icons.check_circle_rounded,
-      title: 'Commande confirmée',
-      subtitle: 'Votre commande a été reçue et confirmée',
+      title: 'Commande reçue',
+      // Texte de repli : l'affichage réel dépend du paiement, voir
+      // _sousTitreCommandeRecue().
+      subtitle: 'Votre commande est enregistrée et transmise au vendeur',
     ),
     _TrackingStep(
       icon: Icons.inventory_2_rounded,
       title: 'En préparation',
-      subtitle: 'Le vendeur prépare votre colis',
+      subtitle: 'Le vendeur a confirmé et prépare votre colis',
     ),
     _TrackingStep(
       icon: Icons.local_shipping_rounded,
@@ -105,6 +133,12 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
     final orderId = args?['orderId'] as String?;
     final initialStatus = args?['status'] as String?;
     _productId = args?['productId'] as String?;
+    final argLabel = args?['pendingLabel'] as String?;
+    _pendingLabel = argLabel;
+    // Un libellé précis transmis par l'appelant est conservé ; null, vide ou
+    // « En attente » (neutre) = on le déduira du paiement renvoyé par le serveur.
+    _pendingLabelFromArgs =
+        argLabel != null && argLabel.isNotEmpty && argLabel != _libelleNeutre;
     if (initialStatus != null) _liveStatus = initialStatus;
     // didChangeDependencies peut être appelé plusieurs fois (changement de
     // thème/locale, etc.) : on ne démarre le polling qu'une seule fois pour
@@ -123,20 +157,38 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
   }
 
   void _startStatusPolling(String orderId) {
+    // Premiere recuperation immediate : sans ca, la page afficherait des
+    // donnees fictives pendant les 15 premieres secondes.
+    _fetchOrderDetails(orderId);
     _statusPollTimer = Timer.periodic(const Duration(seconds: 15), (timer) async {
       if (!mounted) {
         timer.cancel();
         return;
       }
+      await _fetchOrderDetails(orderId, timer: timer);
+    });
+  }
+
+  Future<void> _fetchOrderDetails(String orderId, {Timer? timer}) async {
       try {
         final response =
-            await ApiService.instance.client.get('/api/v1/orders/$orderId');
-        final status = response.data['status'] as String?;
-        if (status != null && mounted && status != _liveStatus) {
-          setState(() => _liveStatus = status);
-          _showStatusNotification(status);
+            await ApiService.instance.client.get('/api/v1/orders/me/$orderId');
+        final data = response.data as Map<String, dynamic>?;
+        if (data == null || !mounted) return;
+        final status = data['status'] as String?;
+        final statusChanged = status != null && status != _liveStatus;
+        setState(() {
+          _realOrder = data;
+          if (status != null) _liveStatus = status;
+          // Libellé d'attente non transmis : déduit de `data['payment']`.
+          if (!_pendingLabelFromArgs && _liveStatus == 'en attente') {
+            _pendingLabel = _libelleAttenteDepuisCommande(data);
+          }
+        });
+        if (statusChanged) {
+          _showStatusNotification(status!);
           if (status == 'livré') {
-            timer.cancel();
+            timer?.cancel();
             Future.delayed(const Duration(seconds: 2), () {
               if (mounted) setState(() => _showRatingView = true);
             });
@@ -148,17 +200,64 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
         // peut-être plus visible (ex. resté vivant plus bas dans la pile
         // de navigation).
         if (e is DioException && e.response?.statusCode == 404) {
-          timer.cancel();
+          timer?.cancel();
         }
       }
-    });
+  }
+
+  // Même règle que la liste des commandes (buyer_dashboard_screen.dart) :
+  // paiement réussi (ou paiement à la livraison en attente) → c'est au vendeur
+  // de confirmer ; sinon → en attente de paiement ; si la réponse ne contient
+  // pas du tout la clé `payment` → neutre « En attente ».
+  static String _libelleAttenteDepuisCommande(Map<String, dynamic> data) {
+    if (!data.containsKey('payment')) return _libelleNeutre;
+    final payment = data['payment'];
+    String? paymentStatus;
+    String? payMethod;
+    if (payment is Map) {
+      final s = payment['status'];
+      final m = payment['method'];
+      paymentStatus = s is String ? s : null;
+      payMethod = m is String ? m : null;
+    }
+    final auVendeur = paymentStatus == 'success' ||
+        (payMethod == 'cash_on_delivery' && paymentStatus == 'en attente');
+    return auVendeur ? _libelleConfVendeur : _libellePaiement;
+  }
+
+  // Sous-titre de l'étape « Commande reçue » : « transmise au vendeur »
+  // seulement si le paiement est réussi (ou si la commande a déjà avancé).
+  String _sousTitreCommandeRecue() {
+    if (_liveStatus == 'annulé') return 'Votre commande a été enregistrée';
+    if (_liveStatus != 'en attente') {
+      return 'Votre commande est enregistrée et transmise au vendeur';
+    }
+    if (_pendingLabel == _libelleConfVendeur) {
+      return 'Votre commande est enregistrée et transmise au vendeur';
+    }
+    if (_pendingLabel == _libellePaiement) {
+      return 'Votre commande est enregistrée : réglez-la pour qu\'elle soit transmise au vendeur';
+    }
+    return 'Votre commande est enregistrée';
+  }
+
+  String _messageCommandeEnAttente() {
+    if (_pendingLabel == _libelleConfVendeur) {
+      return '🕓 Commande transmise au vendeur';
+    }
+    if (_pendingLabel == _libellePaiement) {
+      return '🕓 Commande enregistrée, en attente de paiement';
+    }
+    return '🕓 Commande enregistrée';
   }
 
   void _showStatusNotification(String status) {
     final messages = {
-      'en attente': '✅ Commande confirmée',
-      'en cours': '📦 En cours de préparation',
+      'en attente': _messageCommandeEnAttente(),
+      'en cours': '✅ Commande confirmée par le vendeur, en préparation',
+      'livreur affecté': '🚴 Livreur affecté',
       'expedié': '🚚 Commande expédiée',
+      'en transit': '📍 Livreur en route',
       'livré': '🎉 Commande livrée !',
       'annulé': '❌ Commande annulée',
     };
@@ -196,6 +295,19 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
         SnackBar(
           content: Text(
             'Veuillez sélectionner une note',
+            style: GoogleFonts.outfit(),
+          ),
+          backgroundColor: AppTheme.error,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+    if (orderId.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Commande introuvable, réessayez depuis le suivi de commande',
             style: GoogleFonts.outfit(),
           ),
           backgroundColor: AppTheme.error,
@@ -267,23 +379,51 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
     final args =
         ModalRoute.of(context)?.settings.arguments as Map<String, dynamic>?;
 
+    // Tant que la vraie commande n'est pas encore arrivée du serveur
+    // (_realOrder == null), on affiche les arguments de navigation reçus
+    // de l'écran précédent — dès qu'elle arrive, ses champs prennent le
+    // dessus partout ci-dessous.
+    final realAddress = _realOrder?['address'] as Map<String, dynamic>?;
+    final realDelivery = _realOrder?['delivery'] as Map<String, dynamic>?;
+    final realAgentUser =
+        (realDelivery?['agent'] as Map<String, dynamic>?)?['user']
+            as Map<String, dynamic>?;
+
     final String orderNumber =
+        (_realOrder?['orderNumber'] as String?) ??
         args?['orderNumber'] as String? ??
         'ASK-${DateTime.now().millisecondsSinceEpoch.toString().substring(7)}';
-    final String firstName = args?['firstName'] as String? ?? 'Aminata';
-    final String lastName = args?['lastName'] as String? ?? 'Konaté';
+    final String recipientName =
+        (realAddress?['nom_destinataire'] as String?) ??
+        '${args?['firstName'] ?? 'Aminata'} ${args?['lastName'] ?? 'Konaté'}';
     final String address =
+        (realAddress?['quartier'] as String?) ??
         args?['address'] as String? ?? 'Rue 42, Badalabougou';
-    final String city = args?['city'] as String? ?? 'Bamako';
-    final String country = args?['country'] as String? ?? 'Mali';
-    final String phone = args?['phone'] as String? ?? '+223 76 00 00 00';
+    final String city =
+        (realAddress?['ville'] as String?) ??
+        args?['city'] as String? ?? 'Bamako';
+    final String country =
+        (realAddress?['country'] as String?) ??
+        args?['country'] as String? ?? 'Mali';
+    final String phone =
+        (realAddress?['phone_destinataire'] as String?) ??
+        args?['phone'] as String? ?? '+223 76 00 00 00';
+    final double? addressLat = (realAddress?['latitude'] as num?)?.toDouble();
+    final double? addressLng = (realAddress?['longitude'] as num?)?.toDouble();
 
     final deliveryDate = DateTime.now().add(const Duration(days: 2));
     final deliveryDateStr =
         '${deliveryDate.day} ${_monthName(deliveryDate.month)} ${deliveryDate.year}';
 
-    // Generate a unique QR data string for this order
-    final String qrData = 'ASK-$orderNumber-${city.toUpperCase()}-2026';
+    // Code de remise : secret aléatoire fourni par le serveur
+    // (GET /orders/me/:id -> handoverCode, visible seulement par le client
+    // propriétaire). Le QR encode CE code, plus le numéro de commande. Null
+    // tant que le serveur ne le fournit pas : aucun QR, aucun repli.
+    final dynamic rawHandover = _realOrder?['handoverCode'];
+    final String? handoverCode =
+        (rawHandover == null || '$rawHandover'.trim().isEmpty)
+            ? null
+            : '$rawHandover'.trim();
 
     return Scaffold(
       backgroundColor: AppTheme.background,
@@ -336,8 +476,21 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
               SizedBox(height: 2.h),
 
               // Live GPS position card (shown when deliverer is in transit)
-              if (_liveStatus == 'expedié') ...[
+              if (_liveStatus == 'en transit') ...[
                 _buildGpsTrackingCard(),
+                SizedBox(height: 2.h),
+              ],
+
+              // Cas C (bus/taxi) — confirmation ou contestation de
+              // réception, uniquement pendant la fenêtre des 3 jours.
+              if ((_realOrder?['transportMode'] != null) &&
+                  _liveStatus == 'expedié' &&
+                  _realOrder?['disputeOuverte'] != true) ...[
+                _buildBusTaxiConfirmationCard(),
+                SizedBox(height: 2.h),
+              ],
+              if (_realOrder?['disputeOuverte'] == true) ...[
+                _buildDisputeOpenCard(),
                 SizedBox(height: 2.h),
               ],
 
@@ -346,9 +499,9 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
               SizedBox(height: 2.h),
 
               // QR Code section
-              _buildSectionTitle('QR Code de la commande'),
+              _buildSectionTitle('Code de remise'),
               SizedBox(height: 1.5.h),
-              _buildQrCodeCard(orderNumber, qrData),
+              _buildQrCodeCard(handoverCode),
               SizedBox(height: 2.h),
 
               // Step-by-step progression
@@ -360,19 +513,20 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
               // Carrier info
               _buildSectionTitle('Transporteur'),
               SizedBox(height: 1.5.h),
-              _buildCarrierCard(),
+              _buildCarrierCard(orderNumber, realAgentUser),
               SizedBox(height: 2.h),
 
               // Delivery address
               _buildSectionTitle('Adresse de livraison'),
               SizedBox(height: 1.5.h),
               _buildAddressCard(
-                firstName,
-                lastName,
+                recipientName,
                 address,
                 city,
                 country,
                 phone,
+                addressLat,
+                addressLng,
               ),
               SizedBox(height: 2.h),
 
@@ -380,7 +534,13 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
               if (_isDelivered) ...[
                 _buildSectionTitle('Évaluer la livraison'),
                 SizedBox(height: 1.5.h),
-                _buildRatingCard(orderNumber),
+                // On envoie l'UUID réel de la commande (celui attendu par
+                // POST /reviews), pas le numéro affiché "ASK-..." — c'est ce
+                // dernier qui était envoyé par erreur et provoquait
+                // "ID commande invalide" côté backend.
+                _buildRatingCard(
+                  (_realOrder?['id'] as String?) ?? (args?['orderId'] as String?) ?? '',
+                ),
                 SizedBox(height: 2.h),
               ],
 
@@ -420,13 +580,26 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
   }
 
   Widget _buildStatusBanner() {
+    // Libellé de l'état « en attente » selon le paiement (voir _pendingLabel).
+    const confVendeur = _libelleConfVendeur;
+    const attPaiement = _libellePaiement;
+    final (String, String) enAttente = _pendingLabel == confVendeur
+        ? (
+            confVendeur,
+            'Votre paiement est reçu : le vendeur doit confirmer votre commande',
+          )
+        : _pendingLabel == attPaiement
+            ? (
+                attPaiement,
+                'Réglez votre commande pour que le vendeur puisse la confirmer',
+              )
+            : ('En attente', 'Votre commande est en attente de traitement');
     final statusLabels = {
-      'en attente': (
-        'En attente',
-        'Votre commande est en attente de confirmation',
-      ),
+      'en attente': enAttente,
       'en cours': ('En préparation', 'Le vendeur prépare votre colis'),
-      'expedié': ('Colis expédié', 'Votre colis est en route vers vous'),
+      'livreur affecté': ('Livreur affecté', 'Un livreur va récupérer votre colis'),
+      'expedié': ('Colis expédié', 'Votre colis a été remis pour livraison'),
+      'en transit': ('En transit', 'Votre colis est en route vers vous'),
       'livré': ('Commande livrée !', 'Votre colis a été livré avec succès'),
       'annulé': ('Commande annulée', 'Cette commande a été annulée'),
     };
@@ -528,6 +701,189 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
         ],
       ),
     );
+  }
+
+  // ─────────────────────────────────────────────────────
+  // CAS C (bus/taxi) — le client confirme la réception ou conteste,
+  // dans le délai de 3 jours après la remise au transporteur.
+  // ─────────────────────────────────────────────────────
+  Widget _buildBusTaxiConfirmationCard() {
+    return _InfoCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: AppTheme.primaryMuted,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(Icons.directions_bus_filled_rounded, color: AppTheme.primary, size: 18),
+              ),
+              SizedBox(width: 3.w),
+              Expanded(
+                child: Text(
+                  'Avez-vous reçu votre colis ?',
+                  style: GoogleFonts.outfit(fontSize: 14, fontWeight: FontWeight.w700, color: AppTheme.textPrimary),
+                ),
+              ),
+            ],
+          ),
+          SizedBox(height: 1.h),
+          Text(
+            'Votre colis a été remis au transporteur. Confirmez sa réception avec '
+            'une photo, ou signalez un problème. Sans réponse de votre part sous '
+            '3 jours, la réception sera considérée comme confirmée.',
+            style: GoogleFonts.outfit(fontSize: 12, color: AppTheme.textSecondary, height: 1.5),
+          ),
+          SizedBox(height: 1.5.h),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  icon: const Icon(Icons.report_problem_outlined, size: 16),
+                  label: Text('Signaler un problème', style: GoogleFonts.outfit(fontSize: 12)),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppTheme.error,
+                    side: const BorderSide(color: AppTheme.error),
+                  ),
+                  onPressed: _isSubmittingBusTaxiAction ? null : () => _openDispute(context),
+                ),
+              ),
+              SizedBox(width: 2.w),
+              Expanded(
+                child: ElevatedButton.icon(
+                  icon: const Icon(Icons.check_circle_outline_rounded, size: 16),
+                  label: Text('Confirmer réception', style: GoogleFonts.outfit(fontSize: 12)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppTheme.success,
+                    foregroundColor: Colors.white,
+                  ),
+                  onPressed: _isSubmittingBusTaxiAction ? null : () => _confirmReception(context),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDisputeOpenCard() {
+    return _InfoCard(
+      child: Row(
+        children: [
+          const Icon(Icons.report_problem_rounded, color: AppTheme.error, size: 20),
+          SizedBox(width: 3.w),
+          Expanded(
+            child: Text(
+              'Votre litige a été transmis à notre équipe. Nous revenons vers vous rapidement.',
+              style: GoogleFonts.outfit(fontSize: 12, color: AppTheme.textSecondary),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _confirmReception(BuildContext context) async {
+    final orderId = _realOrder?['id']?.toString();
+    if (orderId == null || orderId.isEmpty) return;
+
+    final picked = await ImagePicker().pickImage(
+      source: ImageSource.camera,
+      maxWidth: 1200,
+      imageQuality: 80,
+    );
+    if (picked == null) return;
+
+    setState(() => _isSubmittingBusTaxiAction = true);
+    try {
+      final url = await UploadService.instance.uploadFile(picked, 'proofs');
+      await ApiService.instance.client.post(
+        '/api/v1/orders/$orderId/reception-proof',
+        data: {'photoUrl': url},
+      );
+      if (!mounted) return;
+      setState(() {
+        _isSubmittingBusTaxiAction = false;
+        _liveStatus = 'livré';
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Réception confirmée, merci !', style: GoogleFonts.outfit()),
+          backgroundColor: AppTheme.success,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _isSubmittingBusTaxiAction = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Échec de la confirmation. Réessayez.', style: GoogleFonts.outfit()),
+          backgroundColor: AppTheme.error,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  Future<void> _openDispute(BuildContext context) async {
+    final orderId = _realOrder?['id']?.toString();
+    if (orderId == null || orderId.isEmpty) return;
+
+    final controller = TextEditingController();
+    final motif = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text('Décrire le problème', style: GoogleFonts.outfit(fontWeight: FontWeight.w700)),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLines: 3,
+          decoration: InputDecoration(
+            hintText: 'Ex: je n\'ai rien reçu à la gare',
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Annuler')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('Envoyer'),
+          ),
+        ],
+      ),
+    );
+
+    if (motif == null || motif.isEmpty || !context.mounted) return;
+
+    setState(() => _isSubmittingBusTaxiAction = true);
+    try {
+      await ApiService.instance.client.post(
+        '/api/v1/orders/$orderId/dispute',
+        data: {'motif': motif},
+      );
+      if (!mounted) return;
+      setState(() {
+        _isSubmittingBusTaxiAction = false;
+        _realOrder = {...?_realOrder, 'disputeOuverte': true};
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _isSubmittingBusTaxiAction = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Échec de l\'envoi. Réessayez.', style: GoogleFonts.outfit()),
+          backgroundColor: AppTheme.error,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
   }
 
   Widget _buildGpsTrackingCard() {
@@ -759,7 +1115,7 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
     );
   }
 
-  Widget _buildRatingCard(String orderNumber) {
+  Widget _buildRatingCard(String orderId) {
     if (_ratingSubmitted) {
       return _InfoCard(
         child: Column(
@@ -986,7 +1342,7 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
             child: ElevatedButton(
               onPressed: (_isSubmittingRating || _selectedRating == 0)
                   ? null
-                  : () => _submitRating(orderNumber),
+                  : () => _submitRating(orderId),
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFFF59E0B),
                 foregroundColor: Colors.white,
@@ -1102,10 +1458,18 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
       child: Column(
         children: List.generate(_steps.length, (index) {
           final step = _steps[index];
-          final isCompleted = index < _currentStep;
-          final isActive = index == _currentStep;
-          final isPending = index > _currentStep;
           final isLast = index == _steps.length - 1;
+          // ⚠️ Avant : isCompleted = index < _currentStep pour TOUTES les
+          // étapes, y compris la dernière ("Livrée"). Résultat : quand la
+          // commande est livrée (_currentStep pointe justement sur cette
+          // dernière étape), elle ne pouvait jamais passer "complétée" —
+          // elle restait affichée comme l'étape "Actuel" (isActive), donnant
+          // l'impression que la livraison est encore en cours alors qu'elle
+          // est terminée. La dernière étape doit être marquée complétée dès
+          // qu'on l'atteint, pas seulement quand on la dépasse.
+          final isCompleted = isLast ? index <= _currentStep : index < _currentStep;
+          final isActive = !isLast && index == _currentStep;
+          final isPending = index > _currentStep;
 
           return Row(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -1170,7 +1534,7 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
                       ),
                       const SizedBox(height: 2),
                       Text(
-                        step.subtitle,
+                        index == 0 ? _sousTitreCommandeRecue() : step.subtitle,
                         style: GoogleFonts.outfit(
                           fontSize: 11,
                           color: isPending
@@ -1242,7 +1606,16 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
     );
   }
 
-  Widget _buildCarrierCard() {
+  Widget _buildCarrierCard(
+    String orderNumber,
+    Map<String, dynamic>? agentUser,
+  ) {
+    final agentName = agentUser != null
+        ? '${agentUser['prenom'] ?? ''} ${agentUser['name'] ?? ''}'.trim()
+        : '';
+    final isAssigned = agentName.isNotEmpty;
+    final agentPhone = agentUser?['phone'] as String?;
+
     return _InfoCard(
       child: Column(
         children: [
@@ -1267,7 +1640,7 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Asoukaa Express',
+                      isAssigned ? agentName : 'En attente d\'affectation',
                       style: GoogleFonts.outfit(
                         fontSize: 14,
                         fontWeight: FontWeight.w700,
@@ -1291,15 +1664,17 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
                   vertical: 5,
                 ),
                 decoration: BoxDecoration(
-                  color: AppTheme.successContainer,
+                  color: isAssigned
+                      ? AppTheme.successContainer
+                      : AppTheme.primaryContainer,
                   borderRadius: BorderRadius.circular(20.0),
                 ),
                 child: Text(
-                  'Actif',
+                  isAssigned ? 'Actif' : 'En attente',
                   style: GoogleFonts.outfit(
                     fontSize: 11,
                     fontWeight: FontWeight.w600,
-                    color: AppTheme.success,
+                    color: isAssigned ? AppTheme.success : AppTheme.primary,
                   ),
                 ),
               ),
@@ -1313,13 +1688,15 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
               _buildCarrierDetail(
                 Icons.confirmation_number_rounded,
                 'N° de suivi',
-                'ASK-TRK-7842',
+                orderNumber,
               ),
               SizedBox(width: 4.w),
               _buildCarrierDetail(
                 Icons.phone_rounded,
                 'Contact',
-                '+223 20 22 00 00',
+                isAssigned && agentPhone != null && agentPhone.isNotEmpty
+                    ? agentPhone
+                    : '—',
               ),
             ],
           ),
@@ -1369,13 +1746,38 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
     );
   }
 
+  Future<void> _openAddressInMaps(
+    BuildContext context,
+    double latitude,
+    double longitude,
+  ) async {
+    final uri = Uri.parse(
+      'https://www.google.com/maps/search/?api=1&query=$latitude,$longitude',
+    );
+    try {
+      final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!ok && context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Impossible d\'ouvrir Maps')),
+        );
+      }
+    } catch (_) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Impossible d\'ouvrir Maps')),
+        );
+      }
+    }
+  }
+
   Widget _buildAddressCard(
-    String firstName,
-    String lastName,
+    String recipientName,
     String address,
     String city,
     String country,
     String phone,
+    double? latitude,
+    double? longitude,
   ) {
     return _InfoCard(
       child: Row(
@@ -1400,7 +1802,7 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  '$firstName $lastName',
+                  recipientName,
                   style: GoogleFonts.outfit(
                     fontSize: 13,
                     fontWeight: FontWeight.w700,
@@ -1433,6 +1835,36 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
                     color: AppTheme.textSecondary,
                   ),
                 ),
+                // Position GPS partagée par le client au paiement — absente
+                // pour les commandes passées avant l'ajout de cette
+                // fonctionnalité, ou en cas de retrait en boutique.
+                if (latitude != null && longitude != null) ...[
+                  const SizedBox(height: 8),
+                  InkWell(
+                    onTap: () =>
+                        _openAddressInMaps(context, latitude, longitude),
+                    borderRadius: BorderRadius.circular(8),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.map_rounded,
+                          size: 15,
+                          color: AppTheme.primary,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          'Voir sur la carte',
+                          style: GoogleFonts.outfit(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: AppTheme.primary,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -1441,7 +1873,14 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
     );
   }
 
-  Widget _buildQrCodeCard(String orderNumber, String qrData) {
+  /// Carte « Code de remise » (côté CLIENT). Le code est un secret aléatoire
+  /// généré par le serveur (`handoverCode`), à ne donner qu'au livreur au
+  /// moment de la réception. Ce n'est PLUS le numéro de commande (qui n'est
+  /// pas secret). S'il n'est pas fourni (null), aucun QR n'est affiché et on
+  /// ne se rabat jamais sur le numéro de commande.
+  Widget _buildQrCodeCard(String? handoverCode) {
+    final String code = handoverCode ?? '';
+    final bool hasCode = code.isNotEmpty;
     return _InfoCard(
       child: Column(
         children: [
@@ -1466,7 +1905,7 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'QR Code de livraison',
+                      'Code de remise',
                       style: GoogleFonts.outfit(
                         fontSize: 14,
                         fontWeight: FontWeight.w700,
@@ -1474,7 +1913,7 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
                       ),
                     ),
                     Text(
-                      'À présenter au livreur lors de la réception',
+                      'Code de remise — à donner uniquement au livreur à la réception',
                       style: GoogleFonts.outfit(
                         fontSize: 11,
                         color: AppTheme.textSecondary,
@@ -1486,83 +1925,105 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen>
             ],
           ),
           SizedBox(height: 2.h),
-          Center(
-            child: Container(
-              padding: const EdgeInsets.all(16),
+          if (!hasCode)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(14),
               decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(16.0),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withAlpha(15),
-                    blurRadius: 12,
-                    offset: const Offset(0, 4),
+                color: AppTheme.surfaceVariant,
+                borderRadius: BorderRadius.circular(10.0),
+              ),
+              child: Text(
+                'Le code de remise n\'est pas disponible pour le moment. '
+                'Il s\'affichera ici dès que la commande sera prête.',
+                textAlign: TextAlign.center,
+                style: GoogleFonts.outfit(
+                  fontSize: 12,
+                  color: AppTheme.textSecondary,
+                ),
+              ),
+            )
+          else ...[
+            Center(
+              child: Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(16.0),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withAlpha(15),
+                      blurRadius: 12,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: SizedBox(
+                  width: 200,
+                  height: 200,
+                  child: PrettyQrView.data(
+                    data: code,
+                    decoration: const PrettyQrDecoration(
+                      shape: PrettyQrSmoothSymbol(color: Color(0xFF1A1A2E)),
+                    ),
+                    errorCorrectLevel: QrErrorCorrectLevel.M,
+                  ),
+                ),
+              ),
+            ),
+            SizedBox(height: 1.5.h),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              decoration: BoxDecoration(
+                color: AppTheme.surfaceVariant,
+                borderRadius: BorderRadius.circular(8.0),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(
+                    Icons.tag_rounded,
+                    size: 14,
+                    color: AppTheme.textSecondary,
+                  ),
+                  const SizedBox(width: 6),
+                  Flexible(
+                    child: SelectableText(
+                      code,
+                      style: GoogleFonts.outfit(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        color: AppTheme.textPrimary,
+                        letterSpacing: 1.5,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  GestureDetector(
+                    onTap: () {
+                      Clipboard.setData(ClipboardData(text: code));
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(
+                            'Code copié !',
+                            style: GoogleFonts.outfit(),
+                          ),
+                          behavior: SnackBarBehavior.floating,
+                          duration: const Duration(seconds: 2),
+                          backgroundColor: AppTheme.success,
+                        ),
+                      );
+                    },
+                    child: const Icon(
+                      Icons.copy_rounded,
+                      size: 14,
+                      color: AppTheme.primary,
+                    ),
                   ),
                 ],
               ),
-              child: SizedBox(
-                width: 200,
-                height: 200,
-                child: PrettyQrView.data(
-                  data: qrData,
-                  decoration: const PrettyQrDecoration(
-                    shape: PrettyQrSmoothSymbol(color: Color(0xFF1A1A2E)),
-                  ),
-                  errorCorrectLevel: QrErrorCorrectLevel.M,
-                ),
-              ),
             ),
-          ),
-          SizedBox(height: 1.5.h),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-            decoration: BoxDecoration(
-              color: AppTheme.surfaceVariant,
-              borderRadius: BorderRadius.circular(8.0),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(
-                  Icons.tag_rounded,
-                  size: 14,
-                  color: AppTheme.textSecondary,
-                ),
-                const SizedBox(width: 6),
-                Text(
-                  qrData,
-                  style: GoogleFonts.outfit(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                    color: AppTheme.textSecondary,
-                    letterSpacing: 0.5,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                GestureDetector(
-                  onTap: () {
-                    Clipboard.setData(ClipboardData(text: qrData));
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text(
-                          'Code copié !',
-                          style: GoogleFonts.outfit(),
-                        ),
-                        behavior: SnackBarBehavior.floating,
-                        duration: const Duration(seconds: 2),
-                        backgroundColor: AppTheme.success,
-                      ),
-                    );
-                  },
-                  child: const Icon(
-                    Icons.copy_rounded,
-                    size: 14,
-                    color: AppTheme.primary,
-                  ),
-                ),
-              ],
-            ),
-          ),
+          ],
         ],
       ),
     );

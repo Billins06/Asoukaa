@@ -1,11 +1,16 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
 
 import 'dart:async';
+import 'dart:typed_data';
 
 import '../../../routes/app_routes.dart';
 import '../../../services/api_service.dart';
+import '../../../services/wishlist_service.dart';
+import '../../../theme/app_theme.dart';
+import '../../../widgets/app_toast.dart';
 
 class HomeSearchBarWidget extends StatefulWidget {
   final bool isSearchOpen;
@@ -104,40 +109,80 @@ class _HomeSearchBarWidgetState extends State<HomeSearchBarWidget>
     _fetchUnreadCount();
   }
 
+  /// Import d'une image (galerie ou appareil photo) depuis la barre de
+  /// recherche. La vraie recherche visuelle n'existe pas encore côté backend :
+  /// on affiche l'image importée et on propose de la décrire en texte, ce qui
+  /// relance la recherche texte classique (même route que la barre).
+  /// Quand la recherche par image sera prête, l'[XFile] choisi ci-dessous est
+  /// le point de branchement (envoi au backend au lieu de la feuille).
   Future<void> _pickImageForSearch() async {
+    if (_isImageSearching) return;
+    final source = await _showImageSourceDialog();
+    if (source == null || !mounted) return; // feuille fermée : rien à faire
+
+    final bool fromCamera = source == ImageSource.camera;
     setState(() => _isImageSearching = true);
+    XFile? image;
+    Uint8List? bytes;
     try {
-      final picker = ImagePicker();
-      final source = await _showImageSourceDialog();
-      if (source == null) {
-        setState(() => _isImageSearching = false);
-        return;
-      }
-      final XFile? image = await picker.pickImage(
+      image = await ImagePicker().pickImage(
         source: source,
         maxWidth: 800,
         imageQuality: 80,
       );
-      if (image != null && mounted) {
-        Navigator.pushNamed(
+      // readAsBytes fonctionne sur mobile comme sur le web (pas de dart:io).
+      if (image != null) bytes = await image.readAsBytes();
+    } on PlatformException catch (e) {
+      if (mounted) {
+        final denied = e.code == 'camera_access_denied' ||
+            e.code == 'photo_access_denied';
+        AppToast.show(
           context,
-          AppRoutes.searchResults,
-          arguments: {
-            'imageSearch': true,
-            'imagePath': image.path,
-            'query': 'Recherche par image',
-          },
+          message: denied
+              ? (fromCamera
+                  ? 'Accès à l\'appareil photo refusé. Autorisez-le dans les réglages du téléphone.'
+                  : 'Accès aux photos refusé. Autorisez-le dans les réglages du téléphone.')
+              : (fromCamera
+                  ? 'Impossible d\'ouvrir l\'appareil photo.'
+                  : 'Impossible d\'accéder à la galerie.'),
+          type: ToastType.error,
         );
       }
+      return;
     } catch (_) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Impossible d\'accéder à la galerie')),
+        AppToast.show(
+          context,
+          message: 'Impossible d\'importer cette image. Réessayez.',
+          type: ToastType.error,
         );
       }
+      return;
     } finally {
       if (mounted) setState(() => _isImageSearching = false);
     }
+
+    // Sélection annulée par l'utilisateur : on ne fait rien.
+    if (image == null || bytes == null || !mounted) return;
+    final Uint8List pickedBytes = bytes;
+
+    final query = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => _ImageSearchSheet(imageBytes: pickedBytes),
+    );
+    if (query == null || query.trim().isEmpty || !mounted) return;
+
+    // Même navigation que la barre de recherche texte.
+    Navigator.pushNamed(
+      context,
+      AppRoutes.searchResults,
+      arguments: query.trim(),
+    );
   }
 
   Future<ImageSource?> _showImageSourceDialog() async {
@@ -447,10 +492,47 @@ class _HomeSearchBarWidgetState extends State<HomeSearchBarWidget>
                 borderRadius: BorderRadius.circular(8),
                 child: Padding(
                   padding: const EdgeInsets.all(6),
-                  child: const Icon(
-                    Icons.favorite_border_rounded,
-                    size: 24,
-                    color: Color(0xFF1A1A1A),
+                  child: ValueListenableBuilder<int>(
+                    // Écoute directement le compteur partagé : le badge se
+                    // met à jour à l'instant même où un produit est
+                    // ajouté/retiré ailleurs dans l'app (fiche produit,
+                    // listings...), sans attendre un rechargement de cet
+                    // écran ou un retour au premier plan.
+                    valueListenable: WishlistService.instance.countNotifier,
+                    builder: (context, wishlistCount, _) => Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        const Icon(
+                          Icons.favorite_border_rounded,
+                          size: 24,
+                          color: Color(0xFF1A1A1A),
+                        ),
+                        if (wishlistCount > 0)
+                          Positioned(
+                            top: -4,
+                            right: -4,
+                            child: Container(
+                              padding: const EdgeInsets.all(3),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFFF6210),
+                                shape: BoxShape.circle,
+                                border: Border.all(
+                                  color: Colors.white,
+                                  width: 1.5,
+                                ),
+                              ),
+                              child: Text(
+                                '$wishlistCount',
+                                style: GoogleFonts.outfit(
+                                  fontSize: 9,
+                                  fontWeight: FontWeight.w700,
+                                  color: Colors.white,
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -544,6 +626,196 @@ class _HomeSearchBarWidgetState extends State<HomeSearchBarWidget>
               ),
             ],
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Feuille affichée après l'import d'une image : aperçu + message honnête
+/// (recherche visuelle bientôt disponible) + champ texte pré-focalisé.
+/// Renvoie (via Navigator.pop) le texte saisi, ou null si fermée.
+class _ImageSearchSheet extends StatefulWidget {
+  final Uint8List imageBytes;
+
+  const _ImageSearchSheet({required this.imageBytes});
+
+  @override
+  State<_ImageSearchSheet> createState() => _ImageSearchSheetState();
+}
+
+class _ImageSearchSheetState extends State<_ImageSearchSheet> {
+  final TextEditingController _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final q = _controller.text.trim();
+    if (q.isEmpty) return;
+    Navigator.pop(context, q);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(
+        bottom: MediaQuery.of(context).viewInsets.bottom,
+      ),
+      child: SafeArea(
+        top: false,
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: AppTheme.outline,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      'Image importée',
+                      style: GoogleFonts.outfit(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                        color: AppTheme.textPrimary,
+                      ),
+                    ),
+                  ),
+                  InkWell(
+                    onTap: () => Navigator.pop(context),
+                    borderRadius: BorderRadius.circular(20),
+                    child: const Padding(
+                      padding: EdgeInsets.all(4),
+                      child: Icon(
+                        Icons.close_rounded,
+                        size: 22,
+                        color: AppTheme.muted,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(14),
+                child: Container(
+                  height: 180,
+                  color: AppTheme.background,
+                  child: Image.memory(
+                    widget.imageBytes,
+                    fit: BoxFit.contain,
+                    errorBuilder: (_, __, ___) => const Center(
+                      child: Icon(
+                        Icons.broken_image_outlined,
+                        size: 40,
+                        color: AppTheme.muted,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 14),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: AppTheme.primaryContainer,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(
+                      Icons.auto_awesome_rounded,
+                      size: 18,
+                      color: AppTheme.primary,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'La recherche par image arrive bientôt. En attendant, décrivez ce que vous cherchez :',
+                        style: GoogleFonts.outfit(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500,
+                          color: AppTheme.textSecondary,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _controller,
+                autofocus: true,
+                textInputAction: TextInputAction.search,
+                onSubmitted: (_) => _submit(),
+                style: GoogleFonts.outfit(
+                  fontSize: 14,
+                  color: AppTheme.textPrimary,
+                ),
+                decoration: InputDecoration(
+                  hintText: 'Ex. : robe en wax, sac en cuir noir...',
+                  hintStyle: GoogleFonts.outfit(
+                    fontSize: 14,
+                    color: AppTheme.muted,
+                  ),
+                  prefixIcon: const Icon(
+                    Icons.search_rounded,
+                    size: 20,
+                    color: AppTheme.muted,
+                  ),
+                  filled: true,
+                  fillColor: AppTheme.background,
+                  contentPadding: const EdgeInsets.symmetric(vertical: 12),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: BorderSide.none,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 14),
+              ValueListenableBuilder<TextEditingValue>(
+                valueListenable: _controller,
+                builder: (context, value, _) => SizedBox(
+                  height: 48,
+                  child: ElevatedButton(
+                    onPressed: value.text.trim().isEmpty ? null : _submit,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppTheme.primary,
+                      foregroundColor: Colors.white,
+                      disabledBackgroundColor: AppTheme.outline,
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    child: Text(
+                      'Rechercher',
+                      style: GoogleFonts.outfit(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
+import '../../../services/api_service.dart' show kReglageServeurActif;
+import '../../../widgets/server_address_dialog.dart';
+
 class AuthLogoWidget extends StatefulWidget {
   const AuthLogoWidget({super.key});
 
@@ -42,7 +45,13 @@ class _AuthLogoWidgetState extends State<AuthLogoWidget>
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
+    // Appui long sur le logo : réglage discret de l'adresse du serveur
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onLongPress: kReglageServeurActif
+          ? () => afficherDialogueAdresseServeur(context)
+          : null,
+      child: AnimatedBuilder(
       animation: _controller,
       builder: (_, __) => FadeTransition(
         opacity: _fadeAnim,
@@ -113,6 +122,6 @@ class _AuthLogoWidgetState extends State<AuthLogoWidget>
           ),
         ),
       ),
-    );
+    ));
   }
 }

@@ -26,14 +26,28 @@ import '../presentation/import_assiste_screen/import_assiste_screen.dart';
 import '../presentation/feexpay_result_screen/feexpay_result_screen.dart';
 import '../presentation/categories_screen/categories_screen.dart';
 import '../presentation/wishlist_screen/wishlist_screen.dart';
+import '../presentation/followed_shops_screen/followed_shops_screen.dart';
 import '../presentation/delivery_request_screen/delivery_request_screen.dart';
 import '../presentation/support_help_screen/support_help_screen.dart';
+import '../presentation/support_help_screen/ticket_detail_screen.dart';
 import '../presentation/legal_page_screen/legal_page_screen.dart';
 import '../presentation/refund_request_screen/refund_request_screen.dart';
 import '../presentation/chat_screen/conversations_inbox_screen.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../presentation/otp_verification_screen/otp_verification_screen.dart';
+import '../presentation/reset_password_screen/reset_password_screen.dart';
+import '../presentation/vendor_reapply_screen/vendor_reapply_screen.dart';
+import '../presentation/agent_reapply_screen/agent_reapply_screen.dart';
+import '../presentation/vendor_complete_documents_screen/vendor_complete_documents_screen.dart';
+import '../presentation/vendor_withdrawals_screen/vendor_withdrawals_screen.dart';
+import '../presentation/seller_coupons_screen/seller_coupons_screen.dart';
+import '../presentation/category_products_screen/category_products_screen.dart';
+import '../presentation/shops_list_screen/shops_list_screen.dart';
+import '../presentation/agent_complete_documents_screen/agent_complete_documents_screen.dart';
+import '../presentation/change_email_screen/change_email_screen.dart';
+import '../presentation/become_vendor_screen/become_vendor_screen.dart';
+import '../presentation/all_products_screen/all_products_screen.dart';
 
 class AppRoutes {
   static const String initial = '/';
@@ -63,14 +77,39 @@ class AppRoutes {
   static const String feexpayError = '/feexpay-error';
   static const String categories = '/categories-screen';
   static const String wishlist = '/wishlist-screen';
+  static const String followedShops = '/followed-shops-screen';
   static const String deliveryRequest = '/delivery-request-screen';
   static const String supportHelp = '/support-help-screen';
+  // Detail d'un ticket de support. Argument : id du ticket (String) ou Map
+  // { 'ticketId': String, 'fromSupport': bool }.
+  static const String ticketDetail = '/ticket-detail-screen';
   static const String legalSecurity = '/legal-security-screen';
   static const String legalRefund = '/legal-refund-screen';
   static const String legalTerms = '/legal-terms-screen';
   static const String refundRequest = '/refund-request-screen';
   static const String conversationsInbox = '/conversations-inbox';
   static const String otpVerification = '/otp-verification-screen';
+  static const String resetPassword = '/reset-password-screen';
+  static const String vendorReapply = '/vendor-reapply-screen';
+  static const String agentReapply = '/agent-reapply-screen';
+  static const String vendorCompleteDocuments = '/vendor-complete-documents-screen';
+  static const String vendorWithdrawals = '/vendor-withdrawals-screen';
+  // « Mes coupons » : le vendeur crée, liste et désactive ses codes promo.
+  static const String sellerCoupons = '/seller-coupons-screen';
+  // Page G : produits d'une sous-catégorie, d'un rayon de la Vitrine ou
+  // d'une catégorie sans sous-catégorie. Arguments : Map (voir
+  // CategoryProductsScreen).
+  static const String categoryProducts = '/category-products-screen';
+  // Page H : annuaire de toutes les boutiques.
+  static const String shopsList = '/shops-list-screen';
+  static const String agentCompleteDocuments = '/agent-complete-documents-screen';
+  // Changement d'e-mail (client, vendeur, livreur). Argument : String (e-mail actuel).
+  // Résultat : String (nouvelle adresse) si le changement a réussi.
+  static const String changeEmail = '/change-email-screen';
+  // Première demande vendeur d'un compte déjà connecté. Résultat : true si envoyée.
+  static const String becomeVendor = '/become-vendor-screen';
+  // Liste complète des produits actifs (par pages).
+  static const String allProducts = '/all-products-screen';
 
   static Map<String, WidgetBuilder> routes = {
     initial: (context) => const AuthGate(),
@@ -84,19 +123,49 @@ class AppRoutes {
     checkout: (context) => const CheckoutScreen(),
     orderConfirmation: (context) => const OrderConfirmationScreen(),
     orderTracking: (context) => const OrderTrackingScreen(),
-    publierProduit: (context) => const PublierProduitScreen(),
+    publierProduit: (context) {
+      final args = ModalRoute.of(context)?.settings.arguments;
+      return PublierProduitScreen(
+        editProduct: args is Map<String, dynamic> ? args : null,
+      );
+    },
     buyerProfile: (context) => const BuyerProfileScreen(),
     sellerProfile: (context) => const SellerProfileScreen(),
     delivererProfile: (context) => const DelivererProfileScreen(),
+    vendorReapply: (context) => const VendorReapplyScreen(),
+    agentReapply: (context) => const AgentReapplyScreen(),
+    vendorCompleteDocuments: (context) => const VendorCompleteDocumentsScreen(),
+    vendorWithdrawals: (context) => const VendorWithdrawalsScreen(),
+    sellerCoupons: (context) => const SellerCouponsScreen(),
+    agentCompleteDocuments: (context) => const AgentCompleteDocumentsScreen(),
+    changeEmail: (context) {
+      final a = ModalRoute.of(context)?.settings.arguments;
+      return ChangeEmailScreen(currentEmail: a is String ? a : '');
+    },
+    becomeVendor: (context) => const BecomeVendorScreen(),
+    allProducts: (context) => const AllProductsScreen(),
     onboarding: (context) => const OnboardingScreen(),
     notifications: (context) => const NotificationsScreen(),
     importAssiste: (context) => const ImportAssisteScreen(),
     feexpaySuccess: (context) => const FeexpayResultScreen(success: true),
     feexpayError: (context) => const FeexpayResultScreen(success: false),
-    categories: (context) => const CategoriesScreen(),
+    // L'argument (nom/slug/id de catégorie) doit être lu ici : une route
+    // présente dans cette table ne passe jamais par onGenerateRoute.
+    categories: (context) {
+      final a = ModalRoute.of(context)?.settings.arguments;
+      return CategoriesScreen(initialCategory: a is String ? a : null);
+    },
     wishlist: (context) => const WishlistScreen(),
+    followedShops: (context) => const FollowedShopsScreen(),
     deliveryRequest: (context) => const DeliveryRequestScreen(),
     supportHelp: (context) => const SupportHelpScreen(),
+    ticketDetail: (context) {
+      final a = ModalRoute.of(context)?.settings.arguments;
+      return TicketDetailScreen(
+        ticketId: TicketDetailScreen.idFromArguments(a),
+        fromSupport: TicketDetailScreen.fromSupportArguments(a),
+      );
+    },
     legalSecurity: (context) =>
         const LegalPageScreen(pageType: LegalPageType.security),
     legalRefund: (context) =>
@@ -124,6 +193,11 @@ class AppRoutes {
       case chat:
         final args = settings.arguments as Map<String, dynamic>?;
         return _buildPageRoute(ChatScreen(chatArgs: args));
+      case categoryProducts:
+        final args = settings.arguments as Map<String, dynamic>?;
+        return _buildPageRoute(CategoryProductsScreen(args: args ?? const {}));
+      case shopsList:
+        return _buildPageRoute(const ShopsListScreen());
       case categories:
         final args = settings.arguments as String?;
         return _buildPageRoute(CategoriesScreen(initialCategory: args));
@@ -136,7 +210,7 @@ class AppRoutes {
             accountType: args?['accountType'] as String? ?? 'acheteur',
             shopName: args?['shopName'] as String?,
             shopAddress: args?['shopAddress'] as String?,
-            activityType: args?['activityType'] as String?,
+            categoryIds: (args?['categoryIds'] as List?)?.map((e) => e.toString()).toList(),
             shopDescription: args?['shopDescription'] as String?,
             ville: args?['ville'] as String?,
             quartier: args?['quartier'] as String?,
@@ -150,6 +224,9 @@ class AppRoutes {
             vehiclePhotoFile: args?['vehiclePhotoFile'] as XFile?,
           ),
         );
+      case resetPassword:
+        final email = settings.arguments as String? ?? '';
+        return _buildPageRoute(ResetPasswordScreen(email: email));
       default:
         return _buildPageRoute(const AuthGate());
     }

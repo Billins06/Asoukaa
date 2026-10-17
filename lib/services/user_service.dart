@@ -1,5 +1,7 @@
 import 'package:dio/dio.dart';
 import 'api_service.dart';
+import 'token_storage_service.dart';
+import '../utils/telephone.dart';
 
 // ── Modèles ───────────────────────────────────────────────────────────────────
 
@@ -146,7 +148,7 @@ class UserService {
       final body = <String, dynamic>{};
       if (prenom != null) body['prenom'] = prenom.trim();
       if (name != null) body['name'] = name.trim();
-      if (phone != null) body['phone'] = phone.trim();
+      if (phone != null) body['phone'] = normaliserTelephone(phone);
       if (avatarUrl != null) body['avatarUrl'] = avatarUrl;
 
       final response = await _client.put('/api/v1/users/me', data: body);
@@ -167,11 +169,29 @@ class UserService {
     required String confirmPassword,
   }) async {
     try {
-      await _client.patch('/api/v1/users/me/password', data: {
+      final response = await _client.patch('/api/v1/users/me/password', data: {
         'currentPassword': currentPassword,
         'newPassword': newPassword,
         'confirmPassword': confirmPassword,
       });
+      // Le serveur coupe toutes les sessions (y compris celle-ci) et renvoie
+      // un NOUVEAU couple de jetons : on les enregistre pour que l'utilisateur
+      // reste connecté. Ancien serveur (pas de jetons) : comportement inchangé.
+      final data = response.data;
+      if (data is Map) {
+        final acces = data['accessToken'];
+        final rafraichissement = data['refreshToken'];
+        if (acces is String &&
+            acces.isNotEmpty &&
+            rafraichissement is String &&
+            rafraichissement.isNotEmpty) {
+          await TokenStorageService.instance.saveTokens(
+            accessToken: acces,
+            refreshToken: rafraichissement,
+          );
+          ApiService.reinitialiserRafraichissement();
+        }
+      }
       return UserResult.success();
     } on DioException catch (e) {
       return UserResult.failure(_extractError(e));
@@ -209,7 +229,7 @@ class UserService {
       final response = await _client.post('/api/v1/users/me/addresses', data: {
         'label': label.trim(),
         'nom_destinataire': nomDestinataire.trim(),
-        'phone_destinataire': phoneDestinataire.trim(),
+        'phone_destinataire': normaliserTelephone(phoneDestinataire),
         'quartier': quartier.trim(),
         'ville': ville.trim(),
         if (country != null && country.isNotEmpty) 'country': country.trim(),
@@ -240,7 +260,7 @@ class UserService {
       final body = <String, dynamic>{};
       if (label != null) body['label'] = label.trim();
       if (nomDestinataire != null) body['nom_destinataire'] = nomDestinataire.trim();
-      if (phoneDestinataire != null) body['phone_destinataire'] = phoneDestinataire.trim();
+      if (phoneDestinataire != null) body['phone_destinataire'] = normaliserTelephone(phoneDestinataire);
       if (quartier != null) body['quartier'] = quartier.trim();
       if (ville != null) body['ville'] = ville.trim();
       if (country != null) body['country'] = country.trim();

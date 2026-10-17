@@ -1,15 +1,28 @@
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../../services/nest_auth_service.dart';
 import '../../services/user_service.dart';
 import '../../services/api_service.dart';
-import '../../services/delivery_zone_service.dart';
 import '../../theme/app_theme.dart';
 import '../../routes/app_routes.dart';
 import '../../widgets/app_toast.dart';
 import '../../widgets/custom_image_widget.dart';
+import '../../services/token_storage_service.dart';
+import '../../utils/lecture_json.dart';
+import '../../utils/paiement_annulation.dart';
+import '../../utils/telephone.dart';
+
+/// Dernière tentative de commande en cours de paiement (commandes déjà créées
+/// côté serveur, pas encore payées). Si le client reclique sur « Commander »
+/// pour le MÊME panier, on réutilise ces commandes au lieu d'en recréer.
+class _TentativeCommande {
+  final String signature;
+  final List<Map<String, dynamic>> commandes;
+  const _TentativeCommande(this.signature, this.commandes);
+}
 
 class CheckoutScreen extends StatefulWidget {
   const CheckoutScreen({super.key});
@@ -27,8 +40,24 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   final _cityController = TextEditingController(text: 'Cotonou');
   final _notesController = TextEditingController();
 
+  // Tentative de commande réutilisable (voir _TentativeCommande). Statique :
+  // elle survit à un retour au panier puis à un nouveau passage ici.
+  static _TentativeCommande? _tentativeEnCours;
+
+  // Vrai dès que l'issue du paiement en cours est connue (confirmé, ou en
+  // vérification) : évite d'afficher deux fois la confirmation / le message
+  // quand le polling et le bouton « Annuler l'attente » se croisent.
+  bool _paiementResolu = false;
+
+  // Code promo validé dans le panier : envoyé à la création de la commande
+  // (champ `couponCode` du serveur) pour que le total facturé soit celui
+  // affiché.
+  String? _couponCode;
+
   String _selectedCountry = 'Bénin';
   String _selectedOperator = 'MTN';
+  // 'livraison' (defaut) ou 'retrait' (le client vient chercher en boutique)
+  String _deliveryMode = 'livraison';
   bool _saveAddress = true;
   bool _isPlacingOrder = false;
   bool _isLoadingProfile = true;
@@ -41,13 +70,25 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   double _subtotal = 0;
   double _promoDiscount = 0;
   double _deliveryFee = 2500;
-  List<String> _communes = [];
-  bool _deliveryFeeInitialized = false;
   double _total = 0;
 
+  // Mode de réception, commune et transport (bus/taxi, communes du Nord où
+  // Asoukaa n'a pas de livreur propre — les deux prix sont différents,
+  // voir OrdersService.getFraisLivraisonForCommune côté backend) : choisis
+  // désormais dans le panier (voir DeliverySelectorWidget) et simplement
+  // reçus ici via les arguments de navigation. Cet écran n'en affiche plus
+  // qu'un récapitulatif en lecture seule (_buildDeliveryRecap).
+  bool _isNordZone = false;
+  String? _transportMode;
+
+  // Frais de livraison reellement appliques : nul en mode retrait
+  double get _currentDeliveryFee => _deliveryMode == 'retrait' ? 0 : _deliveryFee;
+
   // Created order ID (pending state before payment)
-  String? _pendingOrderId;
-  String? _pendingOrderNumber;
+  // Panier réparti sur plusieurs boutiques -> une commande par boutique
+  // (voir OrdersService.createFromCart), toutes réglées par UN SEUL
+  // paiement (voir PaymentsService.initiateGroupPayment).
+  List<Map<String, dynamic>> _pendingOrders = [];
 
   final List<String> _countries = [
     'Bénin',
@@ -64,25 +105,6 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   void initState() {
     super.initState();
     _loadUserProfile();
-    _loadCommunes();
-  }
-
-  Future<void> _loadCommunes() async {
-    final names = await DeliveryZoneService.instance.communeNames();
-    if (mounted) setState(() => _communes = names);
-  }
-
-  // Recalcule les frais de livraison réels pour la commune saisie
-  // (source : /api/v1/delivery-zones, paramétrée par l'admin). Le montant
-  // réellement facturé reste calculé côté serveur à la création de la
-  // commande — ceci ne sert qu'à afficher une estimation fiable avant paiement.
-  Future<void> _recomputeDeliveryFee() async {
-    final fee = await DeliveryZoneService.instance.feeForCommune(_cityController.text);
-    if (!mounted) return;
-    setState(() {
-      _deliveryFee = fee.toDouble();
-      _total = _subtotal + _deliveryFee - _promoDiscount;
-    });
   }
 
   @override
@@ -95,15 +117,20 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       if (cartItems is List) {
         _orderItems = List<Map<String, dynamic>>.from(cartItems);
       }
-      _subtotal = (args['subtotal'] as num? ?? 0).toDouble();
-      _promoDiscount = (args['promoDiscount'] as num? ?? 0).toDouble();
-      _deliveryFee = (args['deliveryFee'] as num? ?? 2500).toDouble();
-      _total = (args['total'] as num? ?? 0).toDouble();
-      if (_total == 0) _total = _subtotal + _deliveryFee - _promoDiscount;
-      if (!_deliveryFeeInitialized) {
-        _deliveryFeeInitialized = true;
-        _recomputeDeliveryFee();
-      }
+      _subtotal = lireDouble(args['subtotal']);
+      _promoDiscount = lireDouble(args['promoDiscount']);
+      _deliveryFee = lireDouble(args['deliveryFee'], 2500);
+      _total = lireDouble(args['total']);
+      final coupon = args['couponCode'];
+      _couponCode =
+          (coupon is String && coupon.trim().isNotEmpty) ? coupon.trim() : null;
+      if (_total == 0) _total = _subtotal + _currentDeliveryFee - _promoDiscount;
+      // Mode/commune/transport choisis dans le panier (voir
+      // DeliverySelectorWidget) — repris tels quels ici.
+      _deliveryMode = (args['deliveryMode'] as String?) ?? _deliveryMode;
+      _cityController.text = (args['city'] as String?) ?? _cityController.text;
+      _transportMode = args['transportMode'] as String?;
+      _isNordZone = (args['isNordZone'] as bool?) ?? false;
     }
   }
 
@@ -152,11 +179,61 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     return '$formatted FCFA';
   }
 
+  // ⚠️ Avant ce correctif : coordonnées de Cotonou codées en dur, peu importe
+  // où se trouvait réellement le client. On utilise maintenant la vraie
+  // position GPS de l'appareil (même mécanisme que le suivi livreur dans
+  // delivery_proof_screen.dart).
   Future<void> _shareLocation() async {
+    final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      if (!mounted) return;
+      AppToast.show(
+        context,
+        message: 'Le service de localisation est désactivé sur cet appareil.',
+        type: ToastType.error,
+      );
+      return;
+    }
+
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+    if (permission == LocationPermission.denied ||
+        permission == LocationPermission.deniedForever) {
+      if (!mounted) return;
+      AppToast.show(
+        context,
+        message: 'Permission de localisation refusée.',
+        type: ToastType.error,
+      );
+      return;
+    }
+
+    Position? position;
+    try {
+      position = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+      );
+    } catch (_) {
+      position = null;
+    }
+
+    if (!mounted) return;
+
+    if (position == null) {
+      AppToast.show(
+        context,
+        message: 'Impossible d\'obtenir votre position. Réessayez.',
+        type: ToastType.error,
+      );
+      return;
+    }
+
     setState(() {
       _locationShared = true;
-      _latitude = 6.3703;
-      _longitude = 2.3912;
+      _latitude = position!.latitude;
+      _longitude = position.longitude;
     });
     AppToast.show(
       context,
@@ -174,11 +251,13 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           'label': 'Domicile',
           'nom_destinataire':
               '${_firstNameController.text.trim()} ${_lastNameController.text.trim()}',
-          'phone_destinataire': _phoneController.text.trim(),
+          'phone_destinataire': normaliserTelephone(_phoneController.text),
           'quartier': _addressController.text.trim(),
           'ville': _cityController.text.trim(),
           'country': _selectedCountry,
           'isDefault': _saveAddress,
+          if (_latitude != null) 'latitude': _latitude,
+          if (_longitude != null) 'longitude': _longitude,
         },
       );
       final data = resp.data;
@@ -207,6 +286,15 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       return;
     }
 
+    if (_deliveryMode != 'retrait' && _isNordZone && _transportMode == null) {
+      AppToast.show(
+        context,
+        message: 'Choisissez bus ou taxi pour cette commune',
+        type: ToastType.error,
+      );
+      return;
+    }
+
     setState(() => _isPlacingOrder = true);
 
     try {
@@ -225,44 +313,64 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         return;
       }
 
-      // Étape 1 : créer l'adresse de livraison et récupérer son UUID
-      final addressId = await _createDeliveryAddress();
-      if (addressId == null) {
-        if (mounted) {
-          AppToast.show(
-            context,
-            message: 'Impossible de créer l\'adresse de livraison.',
-            type: ToastType.error,
-          );
-          setState(() => _isPlacingOrder = false);
+      // Même panier, mêmes coordonnées qu'une tentative précédente non
+      // payée : on réutilise ses commandes (pas de doublons).
+      final signature = await _signatureTentative();
+      final tentative = _tentativeEnCours;
+      final reutiliser = tentative != null &&
+          tentative.signature == signature &&
+          tentative.commandes.isNotEmpty;
+
+      if (reutiliser) {
+        _pendingOrders = List<Map<String, dynamic>>.from(tentative!.commandes);
+      } else {
+        // Étape 1 : créer l'adresse de livraison et récupérer son UUID
+        final addressId = await _createDeliveryAddress();
+        if (addressId == null) {
+          if (mounted) {
+            AppToast.show(
+              context,
+              message: 'Impossible de créer l\'adresse de livraison.',
+              type: ToastType.error,
+            );
+            setState(() => _isPlacingOrder = false);
+          }
+          return;
         }
-        return;
-      }
 
-      // Étape 2 : créer la commande depuis le panier
-      // Le backend lit le panier automatiquement — on envoie uniquement addressId.
-      final instructions = _notesController.text.trim();
-      final orderResult = await _createOrder(
-        addressId: addressId,
-        instructions: instructions.isNotEmpty ? instructions : null,
-      );
-      _pendingOrderId = orderResult?['id'] as String?;
-      _pendingOrderNumber = orderResult?['orderNumber'] as String?;
-
-      // Mettre à jour le téléphone si demandé
-      if (_saveAddress) {
-        try {
-          await UserService.instance.updateProfile(
-            phone: _phoneController.text.trim(),
+        // Étape 2 : créer la/les commande(s) depuis le panier
+        // Le backend lit le panier automatiquement — on envoie uniquement
+        // addressId. S'il contient des articles de plusieurs boutiques, le
+        // backend crée automatiquement une commande par boutique.
+        final instructions = _notesController.text.trim();
+        _pendingOrders = await _createOrders(
+          addressId: addressId,
+          instructions: instructions.isNotEmpty ? instructions : null,
+          deliveryMode: _deliveryMode,
+          transportMode: _isNordZone ? _transportMode : null,
+        );
+        if (_pendingOrders.isNotEmpty) {
+          _tentativeEnCours = _TentativeCommande(
+            signature,
+            List<Map<String, dynamic>>.from(_pendingOrders),
           );
-        } catch (_) {}
+        }
+
+        // Mettre à jour le téléphone si demandé
+        if (_saveAddress) {
+          try {
+            await UserService.instance.updateProfile(
+              phone: normaliserTelephone(_phoneController.text),
+            );
+          } catch (_) {}
+        }
       }
 
       setState(() => _isPlacingOrder = false);
 
       if (!mounted) return;
 
-      if (_pendingOrderId == null) {
+      if (_pendingOrders.isEmpty) {
         AppToast.show(
           context,
           message: 'Impossible de créer la commande. Réessayez.',
@@ -279,13 +387,45 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       // GET /payments/{id}/status jusqu'à confirmation, échec ou délai
       // dépassé, puis on redirige vers l'écran de confirmation.
       try {
+        final orderIds = _pendingOrders
+            .map((o) => o['id'] as String?)
+            .whereType<String>()
+            .toList();
+
+        // Un paiement de cette commande vient d'être mis « en cours de
+        // vérification » : on ne relance pas un second paiement tout de suite.
+        if (PaiementsEnVerification.estEnVerification(orderIds)) {
+          await _afficherVerificationEnCours(messagePaiementEnVerification);
+          return;
+        }
+
+        // Le total facturé est celui calculé par le SERVEUR (somme des
+        // commandes créées). S'il diffère de celui affiché dans l'appli
+        // (ex. code promo refusé ou prix changé), on le dit au client et on
+        // lui demande de confirmer avant de lancer le paiement.
+        final totalServeur = _pendingOrders.fold<double>(
+          0,
+          (s, o) => s + lireDouble(o['total']),
+        );
+        if (totalServeur > 0 && (totalServeur - _total).abs() >= 1) {
+          if (mounted) setState(() => _total = totalServeur);
+          final accepte = await _confirmerTotalServeur(totalServeur);
+          if (!accepte) return;
+        }
         final payResp = await ApiService.instance.client.post(
           '/api/v1/payments/initiate',
           data: {
-            'orderId': _pendingOrderId,
+            // Une seule boutique -> orderId comme avant. Plusieurs
+            // boutiques -> orderIds : le backend crée une ligne de
+            // paiement par commande mais ne demande qu'UN SEUL montant
+            // au client (voir initiateGroupPayment côté serveur).
+            if (orderIds.length <= 1)
+              'orderId': orderIds.isNotEmpty ? orderIds.first : null
+            else
+              'orderIds': orderIds,
             'method': 'mobile_money',
             'operator': _selectedOperator,
-            'phoneNumber': _phoneController.text.trim(),
+            'phoneNumber': normaliserTelephone(_phoneController.text),
           },
         );
         final payData = payResp.data;
@@ -299,8 +439,17 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         );
 
         if (paymentId != null) {
+          final orderNumbers = _pendingOrders
+              .map((o) => o['orderNumber']?.toString() ?? '')
+              .where((n) => n.isNotEmpty)
+              .toList();
           final confirmationArgs = <String, dynamic>{
-            'orderNumber': _pendingOrderNumber ?? '',
+            'orderNumber': orderNumbers.join(', '),
+            // Utilisée par l'écran de confirmation pour permettre ensuite un
+            // vrai suivi (voir order_confirmation_screen.dart). En cas de
+            // commande groupée multi-boutiques, on ne peut suivre qu'une
+            // commande à la fois : on prend la première.
+            'orderId': orderIds.isNotEmpty ? orderIds.first : null,
             'firstName': _firstNameController.text.trim(),
             'lastName': _lastNameController.text.trim(),
             'address': _addressController.text.trim(),
@@ -308,31 +457,274 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             'country': _selectedCountry,
             'phone': _phoneController.text.trim(),
             'paymentMethod': '$_selectedOperator (Mobile Money)',
-            'total': _total.round(),
+            // Montant réellement facturé (calculé par le serveur).
+            'total': (totalServeur > 0 ? totalServeur : _total).round(),
           };
-          _pollPaymentStatus(paymentId, confirmationArgs);
+          _pollPaymentStatus(
+            paymentId,
+            confirmationArgs,
+            orderIds: orderIds,
+          );
         }
       } on DioException catch (e) {
         final errData = e.response?.data;
         final backendMessage = errData is Map ? errData['message'] : null;
+        final texte = backendMessage is String
+            ? backendMessage
+            : (backendMessage is List && backendMessage.isNotEmpty
+                ? backendMessage.first.toString()
+                : '');
+        // Commande réutilisée mais devenue inutilisable (annulée, introuvable)
+        // ou déjà payée : on oublie la tentative pour repartir proprement.
+        if (e.response?.statusCode == 404 ||
+            texte.contains('ne peut plus être payée') ||
+            texte.contains('déjà payée')) {
+          _tentativeEnCours = null;
+        }
+        if (texte.contains('déjà payée')) {
+          // Le paiement est en fait passé : le panier doit être vidé.
+          await _viderPanierServeur();
+        }
         if (!mounted) return;
+        setState(() => _isPlacingOrder = false);
+        if (estMessageVerificationEnCours(texte)) {
+          // Le serveur refuse un second paiement : le premier est encore en
+          // cours de vérification. Message du serveur affiché tel quel (dans
+          // une boîte, pour qu'il ne soit pas tronqué), puis « Mes commandes ».
+          await _afficherVerificationEnCours(texte);
+          return;
+        }
         AppToast.show(
           context,
-          message: backendMessage is String
-              ? backendMessage
-              : (backendMessage is List && backendMessage.isNotEmpty
-                  ? backendMessage.first.toString()
-                  : 'Le paiement a échoué. Réessayez.'),
+          message: texte.isNotEmpty ? texte : 'Le paiement a échoué. Réessayez.',
           type: ToastType.error,
         );
       }
     } catch (e) {
-      AppToast.show(
-        context,
-        message: 'Une erreur est survenue. Réessayez.',
-        type: ToastType.error,
-      );
-      setState(() => _isPlacingOrder = false);
+      // Erreur serveur lisible (ex. code promo refusé, article épuisé).
+      String message = 'Une erreur est survenue. Réessayez.';
+      if (e is DioException) {
+        final d = e.response?.data;
+        final m = d is Map ? d['message'] : null;
+        if (m is String && m.isNotEmpty) {
+          message = m;
+        } else if (m is List && m.isNotEmpty) {
+          message = m.first.toString();
+        }
+      }
+      if (mounted) {
+        AppToast.show(context, message: message, type: ToastType.error);
+        setState(() => _isPlacingOrder = false);
+      }
+    }
+  }
+
+  /// Empreinte du panier + des coordonnées saisies : deux tentatives avec la
+  /// même empreinte concernent la même commande.
+  Future<String> _signatureTentative() async {
+    String userId = '';
+    try {
+      userId = (await TokenStorageService.instance.getUserId()) ?? '';
+    } catch (_) {}
+    final articles = _orderItems
+        .map((i) => '${i['variantId'] ?? i['id'] ?? ''}x${i['quantity'] ?? 1}')
+        .toList()
+      ..sort();
+    return [
+      userId,
+      articles.join(','),
+      _couponCode ?? '',
+      _deliveryMode,
+      _isNordZone ? (_transportMode ?? '') : '',
+      _firstNameController.text.trim(),
+      _lastNameController.text.trim(),
+      normaliserTelephone(_phoneController.text),
+      _addressController.text.trim(),
+      _cityController.text.trim(),
+      _selectedCountry,
+      _notesController.text.trim(),
+      '${_latitude ?? ''}',
+      '${_longitude ?? ''}',
+    ].join('|');
+  }
+
+  /// Vide le panier côté serveur (paiement confirmé). Sans effet si ça échoue :
+  /// le serveur reste la référence.
+  Future<void> _viderPanierServeur() async {
+    try {
+      await ApiService.instance.client
+          .delete('/api/v1/cart')
+          .timeout(const Duration(seconds: 8));
+    } catch (_) {}
+  }
+
+  Future<bool> _confirmerTotalServeur(double totalServeur) async {
+    if (!mounted) return false;
+    final ok = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Total mis à jour'),
+        content: Text(
+          'Le total de votre commande est de ${_formatPrice(totalServeur)}. '
+          'Voulez-vous continuer vers le paiement ?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Annuler'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Continuer'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true && mounted) setState(() => _isPlacingOrder = false);
+    return ok == true;
+  }
+
+  /// Paiement confirmé (par le polling OU par la réponse du cancel) : on vide
+  /// le panier, on oublie la tentative et on affiche la confirmation de
+  /// commande. Ne s'exécute qu'une seule fois par paiement (_paiementResolu).
+  Future<void> _finaliserPaiementReussi(
+    Map<String, dynamic> confirmationArgs,
+    List<String> orderIds,
+    String? orderNumberServeur,
+  ) async {
+    if (_paiementResolu) return;
+    _paiementResolu = true;
+    PaiementsEnVerification.oublier(orderIds);
+    // Paiement confirmé : seulement maintenant on vide le panier et on
+    // oublie la tentative (plus de double paiement possible).
+    _tentativeEnCours = null;
+    await _viderPanierServeur();
+    if (!mounted) return;
+    Navigator.of(context).pushReplacementNamed(
+      AppRoutes.orderConfirmation,
+      arguments: {
+        ...confirmationArgs,
+        'orderNumber': orderNumberServeur ?? confirmationArgs['orderNumber'],
+      },
+    );
+  }
+
+  /// Paiement non confirmé mais NON annulé (FeexPay n'a pas encore répondu) :
+  /// on prévient clairement le client, SANS parler d'échec et SANS proposer
+  /// de repayer, puis on le ramène vers « Mes commandes ». Le panier n'est
+  /// pas vidé et la tentative de commande est conservée : un nouveau clic sur
+  /// « Commander » réutilisera la même commande (le serveur refusera alors un
+  /// second paiement tant que la vérification est en cours).
+  Future<void> _afficherVerificationEnCours(String message) async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return PopScope(
+          canPop: false,
+          child: AlertDialog(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+            ),
+            title: Text(
+              'Vérification en cours',
+              style: GoogleFonts.outfit(
+                fontSize: 17,
+                fontWeight: FontWeight.w700,
+                color: AppTheme.textPrimary,
+              ),
+            ),
+            content: Text(
+              message,
+              style: GoogleFonts.outfit(
+                fontSize: 14,
+                color: AppTheme.textSecondary,
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: Text(
+                  'Voir mes commandes',
+                  style: GoogleFonts.outfit(
+                    fontWeight: FontWeight.w600,
+                    color: AppTheme.primary,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    if (!mounted) return;
+    Navigator.of(context).pushNamedAndRemoveUntil(
+      AppRoutes.buyerDashboard,
+      (route) => false,
+    );
+  }
+
+  /// Abandon de l'attente : appelle PATCH /payments/{id}/cancel puis applique
+  /// la réponse du serveur :
+  ///  - 'success'  -> le paiement était en fait confirmé : même chemin que le
+  ///    succès du polling ;
+  ///  - 'en attente' + verificationEnCours -> non confirmé mais non annulé :
+  ///    message de vérification, pas de nouveau paiement immédiat ;
+  ///  - 'échoué', réponse sans `status` (ancien serveur) ou appel impossible
+  ///    (réseau coupé) -> comportement d'avant : rien (bouton) ou message
+  ///    « Confirmation non reçue » (délai dépassé).
+  Future<void> _annulerPaiement(
+    String paymentId,
+    Map<String, dynamic> confirmationArgs,
+    List<String> orderIds, {
+    required bool apresDelai,
+  }) async {
+    ReponseAnnulationPaiement? reponseBrute;
+    try {
+      final resp = await ApiService.instance.client
+          .patch('/api/v1/payments/$paymentId/cancel');
+      reponseBrute = lireReponseAnnulation(resp.data);
+    } catch (_) {
+      // best-effort : si ça échoue (réseau coupé...), on ne sait pas ce qu'a
+      // fait le serveur ; on garde le comportement d'avant.
+      reponseBrute = null;
+    }
+    final reponse = reponseBrute;
+
+    if (reponse != null && reponse.issue == IssueAnnulation.reussi) {
+      await _finaliserPaiementReussi(confirmationArgs, orderIds, null);
+      return;
+    }
+
+    if (reponse != null &&
+        reponse.issue == IssueAnnulation.verificationEnCours) {
+      if (_paiementResolu) return;
+      _paiementResolu = true;
+      PaiementsEnVerification.marquer(orderIds);
+      await _afficherVerificationEnCours(reponse.messageVerification);
+      return;
+    }
+
+    // Échec confirmé / ancien serveur / appel impossible.
+    if (reponse != null) PaiementsEnVerification.oublier(orderIds);
+    if (apresDelai && mounted) {
+      if (reponse != null && reponse.echecConfirme) {
+        // Le serveur a confirmé l'échec : on montre son message.
+        AppToast.show(
+          context,
+          message: reponse.messageEchec,
+          type: ToastType.error,
+        );
+      } else {
+        AppToast.show(
+          context,
+          message:
+              'Confirmation non reçue. Vérifiez le statut dans "Mes commandes".',
+          type: ToastType.info,
+        );
+      }
     }
   }
 
@@ -341,11 +733,15 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   /// client de valider le paiement mobile money sur son téléphone.
   Future<void> _pollPaymentStatus(
     String paymentId,
-    Map<String, dynamic> confirmationArgs,
-  ) async {
+    Map<String, dynamic> confirmationArgs, {
+    List<String> orderIds = const <String>[],
+  }) async {
     const maxAttempts = 40; // ~2 minutes à 3s d'intervalle
     const pollInterval = Duration(seconds: 3);
     var dialogOpen = true;
+    _paiementResolu = false;
+    // Passe à true après ~90 s : le texte de la boîte d'attente change.
+    final attenteLongue = ValueNotifier<bool>(false);
 
     if (!mounted) return;
 
@@ -374,20 +770,38 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                   ),
                 ),
                 const SizedBox(height: 8),
-                Text(
-                  'Validez la demande de paiement mobile money reçue sur '
-                  'votre téléphone. Ne fermez pas l\'application.',
-                  textAlign: TextAlign.center,
-                  style: GoogleFonts.outfit(
-                    fontSize: 13,
-                    color: AppTheme.textSecondary,
-                  ),
+                ValueListenableBuilder<bool>(
+                  valueListenable: attenteLongue,
+                  builder: (builderContext, longue, _) {
+                    return Text(
+                      longue
+                          ? 'Toujours en attente de votre validation sur le '
+                              'téléphone… Ne fermez pas l\'application et ne '
+                              'payez pas une seconde fois.'
+                          : 'Validez la demande de paiement mobile money reçue '
+                              'sur votre téléphone. Ne fermez pas '
+                              'l\'application.',
+                      textAlign: TextAlign.center,
+                      style: GoogleFonts.outfit(
+                        fontSize: 13,
+                        color: AppTheme.textSecondary,
+                      ),
+                    );
+                  },
                 ),
               ],
             ),
             actions: [
               TextButton(
-                onPressed: () => Navigator.of(dialogContext).pop(),
+                onPressed: () async {
+                  Navigator.of(dialogContext).pop();
+                  await _annulerPaiement(
+                    paymentId,
+                    confirmationArgs,
+                    orderIds,
+                    apresDelai: false,
+                  );
+                },
                 child: Text(
                   'Annuler l\'attente',
                   style: GoogleFonts.outfit(color: AppTheme.textSecondary),
@@ -410,6 +824,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       await Future.delayed(pollInterval);
       if (!dialogOpen || !mounted) return;
 
+      // ~90 s écoulées (30 interrogations x 3 s) : message plus rassurant.
+      if (attempt == 29) attenteLongue.value = true;
+
       try {
         final statusResp = await ApiService.instance.client.get(
           '/api/v1/payments/$paymentId/status',
@@ -419,21 +836,20 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             statusData is Map ? statusData['status']?.toString() : null;
 
         if (status == 'success') {
-          final orderNumber = (statusData is Map
-                  ? statusData['orderNumber'] as String?
-                  : null) ??
-              confirmationArgs['orderNumber'];
+          final numeroBrut =
+              statusData is Map ? statusData['orderNumber'] : null;
           closeDialog();
-          if (!mounted) return;
-          Navigator.of(context).pushReplacementNamed(
-            AppRoutes.orderConfirmation,
-            arguments: {...confirmationArgs, 'orderNumber': orderNumber},
+          await _finaliserPaiementReussi(
+            confirmationArgs,
+            orderIds,
+            numeroBrut is String ? numeroBrut : null,
           );
           return;
         }
 
         if (status == 'échoué') {
           closeDialog();
+          PaiementsEnVerification.oublier(orderIds);
           if (!mounted) return;
           AppToast.show(
             context,
@@ -450,17 +866,17 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       }
     }
 
-    // Délai dépassé sans confirmation ni échec explicite.
+    // Délai dépassé sans confirmation ni échec explicite : on demande au
+    // serveur d'annuler, mais il peut répondre « déjà confirmé » ou
+    // « en cours de vérification » (voir _annulerPaiement).
     if (dialogOpen) {
       closeDialog();
-      if (mounted) {
-        AppToast.show(
-          context,
-          message:
-              'Confirmation non reçue. Vérifiez le statut dans "Mes commandes".',
-          type: ToastType.info,
-        );
-      }
+      await _annulerPaiement(
+        paymentId,
+        confirmationArgs,
+        orderIds,
+        apresDelai: true,
+      );
     }
   }
 
@@ -505,8 +921,23 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     _buildSectionHeader(
+                      Icons.local_shipping_outlined,
+                      'Mode de réception',
+                    ),
+                    const SizedBox(height: 12),
+                    _buildDeliveryRecap(),
+                    if (_deliveryMode != 'retrait' &&
+                        _isNordZone &&
+                        _transportMode != null) ...[
+                      const SizedBox(height: 10),
+                      _buildBusTaxiCheckoutWarning(),
+                    ],
+                    const SizedBox(height: 24),
+                    _buildSectionHeader(
                       Icons.location_on_rounded,
-                      'Adresse de livraison',
+                      _deliveryMode == 'retrait'
+                          ? 'Coordonnées de contact'
+                          : 'Adresse de livraison',
                     ),
                     const SizedBox(height: 12),
                     _buildShippingForm(),
@@ -620,6 +1051,116 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     );
   }
 
+  Widget _buildDeliveryRecap() {
+    final subtitle = _deliveryMode == 'retrait'
+        ? 'Retrait en boutique'
+        : (_cityController.text.trim().isEmpty
+            ? 'Livraison'
+            : 'Livraison à ${_cityController.text.trim()}');
+    final feeLabel = _currentDeliveryFee == 0
+        ? 'Gratuit'
+        : '${_currentDeliveryFee.toInt()} FCFA';
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: AppTheme.surfaceVariant,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppTheme.outline),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            _deliveryMode == 'retrait'
+                ? Icons.storefront_outlined
+                : Icons.local_shipping_outlined,
+            size: 20,
+            color: AppTheme.primary,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  subtitle,
+                  style: GoogleFonts.outfit(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: AppTheme.textPrimary,
+                  ),
+                ),
+                if (_deliveryMode != 'retrait' &&
+                    _isNordZone &&
+                    _transportMode != null)
+                  Text(
+                    _transportMode == 'taxi' ? 'Par taxi' : 'Par bus',
+                    style: GoogleFonts.outfit(
+                      fontSize: 12,
+                      color: AppTheme.textSecondary,
+                    ),
+                  ),
+                Text(
+                  feeLabel,
+                  style: GoogleFonts.outfit(
+                    fontSize: 12,
+                    color: AppTheme.textSecondary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text(
+              'Modifier',
+              style: GoogleFonts.outfit(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: AppTheme.primary,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Rappel de la règle des 3 jours (zone Nord, sans livreur Asoukaa),
+  // affiché juste avant le paiement pour que le client la voie une
+  // dernière fois avant de valider sa commande (le premier avertissement,
+  // au moment du choix bus/taxi, est dans DeliverySelectorWidget côté
+  // panier).
+  Widget _buildBusTaxiCheckoutWarning() {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppTheme.warning.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppTheme.warning.withOpacity(0.3)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.info_outline, size: 18, color: AppTheme.warning),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Livraison par bus/taxi : vous aurez 24 heures après l\'expédition '
+              'pour confirmer la réception de votre colis ou signaler un '
+              'problème. Sans réponse de votre part, la réception sera '
+              'automatiquement confirmée et le vendeur sera payé.',
+              style: GoogleFonts.outfit(
+                fontSize: 11.5,
+                color: AppTheme.textPrimary,
+                height: 1.35,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildShippingForm() {
     return Container(
       decoration: BoxDecoration(
@@ -652,13 +1193,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             ],
           ),
           const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(child: _buildCountryDropdown()),
-              const SizedBox(width: 10),
-              Expanded(child: _buildCityAutocomplete()),
-            ],
-          ),
+          _buildCountryDropdown(),
           const SizedBox(height: 12),
           _buildTextField(
             controller: _addressController,
@@ -806,63 +1341,6 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           ),
         ],
       ),
-    );
-  }
-
-  Widget _buildCityAutocomplete() {
-    return Autocomplete<String>(
-      optionsBuilder: (TextEditingValue value) {
-        if (value.text.isEmpty) return _communes;
-        final q = value.text.toLowerCase();
-        return _communes.where((cm) => cm.toLowerCase().contains(q));
-      },
-      initialValue: TextEditingValue(text: _cityController.text),
-      onSelected: (String selection) {
-        _cityController.text = selection;
-        _recomputeDeliveryFee();
-      },
-      fieldViewBuilder: (context, controller, focusNode, onFieldSubmitted) {
-        return TextFormField(
-          controller: controller,
-          focusNode: focusNode,
-          onChanged: (v) {
-            _cityController.text = v;
-            _recomputeDeliveryFee();
-          },
-          validator: (v) => (v == null || v.isEmpty) ? 'Requis' : null,
-          style: GoogleFonts.outfit(fontSize: 14, color: AppTheme.textPrimary),
-          decoration: InputDecoration(
-            labelText: 'Ville',
-            prefixIcon: const Icon(
-              Icons.location_city_outlined,
-              size: 18,
-              color: AppTheme.muted,
-            ),
-            filled: true,
-            fillColor: AppTheme.surfaceVariant,
-            contentPadding: const EdgeInsets.symmetric(
-              horizontal: 12,
-              vertical: 14,
-            ),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
-              borderSide: const BorderSide(color: AppTheme.outline),
-            ),
-            enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
-              borderSide: const BorderSide(color: AppTheme.outline),
-            ),
-            focusedBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
-              borderSide: const BorderSide(color: AppTheme.primary, width: 2),
-            ),
-            errorBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
-              borderSide: const BorderSide(color: AppTheme.error),
-            ),
-          ),
-        );
-      },
     );
   }
 
@@ -1209,7 +1687,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                   ),
                 ],
                 const SizedBox(height: 8),
-                _buildPriceLine('Livraison', _deliveryFee),
+                _buildPriceLine(
+                  _deliveryMode == 'retrait' ? 'Retrait en boutique' : 'Livraison',
+                  _currentDeliveryFee,
+                  color: _deliveryMode == 'retrait' ? AppTheme.success : null,
+                ),
                 const Padding(
                   padding: EdgeInsets.symmetric(vertical: 10),
                   child: Divider(color: AppTheme.outlineVariant),
@@ -1255,7 +1737,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    'Livraison estimée : 2–4 jours ouvrables',
+                    _deliveryMode == 'retrait'
+                        ? 'Retrait en boutique : disponible sous 24–48h, tu seras prévenu(e)'
+                        : 'Livraison estimée : 2–4 jours ouvrables',
                     style: GoogleFonts.outfit(
                       fontSize: 12,
                       fontWeight: FontWeight.w500,
@@ -1394,13 +1878,29 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     );
   }
 
-  Future<Map<String, dynamic>?> _createOrder({
+  /// Le panier peut être réparti sur plusieurs boutiques : le backend
+  /// crée alors une commande par boutique (voir OrdersService.createFromCart)
+  /// et renvoie la liste complète — on ne garde plus seulement la première.
+  Future<List<Map<String, dynamic>>> _createOrders({
     required String addressId,
     String? instructions,
+    String? deliveryMode,
+    String? transportMode,
   }) async {
     final data = <String, dynamic>{'addressId': addressId};
+    // Code promo validé dans le panier (nom du champ : `couponCode`, voir
+    // CreateOrderDto côté serveur).
+    if (_couponCode != null && _couponCode!.isNotEmpty) {
+      data['couponCode'] = _couponCode;
+    }
     if (instructions != null && instructions.isNotEmpty) {
       data['instructions'] = instructions;
+    }
+    if (deliveryMode != null && deliveryMode.isNotEmpty) {
+      data['deliveryMode'] = deliveryMode;
+    }
+    if (transportMode != null && transportMode.isNotEmpty) {
+      data['transportMode'] = transportMode;
     }
     final response = await ApiService.instance.client.post(
       '/api/v1/orders',
@@ -1409,10 +1909,12 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     final resData = response.data;
     if (resData is Map) {
       final orders = resData['orders'];
-      if (orders is List && orders.isNotEmpty) {
-        return orders.first as Map<String, dynamic>?;
+      if (orders is List) {
+        return orders.whereType<Map>().map(
+          (o) => Map<String, dynamic>.from(o),
+        ).toList();
       }
     }
-    return null;
+    return [];
   }
 }

@@ -6,6 +6,7 @@ import '../../theme/app_theme.dart';
 import '../../routes/app_routes.dart';
 import '../../services/api_service.dart';
 import '../../services/nest_auth_service.dart';
+import '../../services/unread_messages_notifier.dart';
 import '../../widgets/empty_state_widget.dart';
 
 class ConversationsInboxScreen extends StatefulWidget {
@@ -61,8 +62,20 @@ class _ConversationsInboxScreenState extends State<ConversationsInboxScreen> {
             .map((e) => Map<String, dynamic>.from(e))
             .toList();
         int unread = 0;
+        int unreadConversations = 0;
         for (final c in convs) {
-          unread += (c['unreadCount'] as int?) ?? 0;
+          final n = (c['unreadCount'] as int?) ?? 0;
+          unread += n;
+          if (n > 0) unreadConversations++;
+        }
+        // Met la pastille de l'onglet "Messages" à jour tout de suite, sans
+        // attendre le prochain rafraîchissement (même définition : nombre de
+        // discussions avec au moins un message non lu). La liste étant
+        // paginée, on ne l'applique que si elle est complète.
+        if (raw is! Map || raw['pages'] is! num || (raw['pages'] as num) <= 1) {
+          UnreadMessagesNotifier.instance.count.value = unreadConversations;
+        } else {
+          UnreadMessagesNotifier.instance.refresh();
         }
         setState(() {
           _conversations = convs;
@@ -191,6 +204,10 @@ class _ConversationsInboxScreenState extends State<ConversationsInboxScreen> {
                       ? lastMessage['createdAt'] as String?
                       : conv['updatedAt'] as String?;
                   final product = conv['product'] as Map<String, dynamic>?;
+                  // Présence de l'interlocuteur fournie par le serveur.
+                  final otherPresence = conv['otherUser'];
+                  final otherIsOnline =
+                      otherPresence is Map && otherPresence['isOnline'] == true;
 
                   return ListTile(
                     contentPadding: const EdgeInsets.symmetric(
@@ -239,6 +256,23 @@ class _ConversationsInboxScreenState extends State<ConversationsInboxScreen> {
                                   ),
                                 ),
                         ),
+                        if (otherIsOnline)
+                          Positioned(
+                            right: 0,
+                            bottom: 0,
+                            child: Container(
+                              width: 13,
+                              height: 13,
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF16A34A),
+                                shape: BoxShape.circle,
+                                border: Border.all(
+                                  color: Colors.white,
+                                  width: 2,
+                                ),
+                              ),
+                            ),
+                          ),
                         if (unread > 0)
                           Positioned(
                             right: 0,

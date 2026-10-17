@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import '../../theme/app_theme.dart';
 import '../../services/nest_auth_service.dart';
 import '../../services/api_service.dart';
+import '../../services/notification_service.dart';
 import '../../widgets/empty_state_widget.dart';
 import '../../routes/app_routes.dart';
 
@@ -63,7 +64,12 @@ class _NotificationsScreenState extends State<NotificationsScreen>
         setState(() {
           _notifications = rawList
               .whereType<Map>()
-              .map((e) => Map<String, dynamic>.from(e))
+              .map((e) {
+                final m = Map<String, dynamic>.from(e);
+                // Le serveur envoie `type` ; repli sur l'ancien nom.
+                m['type'] ??= m['notificationType'];
+                return m;
+              })
               .toList();
           _isLoading = false;
         });
@@ -92,7 +98,7 @@ class _NotificationsScreenState extends State<NotificationsScreen>
       case 3:
         // Messages tab
         return _notifications
-            .where((n) => n['type'] == 'chat')
+            .where((n) => n['type'] == 'chat' || n['type'] == 'ticket')
             .toList();
       default:
         return _notifications;
@@ -148,6 +154,23 @@ class _NotificationsScreenState extends State<NotificationsScreen>
         AppRoutes.chat,
         arguments: {'conversation_id': referenceId},
       );
+    } else if (referenceType == 'support_ticket' &&
+        referenceId != null &&
+        referenceId.isNotEmpty) {
+      Navigator.pushNamed(
+        context,
+        AppRoutes.ticketDetail,
+        arguments: referenceId,
+      );
+    } else if ((referenceType == 'order' ||
+            referenceType == 'delivery' ||
+            referenceType == 'independent_delivery') &&
+        referenceId != null &&
+        referenceId.isNotEmpty) {
+      // Commande -> suivi de la commande (client) ou tableau de bord du
+      // vendeur / livreur ; livraison -> tableau de bord livreur.
+      NotificationService.instance
+          .ouvrirDepuisReference(referenceType, referenceId);
     }
   }
 
@@ -161,6 +184,8 @@ class _NotificationsScreenState extends State<NotificationsScreen>
         return Icons.chat_bubble_outline_rounded;
       case 'promo':
         return Icons.local_offer_outlined;
+      case 'ticket':
+        return Icons.support_agent_rounded;
       default:
         return Icons.notifications_outlined;
     }
@@ -176,6 +201,8 @@ class _NotificationsScreenState extends State<NotificationsScreen>
         return AppTheme.primary;
       case 'promo':
         return const Color(0xFFDC2626);
+      case 'ticket':
+        return const Color(0xFF7C3AED);
       default:
         return const Color(0xFF9E9E9E);
     }

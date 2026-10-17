@@ -2,13 +2,19 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 class ProductPriceTiersWidget extends StatefulWidget {
+  // Lignes {qty: int (quantité minimale), label: String, price: int (prix
+  // unitaire FCFA)}, triées par qty croissante — construites par
+  // ProductDetailScreen._normalizeNestProduct à partir de `tierPrices`.
   final List<Map<String, dynamic>> priceTiers;
+  // Prix normal (sans palier) : référence du % d'économie affiché
+  final int? basePrice;
   final int currentQty;
   final ValueChanged<int> onQtyChanged;
 
   const ProductPriceTiersWidget({
     super.key,
     required this.priceTiers,
+    this.basePrice,
     required this.currentQty,
     required this.onQtyChanged,
   });
@@ -19,7 +25,20 @@ class ProductPriceTiersWidget extends StatefulWidget {
 }
 
 class _ProductPriceTiersWidgetState extends State<ProductPriceTiersWidget> {
-  int _selectedTierIndex = 0;
+  // Ligne en surbrillance = palier réellement applicable à la quantité
+  // choisie (dernière ligne dont qty <= quantité), et non plus un index
+  // mémorisé au tap : ainsi les boutons +/- font aussi changer de palier.
+  int get _activeTierIndex {
+    var active = -1;
+    for (var i = 0; i < widget.priceTiers.length; i++) {
+      final minQty = (widget.priceTiers[i]['qty'] as num?)?.toInt() ?? 1;
+      if (minQty <= widget.currentQty) active = i;
+    }
+    return active;
+  }
+
+  int _tierPrice(int index) =>
+      (widget.priceTiers[index]['price'] as num?)?.toInt() ?? 0;
 
   String _formatPrice(int price) {
     final s = price.toString();
@@ -34,6 +53,7 @@ class _ProductPriceTiersWidgetState extends State<ProductPriceTiersWidget> {
   @override
   Widget build(BuildContext context) {
     if (widget.priceTiers.isEmpty) return const SizedBox.shrink();
+    final activeIndex = _activeTierIndex;
 
     return Container(
       color: Colors.white,
@@ -71,13 +91,14 @@ class _ProductPriceTiersWidgetState extends State<ProductPriceTiersWidget> {
               child: Column(
                 children: List.generate(widget.priceTiers.length, (index) {
                   final tier = widget.priceTiers[index];
-                  final isSelected = _selectedTierIndex == index;
+                  final isSelected = activeIndex == index;
                   final isLast = index == widget.priceTiers.length - 1;
+                  final savingPercent = _getSavingPercent(index);
                   return GestureDetector(
-                    onTap: () {
-                      setState(() => _selectedTierIndex = index);
-                      widget.onQtyChanged(tier['qty'] as int);
-                    },
+                    // Choisir un palier = passer à sa quantité minimale
+                    onTap: () => widget.onQtyChanged(
+                      (tier['qty'] as num?)?.toInt() ?? 1,
+                    ),
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 200),
                       padding: const EdgeInsets.symmetric(
@@ -124,17 +145,32 @@ class _ProductPriceTiersWidgetState extends State<ProductPriceTiersWidget> {
                                 : null,
                           ),
                           const SizedBox(width: 12),
-                          Text(
-                            tier['label'] as String,
-                            style: GoogleFonts.outfit(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w500,
-                              color: const Color(0xFF1A1A1A),
+                          Expanded(
+                            child: Text(
+                              tier['label']?.toString() ?? '',
+                              style: GoogleFonts.outfit(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w500,
+                                color: const Color(0xFF1A1A1A),
+                              ),
+                              overflow: TextOverflow.ellipsis,
                             ),
                           ),
-                          const Spacer(),
-                          Text(
-                            '${_formatPrice(tier['price'] as int)} FCFA',
+                          const SizedBox(width: 8),
+                          Text.rich(
+                            TextSpan(
+                              text: '${_formatPrice(_tierPrice(index))} FCFA',
+                              children: [
+                                TextSpan(
+                                  text: '/unité',
+                                  style: GoogleFonts.outfit(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w400,
+                                    color: const Color(0xFF9E9E9E),
+                                  ),
+                                ),
+                              ],
+                            ),
                             style: GoogleFonts.outfit(
                               fontSize: 15,
                               fontWeight: FontWeight.w700,
@@ -146,7 +182,7 @@ class _ProductPriceTiersWidgetState extends State<ProductPriceTiersWidget> {
                               ],
                             ),
                           ),
-                          if (index > 0) ...[
+                          if (savingPercent > 0) ...[
                             const SizedBox(width: 8),
                             Container(
                               padding: const EdgeInsets.symmetric(
@@ -158,7 +194,7 @@ class _ProductPriceTiersWidgetState extends State<ProductPriceTiersWidget> {
                                 borderRadius: BorderRadius.circular(4),
                               ),
                               child: Text(
-                                '-${_getSavingPercent(index)}%',
+                                '-$savingPercent%',
                                 style: GoogleFonts.outfit(
                                   fontSize: 10,
                                   fontWeight: FontWeight.w700,
@@ -230,10 +266,13 @@ class _ProductPriceTiersWidgetState extends State<ProductPriceTiersWidget> {
     );
   }
 
+  // % d'économie du palier par rapport au prix normal (basePrice, sinon
+  // prix de la première ligne). 0 = pas de badge.
   int _getSavingPercent(int tierIndex) {
-    if (widget.priceTiers.isEmpty || tierIndex == 0) return 0;
-    final basePrice = widget.priceTiers[0]['price'] as int;
-    final tierPrice = widget.priceTiers[tierIndex]['price'] as int;
+    if (widget.priceTiers.isEmpty) return 0;
+    final basePrice = widget.basePrice ?? _tierPrice(0);
+    final tierPrice = _tierPrice(tierIndex);
+    if (basePrice <= 0 || tierPrice >= basePrice) return 0;
     return (((basePrice - tierPrice) / basePrice) * 100).round();
   }
 }

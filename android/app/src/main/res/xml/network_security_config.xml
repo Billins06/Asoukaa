@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Par défaut : HTTPS obligatoire. Empêche qu'un token JWT ou des données
+         de paiement circulent en clair sur un réseau non maîtrisé. -->
+    <base-config cleartextTrafficPermitted="false" />
+
+    <!-- Exception pour le backend local atteint via `adb reverse tcp:3001`.
+         Ce trafic ne quitte jamais l'appareil, il n'est donc pas interceptable. -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+        <!-- Adresse de la machine hôte depuis l'émulateur Android -->
+        <domain includeSubdomains="false">10.0.2.2</domain>
+
+        <!-- PC de développement sur le Wi-Fi du bureau : permet de tester à
+             plusieurs, chacun sur son téléphone, sans câble USB.
+             Nécessaire AUSSI en build release : le bloc <debug-overrides>
+             plus bas ne s'applique qu'aux builds debug, donc sans cette
+             ligne un APK release installé sur un téléphone bloquerait
+             silencieusement tous les appels vers le serveur.
+             ⚠️ À mettre à jour si l'adresse du PC change (box redémarrée) :
+             le plus simple est de réserver une adresse fixe pour le PC
+             dans la box. -->
+        <!-- ADRESSES-LAN-DEBUT (ne pas supprimer ce repere : le script
+             preparer-apk.ps1 s'en sert pour mettre la liste a jour) -->
+        <domain includeSubdomains="false">192.168.1.193</domain>
+        <domain includeSubdomains="false">192.168.100.7</domain>
+        <domain includeSubdomains="false">192.168.1.197</domain>
+        <domain includeSubdomains="false">192.168.0.112</domain>
+        <!-- ADRESSES-LAN-FIN -->
+    </domain-config>
+
+    <!-- Builds debug uniquement : autorise le HTTP vers une IP LAN, par exemple
+         un lancement avec API_BASE_URL=http://192.168.x.x:3001 passé en
+         dart-define. Ce bloc est ignoré par les builds release. -->
+    <debug-overrides>
+        <base-config cleartextTrafficPermitted="true" />
+    </debug-overrides>
+</network-security-config>

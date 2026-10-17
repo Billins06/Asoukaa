@@ -4,17 +4,26 @@ import '../../../routes/app_routes.dart';
 import '../../../widgets/custom_image_widget.dart';
 import '../../../services/nest_auth_service.dart';
 import '../../../services/api_service.dart';
+import '../../../services/wishlist_service.dart';
+import '../../../utils/price_range.dart';
 
 class HomeFlashDealsWidget extends StatefulWidget {
   final void Function(Map<String, dynamic>) onProductTap;
   final List<Map<String, dynamic>> products;
   final VoidCallback? onCartUpdated;
 
+  /// Rayon « Ventes flash » de la Vitrine (admin) d'où viennent les
+  /// produits : { id, nom, type, endsAt, ... }. null => produits de repli
+  /// (produits en vedette) : titre, « Voir tout » et compte à rebours
+  /// d'origine.
+  final Map<String, dynamic>? rayon;
+
   const HomeFlashDealsWidget({
     super.key,
     required this.onProductTap,
     this.products = const [],
     this.onCartUpdated,
+    this.rayon,
   });
 
   @override
@@ -25,33 +34,58 @@ class _HomeFlashDealsWidgetState extends State<HomeFlashDealsWidget>
     with SingleTickerProviderStateMixin {
   late AnimationController _countdownController;
   int _secondsLeft = 5400;
+  // Échéance visée par le compte à rebours : rayon['endsAt'] si la
+  // Vitrine en fournit une, sinon 1 h 30 à partir de l'affichage
+  // (comportement d'origine).
+  late DateTime _endsAt;
 
-  // Fallback mock products only shown when no real data available
-  static final List<Map<String, dynamic>> _fallbackProducts = [
-    {
-      'id': 'fp1',
-      'name': 'Tissu Wax Ankara 6 Yards',
-      'shop': 'Maison Konaté Tissus',
-      'price': 18500,
-      'minPrice': 14000,
-      'originalPrice': 32000,
-      'discount': 42,
-      'rating': 4.8,
-      'reviewCount': 234,
-      'imageUrl':
-          'https://img.rocket.new/generatedImages/rocket_gen_img_1c0579dd1-1773189871928.png',
-      'semanticLabel':
-          'Tissu wax africain coloré avec motifs géométriques orange et bleu plié sur une table',
-      'stockLeft': 7,
-      'isHot': true,
-    },
-  ];
+  // Plus de faux produits de démonstration : sans vraies données, le bloc
+  // est masqué (voir build).
+  List<Map<String, dynamic>> get _displayProducts =>
+      widget.products.map((p) => _normalizeProduct(p)).toList();
 
-  List<Map<String, dynamic>> get _displayProducts {
-    if (widget.products.isNotEmpty) {
-      return widget.products.map((p) => _normalizeProduct(p)).toList();
+  String get _title {
+    final nom = (widget.rayon?['nom'] ?? '').toString().trim();
+    return nom.isNotEmpty ? nom : 'Ventes Flash';
+  }
+
+  DateTime? _rayonEndsAt(Map<String, dynamic>? rayon) {
+    final raw = rayon?['endsAt'];
+    if (raw == null) return null;
+    return DateTime.tryParse(raw.toString());
+  }
+
+  /// Vrai seulement si la Vitrine fournit une vraie date de fin : sinon on
+  /// n'affiche pas de compte à rebours (pas de faux chrono).
+  bool get _hasRealDeadline => _rayonEndsAt(widget.rayon) != null;
+
+  void _computeEndsAt() {
+    _endsAt = _rayonEndsAt(widget.rayon) ??
+        DateTime.now().add(const Duration(seconds: 5400));
+    _secondsLeft = _remainingSeconds();
+  }
+
+  int _remainingSeconds() {
+    final left = _endsAt.difference(DateTime.now()).inSeconds;
+    return left > 0 ? left : 0;
+  }
+
+  void _openSeeAll() {
+    final rayonId = (widget.rayon?['id'] ?? '').toString();
+    if (rayonId.isNotEmpty) {
+      Navigator.pushNamed(
+        context,
+        AppRoutes.categoryProducts,
+        arguments: <String, dynamic>{
+          'mode': 'rayon',
+          'id': rayonId,
+          'title': _title,
+          'parentTitle': 'La Vitrine',
+        },
+      );
+      return;
     }
-    return _fallbackProducts;
+    Navigator.pushNamed(context, AppRoutes.allProducts);
   }
 
   Map<String, dynamic> _normalizeProduct(Map<String, dynamic> p) {
@@ -98,7 +132,10 @@ class _HomeFlashDealsWidgetState extends State<HomeFlashDealsWidget>
       'name': p['name'] ?? p['title'] ?? '',
       'shop': shopName,
       'price': price,
-      'minPrice': p['min_price'] as int? ?? p['minPrice'] as int?,
+      // Paliers dégressifs bruts : la carte affiche une fourchette
+      // « meilleur palier – prix normal » via priceRangeLabel().
+      'tierPrices':
+          p['tierPrices'] ?? p['price_tiers'] ?? p['priceTiers'],
       'originalPrice': originalPrice,
       'discount': discount,
       'rating': (p['rating'] as num? ?? p['averageRating'] as num? ?? 4.5).toDouble(),
@@ -124,16 +161,27 @@ class _HomeFlashDealsWidgetState extends State<HomeFlashDealsWidget>
   @override
   void initState() {
     super.initState();
+    _computeEndsAt();
+    // Le listener est appelé à chaque image (≈60 fois/s) : on recalcule le
+    // temps restant à partir de l'échéance et on ne reconstruit que
+    // lorsque la seconde affichée change (l'ancien « _secondsLeft-- »
+    // décomptait une seconde par image).
     _countdownController =
         AnimationController(vsync: this, duration: const Duration(seconds: 1))
           ..addListener(() {
-            if (mounted) {
-              setState(() {
-                if (_secondsLeft > 0) _secondsLeft--;
-              });
-            }
+            if (!mounted) return;
+            final left = _remainingSeconds();
+            if (left != _secondsLeft) setState(() => _secondsLeft = left);
           });
     _countdownController.repeat();
+  }
+
+  @override
+  void didUpdateWidget(covariant HomeFlashDealsWidget oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final oldEnd = _rayonEndsAt(oldWidget.rayon);
+    final newEnd = _rayonEndsAt(widget.rayon);
+    if (oldEnd != newEnd) _computeEndsAt();
   }
 
   @override
@@ -143,10 +191,12 @@ class _HomeFlashDealsWidgetState extends State<HomeFlashDealsWidget>
   }
 
   String _formatTime() {
-    final h = _secondsLeft ~/ 3600;
+    final d = _secondsLeft ~/ 86400;
+    final h = (_secondsLeft % 86400) ~/ 3600;
     final m = (_secondsLeft % 3600) ~/ 60;
     final s = _secondsLeft % 60;
-    return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
+    final prefix = d > 0 ? '${d}j ' : '';
+    return '$prefix${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
   }
 
   @override
@@ -154,6 +204,8 @@ class _HomeFlashDealsWidgetState extends State<HomeFlashDealsWidget>
     final isTablet = MediaQuery.of(context).size.width >= 600;
     final products = _displayProducts;
     if (products.isEmpty) return const SizedBox.shrink();
+    // Vente flash terminée : le bloc disparaît.
+    if (_hasRealDeadline && _secondsLeft <= 0) return const SizedBox.shrink();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -175,41 +227,49 @@ class _HomeFlashDealsWidgetState extends State<HomeFlashDealsWidget>
                 ),
               ),
               const SizedBox(width: 10),
-              Text(
-                'Ventes Flash',
-                style: GoogleFonts.outfit(
-                  fontSize: 18,
-                  fontWeight: FontWeight.w700,
-                  color: const Color(0xFF1A1A1A),
+              Expanded(
+                child: Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        _title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: GoogleFonts.outfit(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w700,
+                          color: const Color(0xFF1A1A1A),
+                        ),
+                      ),
+                    ),
+                    if (_hasRealDeadline) ...[
+                    const SizedBox(width: 12),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFDC2626),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Text(
+                        _formatTime(),
+                        style: GoogleFonts.outfit(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.white,
+                          fontFeatures: const [FontFeature.tabularFigures()],
+                        ),
+                      ),
+                    ),
+                    ],
+                  ],
                 ),
               ),
               const SizedBox(width: 12),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 4,
-                ),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFDC2626),
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                child: Text(
-                  _formatTime(),
-                  style: GoogleFonts.outfit(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
-                    color: Colors.white,
-                    fontFeatures: const [FontFeature.tabularFigures()],
-                  ),
-                ),
-              ),
-              const Spacer(),
               GestureDetector(
-                onTap: () => Navigator.pushNamed(
-                  context,
-                  AppRoutes.searchResults,
-                  arguments: '',
-                ),
+                onTap: _openSeeAll,
                 child: Text(
                   'Voir tout',
                   style: GoogleFonts.outfit(
@@ -311,6 +371,14 @@ class _HomeFlashDealsWidgetState extends State<HomeFlashDealsWidget>
           ),
         ),
       );
+      // ⚠️ Filet de sécurité : sur certains environnements (onglet Chrome
+      // arrière-plan, TickerMode suspendu par une navigation), le timer
+      // interne du SnackBar ne se déclenche pas de façon fiable et le
+      // message reste affiché indéfiniment. On force sa disparition avec
+      // un vrai minuteur, indépendant de l'état d'animation du Scaffold.
+      Future.delayed(const Duration(seconds: 2), () {
+        if (mounted) ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      });
       widget.onCartUpdated?.call();
     } catch (_) {
       if (!context.mounted) return;
@@ -396,12 +464,17 @@ class _FlashProductCardState extends State<_FlashProductCard>
         if (mounted) {
           setState(() { _isInWishlist = false; _wishlistLoading = false; });
         }
+        // Le badge cœur de l'accueil écoute ce service : sans cet appel
+        // il resterait affiché avec l'ancien nombre jusqu'au prochain
+        // rechargement de l'écran d'accueil.
+        WishlistService.instance.refreshCount();
       } else {
         await ApiService.instance.client
             .post('/api/v1/wishlist', data: {'productId': id});
         if (mounted) {
           setState(() { _isInWishlist = true; _wishlistLoading = false; });
         }
+        WishlistService.instance.refreshCount();
       }
     } catch (_) {
       if (mounted) setState(() => _wishlistLoading = false);
@@ -427,9 +500,10 @@ class _FlashProductCardState extends State<_FlashProductCard>
   @override
   Widget build(BuildContext context) {
     final p = widget.product;
-    final minPrice = p['minPrice'] as int?;
-    final price = p['price'] as int? ?? 0;
-    final hasPriceRange = minPrice != null && minPrice < price;
+    // « 14 000 – 18 500 F » dès qu'un palier dégressif est moins cher,
+    // sinon le prix normal seul. Carte étroite (160 px) : le suffixe de la
+    // fourchette est abrégé en « F » pour tenir sur une ligne.
+    final priceLabel = priceRangeLabel(p, rangeCurrency: 'F');
     final discount = p['discount'] as int? ?? 0;
 
     return FadeTransition(
@@ -572,9 +646,7 @@ class _FlashProductCardState extends State<_FlashProductCard>
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text(
-                                  hasPriceRange
-                                      ? '${_formatPrice(minPrice)}-${_formatPrice(price)} F'
-                                      : '${_formatPrice(price)} FCFA',
+                                  priceLabel,
                                   style: GoogleFonts.outfit(
                                     fontSize: 12,
                                     fontWeight: FontWeight.w700,

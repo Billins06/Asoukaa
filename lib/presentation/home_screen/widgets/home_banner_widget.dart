@@ -3,7 +3,9 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../../routes/app_routes.dart';
+import '../../../services/product_service.dart';
 import '../../../widgets/custom_image_widget.dart';
+import '../../../utils/lecture_json.dart';
 
 class HomeBannerWidget extends StatefulWidget {
   const HomeBannerWidget({super.key});
@@ -105,9 +107,75 @@ class _HomeBannerWidgetState extends State<HomeBannerWidget>
     return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
   }
 
-  void _onBannerTap(Map<String, dynamic> banner) {
+  bool _bannerNavigating = false;
+
+  Future<void> _onBannerTap(Map<String, dynamic> banner) async {
     final query = banner['searchQuery'] as String? ?? '';
-    Navigator.pushNamed(context, AppRoutes.searchResults, arguments: query);
+    if (query.isEmpty) {
+      Navigator.pushNamed(context, AppRoutes.searchResults, arguments: query);
+      return;
+    }
+    if (_bannerNavigating) return;
+    _bannerNavigating = true;
+    try {
+      // La bannière représente une catégorie ; on cherche un vendeur réel
+      // qui vend dans cette catégorie pour ouvrir sa page boutique.
+      final result = await ProductService.instance.getProducts(
+        search: query,
+        limit: 1,
+      );
+      if (!mounted) return;
+
+      final products = result.data;
+      if (result.success && products != null && products.isNotEmpty) {
+        final product = products.first;
+        final shopData = product['vendor'] ??
+            product['shops'] ??
+            product['vendeur'] ??
+            product['shop_info'];
+        final shopId = shopData is Map
+            ? (shopData['id']?.toString() ?? '')
+            : '';
+
+        if (shopId.isNotEmpty) {
+          final shopName = shopData is Map
+              ? (shopData['shopName'] as String? ??
+                  shopData['name'] as String? ??
+                  '')
+              : '';
+          final shopLogo = shopData is Map
+              ? (shopData['logoUrl'] as String? ??
+                  shopData['logo_url'] as String? ??
+                  '')
+              : '';
+          final shopRating = shopData is Map
+              ? lireDouble(shopData['rating'], 4.5)
+              : 4.5;
+
+          Navigator.pushNamed(
+            context,
+            AppRoutes.boutiqueVendeur,
+            arguments: {
+              'id': shopId,
+              'name': shopName,
+              'logo': shopLogo,
+              'logoSemanticLabel': 'Logo de la boutique $shopName',
+              'rating': shopRating,
+              'salesCount': 0,
+            },
+          );
+          return;
+        }
+      }
+
+      // Aucun vendeur trouvé pour cette catégorie : repli sur la recherche.
+      Navigator.pushNamed(context, AppRoutes.searchResults, arguments: query);
+    } catch (_) {
+      if (!mounted) return;
+      Navigator.pushNamed(context, AppRoutes.searchResults, arguments: query);
+    } finally {
+      _bannerNavigating = false;
+    }
   }
 
   @override

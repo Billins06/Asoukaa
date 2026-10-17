@@ -1,8 +1,10 @@
+import 'package:dio/dio.dart' show DioException;
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../../services/api_service.dart';
 import '../../theme/app_theme.dart';
+import '../../utils/lecture_json.dart';
 import '../../widgets/app_toast.dart';
 
 /// Écran client : demander un remboursement pour une commande livrée ou
@@ -33,6 +35,18 @@ class _RefundRequestScreenState extends State<RefundRequestScreen> {
   List<Map<String, dynamic>> _eligibleOrders = [];
   List<Map<String, dynamic>> _refunds = [];
   String? _selectedOrderId;
+
+  // Aperçu du remboursement demandé au serveur (GET /payments/refund-preview).
+  // Si le serveur est ancien ou injoignable, ces valeurs restent à leur état
+  // par défaut et l'écran garde l'ancien comportement (champ de saisie).
+  int _previewJeton = 0; // ignore les réponses arrivées en retard
+  bool _previewLoading = false;
+  String? _previewErreur; // message du serveur (erreur 400)
+  bool _montantFixe = false; // true : commande livrée, montant imposé
+  bool _delaiDepasse = false; // true : 24 h après livraison dépassées
+  double? _montantServeur; // montant fixe, ou plafond pour une annulée
+  String? _messageApercu; // explication envoyée par le serveur (facultatif)
+  int _formVersion = 0; // change pour réinitialiser la liste déroulante
 
   @override
   void initState() {
@@ -135,10 +149,81 @@ class _RefundRequestScreenState extends State<RefundRequestScreen> {
       );
       final total = order['total'] as double? ?? 0;
       _amountController.text = total > 0 ? total.toStringAsFixed(0) : '';
+      _effacerApercu();
     });
+    if (orderId != null) _loadPreview(orderId);
+  }
+
+  /// Remet l'aperçu à zéro (à appeler dans un setState).
+  void _effacerApercu() {
+    _previewJeton++;
+    _previewLoading = false;
+    _previewErreur = null;
+    _montantFixe = false;
+    _messageApercu = null;
+    _delaiDepasse = false;
+    _montantServeur = null;
+  }
+
+  /// Demande au serveur le montant remboursable de la commande choisie.
+  /// - 400 (ou 404 « commande introuvable ») : message du serveur affiché ;
+  /// - ancien serveur (404 « Cannot GET »), réseau, autre erreur : on garde
+  ///   l'ancien comportement (champ de saisie), le serveur validera à l'envoi.
+  Future<void> _loadPreview(String orderId) async {
+    final jeton = ++_previewJeton;
+    setState(() {
+      _previewLoading = true;
+      _previewErreur = null;
+      _montantFixe = false;
+      _messageApercu = null;
+      _delaiDepasse = false;
+      _montantServeur = null;
+    });
+    try {
+      final res = await ApiService.instance.client.get(
+        '/api/v1/payments/refund-preview/${Uri.encodeComponent(orderId)}',
+      );
+      if (!mounted || jeton != _previewJeton) return;
+      final data = res.data;
+      if (data is Map) {
+        final montant = lireDoubleOuNull(data['montant']);
+        final fixe = data['montantFixe'] == true && montant != null;
+        setState(() {
+          _previewLoading = false;
+          _montantFixe = fixe;
+          _montantServeur = montant;
+          _messageApercu = (data['message'] is String &&
+                  (data['message'] as String).trim().isNotEmpty)
+              ? (data['message'] as String).trim()
+              : null;
+          _delaiDepasse = fixe && data['delaiDepasse'] == true;
+        });
+      } else {
+        setState(() => _previewLoading = false);
+      }
+    } on DioException catch (e) {
+      if (!mounted || jeton != _previewJeton) return;
+      final code = e.response?.statusCode;
+      final msg = _messageServeur(e);
+      final refus = code == 400 ||
+          (code == 404 &&
+              msg != null &&
+              !msg.toLowerCase().contains('cannot get'));
+      setState(() {
+        _previewLoading = false;
+        _previewErreur = refus
+            ? (msg ?? 'Cette commande ne peut pas être remboursée.')
+            : null;
+      });
+    } catch (_) {
+      if (!mounted || jeton != _previewJeton) return;
+      setState(() => _previewLoading = false);
+    }
   }
 
   Future<void> _submitRequest() async {
+    // Protection contre le double clic et contre un envoi pendant le calcul.
+    if (_isSubmitting || _previewLoading) return;
     if (_selectedOrderId == null) {
       AppToast.show(
         context,
@@ -147,7 +232,23 @@ class _RefundRequestScreenState extends State<RefundRequestScreen> {
       );
       return;
     }
+    if (_previewErreur != null) return;
+    if (_montantFixe && _delaiDepasse) {
+      AppToast.show(
+        context,
+        message: 'Le délai de 24 h après la livraison est dépassé : '
+            'la demande n\'est plus possible.',
+        type: ToastType.error,
+      );
+      return;
+    }
     if (!_formKey.currentState!.validate()) return;
+
+    // Commande livrée : montant fixé par le serveur (il applique le sien,
+    // mais le champ reste obligatoire). Sinon : montant saisi.
+    final double montant = _montantFixe
+        ? (_montantServeur ?? 0.0)
+        : (double.tryParse(_amountController.text.trim()) ?? 0.0);
 
     setState(() => _isSubmitting = true);
     try {
@@ -156,7 +257,7 @@ class _RefundRequestScreenState extends State<RefundRequestScreen> {
         data: {
           'orderId': _selectedOrderId,
           'motif': _motifController.text.trim(),
-          'montantRemb': double.tryParse(_amountController.text.trim()) ?? 0,
+          'montantRemb': montant,
         },
       );
       if (!mounted) return;
@@ -166,7 +267,11 @@ class _RefundRequestScreenState extends State<RefundRequestScreen> {
         type: ToastType.success,
       );
       _motifController.clear();
-      setState(() => _selectedOrderId = null);
+      setState(() {
+        _selectedOrderId = null;
+        _effacerApercu();
+        _formVersion++;
+      });
       _amountController.clear();
       await _loadData();
     } on Object catch (e) {
@@ -178,18 +283,22 @@ class _RefundRequestScreenState extends State<RefundRequestScreen> {
     }
   }
 
-  String _extractErrorMessage(Object e) {
+  /// Message d'erreur envoyé par le serveur, ou null s'il n'y en a pas.
+  String? _messageServeur(Object e) {
     try {
       final response = (e as dynamic).response;
       final data = response?.data;
       if (data is Map && data['message'] != null) {
         final msg = data['message'];
-        if (msg is String) return msg;
+        if (msg is String && msg.trim().isNotEmpty) return msg;
         if (msg is List && msg.isNotEmpty) return msg.first.toString();
       }
     } catch (_) {}
-    return 'La demande a échoué. Réessayez.';
+    return null;
   }
+
+  String _extractErrorMessage(Object e) =>
+      _messageServeur(e) ?? 'La demande a échoué. Réessayez.';
 
   Color _statusColor(String status) {
     switch (status) {
@@ -362,6 +471,7 @@ class _RefundRequestScreenState extends State<RefundRequestScreen> {
               )
             else ...[
               DropdownButtonFormField<String>(
+                key: ValueKey<int>(_formVersion),
                 initialValue: _selectedOrderId,
                 isExpanded: true,
                 decoration: InputDecoration(
@@ -388,11 +498,244 @@ class _RefundRequestScreenState extends State<RefundRequestScreen> {
                 validator: (v) => v == null ? 'Requis' : null,
               ),
               const SizedBox(height: 12),
+              ..._buildSectionMontant(),
+              if (_previewErreur == null) ...[
+                TextFormField(
+                  controller: _motifController,
+                  maxLines: 3,
+                  decoration: InputDecoration(
+                    labelText: 'Motif du remboursement',
+                    hintText: 'Ex : produit non conforme, colis endommagé...',
+                    filled: true,
+                    fillColor: AppTheme.surfaceVariant,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
+                    ),
+                  ),
+                  validator: (v) =>
+                      (v == null || v.trim().isEmpty) ? 'Le motif est obligatoire' : null,
+                ),
+                const SizedBox(height: 14),
+                SizedBox(
+                  width: double.infinity,
+                  height: 48,
+                  child: ElevatedButton(
+                    onPressed: (_isSubmitting ||
+                          _previewLoading ||
+                          (_montantFixe && _delaiDepasse))
+                      ? null
+                      : _submitRequest,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppTheme.primary,
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    child: _isSubmitting
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2.5,
+                              color: Colors.white,
+                            ),
+                          )
+                        : Text(
+                            'Envoyer la demande',
+                            style: GoogleFonts.outfit(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                  ),
+                ),
+              ],
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Zone « montant » du formulaire : chargement, erreur du serveur,
+  /// montant fixe (commande livrée) ou champ de saisie (commande annulée /
+  /// ancien serveur). Chaque cas se termine par un espacement.
+  List<Widget> _buildSectionMontant() {
+    if (_previewLoading) {
+      return [
+        Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: AppTheme.surfaceVariant,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Row(
+            children: [
+              const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2.5,
+                  color: AppTheme.primary,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  'Calcul du montant remboursable...',
+                  style: GoogleFonts.outfit(
+                    fontSize: 12,
+                    color: AppTheme.textSecondary,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+      ];
+    }
+
+    final erreur = _previewErreur;
+    if (erreur != null) {
+      return [
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: AppTheme.errorContainer,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                erreur,
+                style: GoogleFonts.outfit(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: AppTheme.error,
+                ),
+              ),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 4,
+                children: [
+                  ElevatedButton(
+                    onPressed: () {
+                      final id = _selectedOrderId;
+                      if (id != null) _loadPreview(id);
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppTheme.primary,
+                      foregroundColor: Colors.white,
+                    ),
+                    child: const Text('Réessayer'),
+                  ),
+                  TextButton(
+                    onPressed: () => setState(() {
+                      _selectedOrderId = null;
+                      _amountController.clear();
+                      _effacerApercu();
+                      _formVersion++;
+                    }),
+                    child: const Text('Choisir une autre commande'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+      ];
+    }
+
+    if (_montantFixe) {
+      return [
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: AppTheme.surfaceVariant,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: AppTheme.outline),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Montant remboursé : ${_formatAmount(_montantServeur ?? 0.0)}',
+                style: GoogleFonts.outfit(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                  color: AppTheme.primary,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                _messageApercu ??
+                    'Ce montant correspond à la part reversée au vendeur. '
+                        'Les frais de service et de livraison ne sont pas '
+                        'remboursables.',
+                style: GoogleFonts.outfit(
+                  fontSize: 12,
+                  color: AppTheme.textSecondary,
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (_delaiDepasse) ...[
+          const SizedBox(height: 10),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: AppTheme.errorContainer,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Icon(
+                  Icons.schedule_rounded,
+                  size: 18,
+                  color: AppTheme.error,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Le délai de 24 h après la livraison est dépassé : '
+                    'la demande n\'est plus possible.',
+                    style: GoogleFonts.outfit(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: AppTheme.error,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+        const SizedBox(height: 12),
+      ];
+    }
+
+    // Commande annulée (ou ancien serveur) : saisie libre comme avant.
+    final plafond = _montantServeur;
+    return [
               TextFormField(
                 controller: _amountController,
                 keyboardType: TextInputType.number,
                 decoration: InputDecoration(
                   labelText: 'Montant à rembourser (FCFA)',
+                  helperText: (plafond != null && plafond > 0)
+                      ? 'Maximum remboursable : ${_formatAmount(plafond)}'
+                      : null,
                   filled: true,
                   fillColor: AppTheme.surfaceVariant,
                   border: OutlineInputBorder(
@@ -407,58 +750,7 @@ class _RefundRequestScreenState extends State<RefundRequestScreen> {
                 },
               ),
               const SizedBox(height: 12),
-              TextFormField(
-                controller: _motifController,
-                maxLines: 3,
-                decoration: InputDecoration(
-                  labelText: 'Motif du remboursement',
-                  hintText: 'Ex : produit non conforme, colis endommagé...',
-                  filled: true,
-                  fillColor: AppTheme.surfaceVariant,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide.none,
-                  ),
-                ),
-                validator: (v) =>
-                    (v == null || v.trim().isEmpty) ? 'Le motif est obligatoire' : null,
-              ),
-              const SizedBox(height: 14),
-              SizedBox(
-                width: double.infinity,
-                height: 48,
-                child: ElevatedButton(
-                  onPressed: _isSubmitting ? null : _submitRequest,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppTheme.primary,
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
-                  child: _isSubmitting
-                      ? const SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2.5,
-                            color: Colors.white,
-                          ),
-                        )
-                      : Text(
-                          'Envoyer la demande',
-                          style: GoogleFonts.outfit(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                ),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
+    ];
   }
 
   Widget _buildRefundCard(Map<String, dynamic> r) {

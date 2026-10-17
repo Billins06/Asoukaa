@@ -2,6 +2,28 @@ import 'package:awesome_notifications/awesome_notifications.dart';
 import 'package:flutter/material.dart';
 
 class NotificationPlatform {
+  /// Appelé quand l'utilisateur touche une notification (charge utile =
+  /// `type`, `referenceType`, `referenceId`).
+  static void Function(Map<String, String?> payload)? onTap;
+
+  @pragma('vm:entry-point')
+  static Future<void> _onActionReceived(ReceivedAction action) async {
+    final p = action.payload;
+    if (p != null) onTap?.call(p);
+  }
+
+  /// Charge utile de la notification qui a LANCÉ l'appli (démarrage à froid),
+  /// ou null.
+  static Future<Map<String, String?>?> actionInitiale() async {
+    try {
+      final a = await AwesomeNotifications()
+          .getInitialNotificationAction(removeFromActionEvents: true);
+      return a?.payload;
+    } catch (_) {
+      return null;
+    }
+  }
+
   static Future<void> initialize() async {
     await AwesomeNotifications().initialize(
       null, // use default app icon
@@ -46,6 +68,9 @@ class NotificationPlatform {
       debug: false,
     );
 
+    await AwesomeNotifications()
+        .setListeners(onActionReceivedMethod: _onActionReceived);
+
     await AwesomeNotifications().requestPermissionToSendNotifications();
   }
 
@@ -54,6 +79,7 @@ class NotificationPlatform {
     required String title,
     required String body,
     required String channelKey,
+    Map<String, String?>? payload,
   }) async {
     try {
       await AwesomeNotifications().createNotification(
@@ -62,6 +88,7 @@ class NotificationPlatform {
           channelKey: channelKey,
           title: title,
           body: body,
+          payload: payload,
           notificationLayout: NotificationLayout.Default,
           autoDismissible: true,
         ),

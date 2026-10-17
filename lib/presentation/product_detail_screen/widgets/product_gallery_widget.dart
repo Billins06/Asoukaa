@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:share_plus/share_plus.dart';
 import '../../../widgets/custom_image_widget.dart';
+import './product_video_page_widget.dart';
 
 class ProductGalleryWidget extends StatefulWidget {
   final Map<String, dynamic> product;
@@ -31,15 +33,22 @@ class _ProductGalleryWidgetState extends State<ProductGalleryWidget> {
   List<Map<String, dynamic>> get _images {
     final raw = widget.product['images'];
     if (raw is List && raw.isNotEmpty) {
-      return raw.map((img) {
-        if (img is Map) {
-          return {
-            'url': (img['url'] ?? img['imageUrl'] ?? '').toString(),
-            'semanticLabel': (img['semanticLabel'] ?? 'Image du produit').toString(),
-          };
-        }
-        return {'url': img.toString(), 'semanticLabel': 'Image du produit'};
-      }).toList();
+      final list = raw
+          // Photos seulement : les vidéos passent par _videos
+          .where((img) => !(img is Map && img['isVideo'] == true))
+          .map<Map<String, dynamic>>((img) {
+            if (img is Map) {
+              return {
+                'url': (img['url'] ?? img['imageUrl'] ?? '').toString(),
+                'semanticLabel':
+                    (img['semanticLabel'] ?? 'Image du produit').toString(),
+              };
+            }
+            return {'url': img.toString(), 'semanticLabel': 'Image du produit'};
+          })
+          .where((img) => (img['url'] as String).isNotEmpty)
+          .toList();
+      if (list.isNotEmpty) return list;
     }
     final fallbackUrl = (widget.product['imageUrl'] ?? widget.product['image_url'] ?? '').toString();
     return [
@@ -52,10 +61,89 @@ class _ProductGalleryWidgetState extends State<ProductGalleryWidget> {
     ];
   }
 
+  // URL des vidéos du produit ('videos' fourni par ProductService /
+  // _normalizeNestProduct ; entrées isVideo encore présentes dans 'images'
+  // acceptées aussi).
+  List<String> get _videos {
+    final urls = <String>[];
+    void add(dynamic v) {
+      final url = (v is Map ? (v['url'] ?? v['imageUrl'] ?? '') : (v ?? ''))
+          .toString()
+          .trim();
+      if (url.isNotEmpty && !urls.contains(url)) urls.add(url);
+    }
+
+    final rawVideos = widget.product['videos'];
+    if (rawVideos is List) {
+      for (final v in rawVideos) {
+        add(v);
+      }
+    }
+    final rawImages = widget.product['images'];
+    if (rawImages is List) {
+      for (final img in rawImages) {
+        if (img is Map && img['isVideo'] == true) add(img);
+      }
+    }
+    return urls;
+  }
+
+  // Pages de la galerie : photos d'abord (au moins une, grâce au repli de
+  // _images), puis vidéos. Chaque page : {url, semanticLabel, isVideo}.
+  List<Map<String, dynamic>> get _pages => [
+        for (final img in _images) {...img, 'isVideo': false},
+        for (final url in _videos)
+          {'url': url, 'semanticLabel': 'Vidéo du produit', 'isVideo': true},
+      ];
+
   @override
   void initState() {
     super.initState();
     _pageController = PageController();
+  }
+
+  // Partage natif via les applications du téléphone (WhatsApp, SMS, etc.) —
+  // pas de lien web produit pour l'instant (l'app n'a pas de version web
+  // publique), donc on partage un résumé texte utile : nom, prix, boutique.
+  void _shareProduct() {
+    final name = (widget.product['name'] as String? ?? '').trim();
+    final shop = (widget.product['shop'] as String? ?? '').trim();
+    final priceValue = (widget.product['price'] as num?)?.toInt();
+    final productId = (widget.product['id'] ?? '').toString();
+
+    final buffer = StringBuffer();
+    buffer.writeln('Regarde ce produit sur Asoukaa :');
+    buffer.writeln(name.isNotEmpty ? name : 'Produit Asoukaa');
+    if (priceValue != null && priceValue > 0) {
+      buffer.writeln('${_formatSharePrice(priceValue)} FCFA');
+    }
+    if (shop.isNotEmpty) {
+      buffer.writeln('Vendu par $shop');
+    }
+    // Lien profond : ouvre directement ce produit chez qui a déjà
+    // l'application installée (voir deep_link_service.dart). Chez qui ne
+    // l'a pas encore, le lien ne fait rien pour l'instant — il n'y a pas
+    // encore de page web de secours.
+    if (productId.isNotEmpty) {
+      buffer.writeln('asoukaa://product?id=$productId');
+    }
+
+    // API de share_plus 10.x (la nouvelle API SharePlus/ShareParams
+    // n'existe qu'à partir de la version 11 du package).
+    Share.share(
+      buffer.toString().trim(),
+      subject: name.isNotEmpty ? name : 'Produit Asoukaa',
+    );
+  }
+
+  String _formatSharePrice(int price) {
+    final s = price.toString();
+    final out = StringBuffer();
+    for (var i = 0; i < s.length; i++) {
+      if (i > 0 && (s.length - i) % 3 == 0) out.write(' ');
+      out.write(s[i]);
+    }
+    return out.toString();
   }
 
   @override
@@ -67,6 +155,11 @@ class _ProductGalleryWidgetState extends State<ProductGalleryWidget> {
   @override
   Widget build(BuildContext context) {
     final galleryHeight = widget.isTablet ? 360.0 : 320.0;
+    final pages = _pages;
+    // Le produit peut être rechargé avec moins de médias : on borne l'index.
+    final currentIndex = _currentImageIndex < pages.length
+        ? _currentImageIndex
+        : pages.length - 1;
 
     return Container(
       color: Colors.white,
@@ -80,19 +173,33 @@ class _ProductGalleryWidgetState extends State<ProductGalleryWidget> {
                 child: PageView.builder(
                   controller: _pageController,
                   onPageChanged: (i) => setState(() => _currentImageIndex = i),
-                  itemCount: _images.length,
+                  itemCount: pages.length,
                   itemBuilder: (_, index) {
-                    final img = _images[index];
-                    return Hero(
-                      tag: 'product-${widget.product['id']}',
-                      child: CustomImageWidget(
-                        imageUrl: img['url'] as String,
-                        width: double.infinity,
+                    final img = pages[index];
+                    if (img['isVideo'] == true) {
+                      return ProductVideoPageWidget(
+                        key: ValueKey('video-${img['url']}'),
+                        url: img['url'] as String,
                         height: galleryHeight,
-                        fit: BoxFit.cover,
-                        semanticLabel: img['semanticLabel'] as String,
-                      ),
+                        isActive: index == currentIndex,
+                      );
+                    }
+                    final image = CustomImageWidget(
+                      imageUrl: img['url'] as String,
+                      width: double.infinity,
+                      height: galleryHeight,
+                      fit: BoxFit.cover,
+                      semanticLabel: img['semanticLabel'] as String,
                     );
+                    // Un seul Hero (1re photo) : plusieurs pages visibles en
+                    // même temps pendant un swipe avec le même tag Hero
+                    // font échouer la transition de navigation.
+                    return index == 0
+                        ? Hero(
+                            tag: 'product-${widget.product['id']}',
+                            child: image,
+                          )
+                        : image;
                   },
                 ),
               ),
@@ -146,7 +253,7 @@ class _ProductGalleryWidgetState extends State<ProductGalleryWidget> {
                   child: Row(
                     children: [
                       GestureDetector(
-                        onTap: () {},
+                        onTap: _shareProduct,
                         child: Container(
                           width: 38,
                           height: 38,
@@ -199,7 +306,7 @@ class _ProductGalleryWidgetState extends State<ProductGalleryWidget> {
                     borderRadius: BorderRadius.circular(20),
                   ),
                   child: Text(
-                    '${_currentImageIndex + 1}/${_images.length}',
+                    '${currentIndex + 1}/${pages.length}',
                     style: GoogleFonts.outfit(
                       fontSize: 12,
                       fontWeight: FontWeight.w600,
@@ -211,17 +318,18 @@ class _ProductGalleryWidgetState extends State<ProductGalleryWidget> {
             ],
           ),
           // Thumbnail strip
-          if (_images.length > 1) ...[
+          if (pages.length > 1) ...[
             const SizedBox(height: 10),
             SizedBox(
               height: 60,
               child: ListView.builder(
                 scrollDirection: Axis.horizontal,
                 padding: const EdgeInsets.symmetric(horizontal: 12),
-                itemCount: _images.length,
+                itemCount: pages.length,
                 itemBuilder: (_, index) {
-                  final img = _images[index];
-                  final isActive = _currentImageIndex == index;
+                  final img = pages[index];
+                  final isActive = currentIndex == index;
+                  final isVideo = img['isVideo'] == true;
                   return GestureDetector(
                     onTap: () {
                       _pageController.animateToPage(
@@ -246,13 +354,24 @@ class _ProductGalleryWidgetState extends State<ProductGalleryWidget> {
                       ),
                       child: ClipRRect(
                         borderRadius: BorderRadius.circular(8),
-                        child: CustomImageWidget(
-                          imageUrl: img['url'] as String,
-                          width: 56,
-                          height: 56,
-                          fit: BoxFit.cover,
-                          semanticLabel: img['semanticLabel'] as String,
-                        ),
+                        child: isVideo
+                            ? Container(
+                                width: 56,
+                                height: 56,
+                                color: const Color(0xFF1A1A1A),
+                                child: const Icon(
+                                  Icons.play_circle_fill_rounded,
+                                  size: 26,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : CustomImageWidget(
+                                imageUrl: img['url'] as String,
+                                width: 56,
+                                height: 56,
+                                fit: BoxFit.cover,
+                                semanticLabel: img['semanticLabel'] as String,
+                              ),
                       ),
                     ),
                   );

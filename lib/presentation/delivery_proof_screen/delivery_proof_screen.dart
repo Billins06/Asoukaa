@@ -9,9 +9,11 @@ import 'package:pretty_qr_code/pretty_qr_code.dart';
 import 'package:sizer/sizer.dart';
 
 import 'package:dio/dio.dart';
+import 'dart:convert';
 
 import '../../theme/app_theme.dart';
 import '../../services/api_service.dart';
+import '../../services/upload_service.dart';
 
 class DeliveryProofScreen extends StatefulWidget {
   final Map<String, dynamic>? deliveryData;
@@ -24,8 +26,21 @@ class DeliveryProofScreen extends StatefulWidget {
 class _DeliveryProofScreenState extends State<DeliveryProofScreen>
     with TickerProviderStateMixin {
   // Step management
+  //
+  // Cet écran sert à deux moments bien distincts du Cas A (livreur
+  // interne), avec des preuves différentes à chaque fois :
+  //  - mode 'pickup'  : ramassage chez le vendeur → photo + état
+  //  - mode 'handoff' : remise finale au client   → scan QR + GPS + signature
+  // Le mode arrive via les arguments de navigation (widget.deliveryData).
   int _currentStep = 0;
-  final int _totalSteps = 5;
+
+  String get _mode => (widget.deliveryData?['mode'] as String?) ?? 'handoff';
+  bool get _isPickupMode => _mode == 'pickup';
+
+  // Index dans la liste conceptuelle à 5 étapes [QR, Photo, État, GPS,
+  // Signature] — seules certaines s'appliquent selon le mode.
+  List<int> get _stepOrder => _isPickupMode ? const [1, 2] : const [0, 3, 4];
+  int get _totalSteps => _stepOrder.length;
 
   // QR Scanner state
   bool _qrScanned = false;
@@ -142,6 +157,10 @@ class _DeliveryProofScreenState extends State<DeliveryProofScreen>
       _scannedQrCode = code;
     });
     HapticFeedback.mediumImpact();
+    // Le scan du QR du client PROUVE que le livreur est avec lui — on
+    // capte donc la position GPS au même instant, pas comme une étape
+    // séparée et déconnectée.
+    _startGpsTracking();
   }
 
   void _showManualQrEntry() {
@@ -159,7 +178,9 @@ class _DeliveryProofScreenState extends State<DeliveryProofScreen>
           autofocus: true,
           style: GoogleFonts.outfit(),
           decoration: InputDecoration(
-            hintText: 'Ex: ASK-2847-DAKAR-2026',
+            // Le code de remise est un secret donné par le client (≠ numéro
+            // de commande) : aucun format n'est présumé.
+            hintText: 'Code de remise donné par le client',
             hintStyle: GoogleFonts.outfit(color: AppTheme.muted),
             border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
           ),
@@ -179,6 +200,7 @@ class _DeliveryProofScreenState extends State<DeliveryProofScreen>
                   _scannedQrCode = code;
                 });
                 HapticFeedback.mediumImpact();
+                _startGpsTracking();
               }
             },
             style: ElevatedButton.styleFrom(
@@ -205,29 +227,15 @@ class _DeliveryProofScreenState extends State<DeliveryProofScreen>
     if (picked == null) return;
     setState(() => _isUploadingPhoto = true);
     try {
-      final bytes = await picked.readAsBytes();
-      final fileName = 'delivery_${DateTime.now().millisecondsSinceEpoch}.jpg';
-      final formData = FormData.fromMap({
-        'file': MultipartFile.fromBytes(bytes, filename: fileName),
-      });
-      final res = await ApiService.instance.client.post('/api/v1/uploads/image', data: formData);
-      final url = res.data['url'] as String?;
+      // Type 'proofs' — même stockage que toutes les autres preuves de
+      // livraison, distinct des photos produit/avatar/etc.
+      final url = await UploadService.instance.uploadFile(picked, 'proofs');
       if (!mounted) return;
       setState(() {
         _isUploadingPhoto = false;
-        if (url != null) {
-          _photoTaken = true;
-          _photoUrl = url;
-          HapticFeedback.lightImpact();
-        } else {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Échec de l\'upload. Réessayez.', style: GoogleFonts.outfit()),
-              backgroundColor: AppTheme.error,
-              behavior: SnackBarBehavior.floating,
-            ),
-          );
-        }
+        _photoTaken = true;
+        _photoUrl = url;
+        HapticFeedback.lightImpact();
       });
     } catch (_) {
       if (!mounted) return;
@@ -374,7 +382,7 @@ class _DeliveryProofScreenState extends State<DeliveryProofScreen>
   // ── Navigation ─────────────────────────────────────────────────────────
 
   bool get _canProceed {
-    switch (_currentStep) {
+    switch (_stepOrder[_currentStep]) {
       case 0:
         return _qrScanned;
       case 1:
@@ -399,30 +407,90 @@ class _DeliveryProofScreenState extends State<DeliveryProofScreen>
   }
 
   void _submitProof() async {
+    final deliveryId = _delivery['deliveryId'] as String? ?? '';
+    if (deliveryId.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Identifiant de livraison manquant, impossible de soumettre la preuve',
+            style: GoogleFonts.outfit(),
+          ),
+          backgroundColor: AppTheme.error,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+
     setState(() => _isSubmitting = true);
     try {
-      final orderId = _delivery['id'] ?? '';
-      if (orderId.isNotEmpty) {
-        await ApiService.instance.client.patch(
-          '/api/v1/orders/$orderId/delivery-proof',
+      if (_isPickupMode) {
+        final etat = _notesController.text.trim().isNotEmpty
+            ? '$_selectedCondition — ${_notesController.text.trim()}'
+            : _selectedCondition;
+        await ApiService.instance.client.post(
+          '/api/v1/delivery/$deliveryId/pickup-proof',
           data: {
-            'proofPhotoUrl': _photoUrl,
-            'deliveryCondition': _selectedCondition,
-            'deliveryNotes': _notesController.text.trim(),
-            'qrCodeScanned': _scannedQrCode,
-            'signatureConfirmed': _signatureConfirmed,
-            'gpsLat': _currentPosition?.latitude,
-            'gpsLng': _currentPosition?.longitude,
+            'photoUrl': _photoUrl,
+            'etatColis': etat,
+          },
+        );
+      } else {
+        // La signature est enregistrée comme une liste de traits, chacun
+        // une liste de points {x, y} — reconstituable telle quelle côté
+        // admin en cas de litige.
+        final signatureData = jsonEncode(
+          _signatureStrokes
+              .map((stroke) => stroke
+                  .map((o) => {'x': o.dx, 'y': o.dy})
+                  .toList())
+              .toList(),
+        );
+        await ApiService.instance.client.post(
+          '/api/v1/delivery/$deliveryId/handoff-proof',
+          data: {
+            'qrScanValue': _scannedQrCode,
+            'latitude': _currentPosition?.latitude,
+            'longitude': _currentPosition?.longitude,
+            'signatureData': signatureData,
           },
         );
       }
-    } catch (_) {}
-    if (!mounted) return;
-    setState(() {
-      _isSubmitting = false;
-      _submitted = true;
-    });
-    HapticFeedback.heavyImpact();
+
+      if (!mounted) return;
+      setState(() {
+        _isSubmitting = false;
+        _submitted = true;
+      });
+      HapticFeedback.heavyImpact();
+    } on DioException catch (e) {
+      if (!mounted) return;
+      setState(() => _isSubmitting = false);
+      final data = e.response?.data;
+      final message = (data is Map && data['message'] != null)
+          ? data['message'].toString()
+          : 'Échec de l\'envoi de la preuve. Réessayez.';
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(message, style: GoogleFonts.outfit()),
+          backgroundColor: AppTheme.error,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _isSubmitting = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Échec de l\'envoi de la preuve. Réessayez.',
+            style: GoogleFonts.outfit(),
+          ),
+          backgroundColor: AppTheme.error,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
   }
 
   // ── Build ──────────────────────────────────────────────────────────────
@@ -525,14 +593,17 @@ class _DeliveryProofScreenState extends State<DeliveryProofScreen>
   }
 
   Widget _buildStepIndicator() {
-    final stepLabels = ['QR Code', 'Photo', 'Notes', 'GPS', 'Signature'];
-    final stepIcons = [
+    const allLabels = ['QR Code', 'Photo', 'État', 'GPS', 'Signature'];
+    const allIcons = [
       Icons.qr_code_scanner_rounded,
       Icons.camera_alt_rounded,
       Icons.edit_note_rounded,
       Icons.location_on_rounded,
       Icons.draw_rounded,
     ];
+    final order = _stepOrder;
+    final stepLabels = order.map((i) => allLabels[i]).toList();
+    final stepIcons = order.map((i) => allIcons[i]).toList();
     return Container(
       color: AppTheme.surface,
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
@@ -606,7 +677,7 @@ class _DeliveryProofScreenState extends State<DeliveryProofScreen>
   }
 
   Widget _buildCurrentStep() {
-    switch (_currentStep) {
+    switch (_stepOrder[_currentStep]) {
       case 0:
         return _buildQrStep();
       case 1:
@@ -675,7 +746,6 @@ class _DeliveryProofScreenState extends State<DeliveryProofScreen>
   // ─── STEP 1: QR SCANNER ───────────────────────────────────────────────
 
   Widget _buildQrStep() {
-    final expectedQrCode = _delivery['qrCode'] as String? ?? '';
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
       child: Column(
@@ -683,102 +753,6 @@ class _DeliveryProofScreenState extends State<DeliveryProofScreen>
         children: [
           _buildDeliveryInfoCard(),
           const SizedBox(height: 16),
-          if (expectedQrCode.isNotEmpty) ...[
-            Container(
-              decoration: BoxDecoration(
-                color: AppTheme.surface,
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: AppTheme.outlineVariant),
-              ),
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(8),
-                        decoration: BoxDecoration(
-                          color: AppTheme.primaryMuted,
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: const Icon(
-                          Icons.qr_code_2_rounded,
-                          color: AppTheme.primary,
-                          size: 18,
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'QR Code de la commande',
-                              style: GoogleFonts.outfit(
-                                fontSize: 14,
-                                fontWeight: FontWeight.w600,
-                                color: AppTheme.textPrimary,
-                              ),
-                            ),
-                            Text(
-                              'Présentez ce code au client',
-                              style: GoogleFonts.outfit(
-                                fontSize: 11,
-                                color: AppTheme.muted,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  Center(
-                    child: Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(12),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withAlpha(12),
-                            blurRadius: 8,
-                            offset: const Offset(0, 2),
-                          ),
-                        ],
-                      ),
-                      child: SizedBox(
-                        width: 160,
-                        height: 160,
-                        child: PrettyQrView.data(
-                          data: expectedQrCode,
-                          decoration: const PrettyQrDecoration(
-                            shape: PrettyQrSmoothSymbol(
-                              color: Color(0xFF1A1A2E),
-                            ),
-                          ),
-                          errorCorrectLevel: QrErrorCorrectLevel.M,
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  Center(
-                    child: Text(
-                      expectedQrCode,
-                      style: GoogleFonts.outfit(
-                        fontSize: 11,
-                        color: AppTheme.textSecondary,
-                        letterSpacing: 0.5,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
-          ],
           Container(
             decoration: BoxDecoration(
               color: AppTheme.surface,
@@ -2058,7 +2032,7 @@ class _DeliveryProofScreenState extends State<DeliveryProofScreen>
                 ),
                 const SizedBox(height: 24),
                 Text(
-                  'Livraison confirmée !',
+                  _isPickupMode ? 'Ramassage confirmé !' : 'Livraison confirmée !',
                   style: GoogleFonts.outfit(
                     fontSize: 22,
                     fontWeight: FontWeight.w800,
@@ -2067,7 +2041,9 @@ class _DeliveryProofScreenState extends State<DeliveryProofScreen>
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  'La preuve de livraison a été soumise avec succès.',
+                  _isPickupMode
+                      ? 'La preuve de ramassage a été enregistrée. La commande est maintenant "Expédiée".'
+                      : 'La preuve de remise a été enregistrée. La commande est maintenant "Livrée".',
                   style: GoogleFonts.outfit(
                     fontSize: 14,
                     color: AppTheme.textSecondary,
@@ -2079,7 +2055,7 @@ class _DeliveryProofScreenState extends State<DeliveryProofScreen>
                   width: double.infinity,
                   height: 52,
                   child: ElevatedButton(
-                    onPressed: () => Navigator.of(context).pop(),
+                    onPressed: () => Navigator.of(context).pop(true),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: AppTheme.primary,
                       foregroundColor: Colors.white,

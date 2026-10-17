@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../theme/app_theme.dart';
 import '../../widgets/app_navigation.dart';
@@ -11,6 +12,8 @@ import '../../widgets/loading_skeleton_widget.dart';
 import '../../widgets/connection_error_widget.dart';
 import '../../services/nest_auth_service.dart';
 import '../../services/api_service.dart';
+import '../../services/notification_service.dart';
+import '../../services/deliverer_availability.dart';
 
 class DelivererDashboardScreen extends StatefulWidget {
   const DelivererDashboardScreen({super.key});
@@ -21,17 +24,25 @@ class DelivererDashboardScreen extends StatefulWidget {
 }
 
 class _DelivererDashboardScreenState extends State<DelivererDashboardScreen>
-    with TickerProviderStateMixin {
+    with TickerProviderStateMixin, WidgetsBindingObserver {
   late TabController _tabController;
-  int _currentNavIndex = 4;
+  // Sur ce dashboard, l'onglet "Commandes" (index 3) EST l'écran courant :
+  // les missions du livreur sont son équivalent de "mes commandes". Avant,
+  // cette valeur était à 4 ("Profil"), qui se retrouvait donc surligné à
+  // tort comme onglet actif alors qu'on n'est pas sur le profil.
+  int _currentNavIndex = 3;
   bool _isLoading = true;
   bool _hasConnectionError = false;
   bool _isOfflineCached = false;
   final ConnectivityService _connectivityService = ConnectivityService();
 
-  // Real data
-  List<Map<String, dynamic>> _availableMissions = [];
-  List<Map<String, dynamic>> _myMissions = [];
+  // Vraies donnees — issues de GET /api/v1/delivery/me, reparties
+  // selon le statut de la livraison (chaine backend :
+  // assigné → récupéré → en cours de livraison → livré / échouée)
+  List<Map<String, dynamic>> _assignedMissions = [];   // a recuperer
+  List<Map<String, dynamic>> _pickedUpMissions = [];   // colis recuperes
+  List<Map<String, dynamic>> _inTransitMissions = [];  // en cours de livraison
+  List<Map<String, dynamic>> _finishedMissions = [];   // livrees / echouees
   int _pendingDeliveryRequestsCount = 0;
 
   @override
@@ -46,6 +57,11 @@ class _DelivererDashboardScreenState extends State<DelivererDashboardScreen>
         ),
       );
     }
+    // Le badge de notifications doit être à jour dès l'ouverture de
+    // l'écran, et re-synchronisé quand l'app revient au premier plan
+    // (d'où l'observer de cycle de vie, voir didChangeAppLifecycleState).
+    WidgetsBinding.instance.addObserver(this);
+    NotificationService.instance.refreshUnreadCount();
     _loadData();
     _connectivityService.onConnectivityChanged.listen((results) {
       final isOnline =
@@ -54,6 +70,93 @@ class _DelivererDashboardScreenState extends State<DelivererDashboardScreen>
         _loadData();
       }
     });
+  }
+
+  // Convertit une livraison du backend vers la forme attendue par les
+  // cartes de cet ecran. Les champs que le backend ne fournit pas
+  // (distance, ETA, poids) restent volontairement vides : mieux vaut
+  // un tiret honnete qu'une valeur inventee.
+  static Map<String, dynamic> _normalizeDelivery(Map<String, dynamic> d) {
+    final order   = d['order']   as Map<String, dynamic>?;
+    final address = order?['address'] as Map<String, dynamic>?;
+    final vendor  = order?['vendor']  as Map<String, dynamic>?;
+    final items   = (order?['items'] as List?) ?? const [];
+
+    final produits = items
+        .whereType<Map>()
+        .map((it) {
+          final variant = it['variant'] as Map?;
+          final product = variant?['product'] as Map?;
+          return product?['prod_name']?.toString();
+        })
+        .whereType<String>()
+        .toList();
+
+    final rawStatus = d['status']?.toString() ?? '';
+    final fee = double.tryParse(order?['fraisLivraison']?.toString() ?? '') ?? 0;
+
+    String statusColor;
+    switch (rawStatus) {
+      case 'assigné':
+        statusColor = 'warning';
+        break;
+      case 'récupéré':
+      case 'en cours de livraison':
+        statusColor = 'primary';
+        break;
+      default:
+        statusColor = 'success';
+    }
+
+    final destination = [
+      address?['quartier']?.toString(),
+      address?['ville']?.toString(),
+    ].whereType<String>().where((s) => s.isNotEmpty).join(', ');
+
+    return {
+      'rawId':       d['id']?.toString() ?? '',
+      'rawStatus':   rawStatus,
+      'id':          order?['orderNumber']?.toString() ?? '—',
+      'pickup':      d['pickupAddress']?.toString() ?? '—',
+      'delivery':    d['adresseLivraison']?.toString() ??
+                     (destination.isEmpty ? '—' : destination),
+      'address':     d['adresseLivraison']?.toString() ??
+                     (destination.isEmpty ? '—' : destination),
+      'buyer':       address?['nom_destinataire']?.toString() ?? '—',
+      'seller':      vendor?['shopName']?.toString() ?? '—',
+      'description': produits.isEmpty ? '—' : produits.join(', '),
+      'category':    produits.isEmpty ? '—' : produits.first,
+      'reward':      '${fee.round()} FCFA',
+      'rewardValue': fee,
+      'distance':    '—',
+      'eta':         '—',
+      'weight':      '—',
+      'deadline':    '—',
+      'status':      rawStatus.isEmpty ? '—' : rawStatus,
+      'statusColor': statusColor,
+      'instructions': d['instructions']?.toString() ?? '',
+      'latitude':    (d['latitude'] as num?)?.toDouble(),
+      'longitude':   (d['longitude'] as num?)?.toDouble(),
+    };
+  }
+
+  // Fait avancer une livraison dans la chaine de statuts backend.
+  Future<void> _updateDeliveryStatus(String deliveryId, String status) async {
+    try {
+      await ApiService.instance.client.patch(
+        '/api/v1/delivery/$deliveryId/status',
+        data: {'status': status},
+      );
+      await _loadData();
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Impossible de mettre à jour cette livraison.'),
+          ),
+        );
+      }
+    }
   }
 
   Future<void> _loadData() async {
@@ -78,43 +181,91 @@ class _DelivererDashboardScreenState extends State<DelivererDashboardScreen>
       final isLoggedIn = await NestAuthService.instance.isLoggedIn()
           .timeout(const Duration(seconds: 5), onTimeout: () => false);
       if (!isLoggedIn) {
-        if (mounted) setState(() => _isLoading = false);
+        // Session perdue : ne pas afficher un faux « 0 » (voir
+        // NestAuthService.gererSessionPerdue).
+        final etat = await NestAuthService.instance.gererSessionPerdue();
+        if (mounted) {
+          setState(() {
+            _isLoading = false;
+            if (etat == EtatSessionPerdue.temporaire) {
+              _hasConnectionError = true;
+            }
+          });
+        }
         return;
       }
 
-      List<Map<String, dynamic>> available = [];
-      List<Map<String, dynamic>> mine = [];
+      // Badge « En ligne / Hors ligne » : état réel de disponibilité
+      // (silencieux en cas d'échec, sans attendre le reste du chargement).
+      DelivererAvailability.instance.refresh();
+
+      final List<Map<String, dynamic>> assigned = [];
+      final List<Map<String, dynamic>> pickedUp = [];
+      final List<Map<String, dynamic>> inTransit = [];
+      final List<Map<String, dynamic>> finished = [];
       int pendingCount = 0;
+      // true si le chargement de « mes livraisons » a échoué : on affiche
+      // alors une erreur + « Réessayer » au lieu d'un faux « 0 mission ».
+      var echecLivraisons = false;
 
-      try {
-        final r = await ApiService.instance.client.get('/api/v1/deliveries/available');
-        final raw = r.data;
-        final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) as List : []);
-        available = list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
-      } catch (_) {}
-
-      try {
-        final r = await ApiService.instance.client.get('/api/v1/deliveries/mine');
-        final raw = r.data;
-        final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) as List : []);
-        mine = list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
-      } catch (_) {}
-
+      // Mes livraisons (commandes marketplace affectées par les vendeurs)
       try {
         final r = await ApiService.instance.client.get(
-          '/api/v1/delivery-requests',
-          queryParameters: {'status': 'pending', 'limit': '1'},
+          '/api/v1/delivery/me',
+          queryParameters: {'limit': 100},
         );
         final raw = r.data;
-        pendingCount = raw is List
-            ? raw.length
-            : (raw is Map ? ((raw['total'] ?? raw['count'] ?? (raw['data'] as List?)?.length) as int? ?? 0) : 0);
+        final list = raw is List
+            ? raw
+            : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) as List : []);
+        for (final e in list.whereType<Map>()) {
+          final d = _normalizeDelivery(Map<String, dynamic>.from(e));
+          switch (d['rawStatus']) {
+            case 'assigné':
+              assigned.add(d);
+              break;
+            case 'récupéré':
+              pickedUp.add(d);
+              break;
+            case 'en cours de livraison':
+              inTransit.add(d);
+              break;
+            case 'livré':
+            case 'livraison echouée':
+              finished.add(d);
+              break;
+          }
+        }
+      } catch (_) {
+        echecLivraisons = true;
+      }
+      if (echecLivraisons) {
+        if (mounted) {
+          setState(() {
+            _isLoading = false;
+            _hasConnectionError = true;
+          });
+        }
+        return;
+      }
+
+      // Courses express disponibles (livraisons indépendantes)
+      try {
+        final r = await ApiService.instance.client
+            .get('/api/v1/delivery/independent/available');
+        final raw = r.data;
+        final list = raw is List
+            ? raw
+            : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) as List : []);
+        pendingCount = list.length;
       } catch (_) {}
 
       if (mounted) {
         setState(() {
-          _availableMissions = available;
-          _myMissions = mine;
+          _assignedMissions = assigned;
+          _pickedUpMissions = pickedUp;
+          _inTransitMissions = inTransit;
+          _finishedMissions = finished;
           _pendingDeliveryRequestsCount = pendingCount;
           _isLoading = false;
           _isOfflineCached = false;
@@ -132,24 +283,108 @@ class _DelivererDashboardScreenState extends State<DelivererDashboardScreen>
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    // Retour au premier plan : des notifications ont pu arriver pendant
+    // que l'app était en arrière-plan.
+    if (state == AppLifecycleState.resumed) {
+      NotificationService.instance.refreshUnreadCount();
+    }
+  }
+
+  // Ouvre l'écran de notifications existant, puis rafraîchit le compteur au
+  // retour : les notifications consultées ont été marquées lues côté
+  // serveur, le badge doit donc redescendre.
+  Future<void> _openNotifications() async {
+    await Navigator.pushNamed(context, AppRoutes.notifications);
+    if (!mounted) return;
+    await NotificationService.instance.refreshUnreadCount();
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _tabController.dispose();
     super.dispose();
   }
 
+  // Cloche de notifications + badge compteur, même style visuel que le badge
+  // des messages non lus de AsoukaaBottomNav (pastille orange, liseré blanc,
+  // "9+" au-delà de 9) pour rester cohérent partout dans l'app.
+  //
+  // Le compteur vient de NotificationService.unreadCountNotifier : pas de
+  // state local ici, le badge se met à jour tout seul dès que n'importe
+  // quel écran rafraîchit le compteur.
+  Widget _buildNotificationsButton() {
+    return ValueListenableBuilder<int>(
+      valueListenable: NotificationService.instance.unreadCountNotifier,
+      builder: (context, unreadCount, _) {
+        return Stack(
+          clipBehavior: Clip.none,
+          children: [
+            Container(
+              width: 38,
+              height: 38,
+              decoration: BoxDecoration(
+                color: AppTheme.primaryMuted,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: IconButton(
+                icon: const Icon(
+                  Icons.notifications_outlined,
+                  color: AppTheme.primary,
+                  size: 20,
+                ),
+                padding: EdgeInsets.zero,
+                tooltip: 'Notifications',
+                onPressed: _openNotifications,
+              ),
+            ),
+            if (unreadCount > 0)
+              Positioned(
+                top: -3,
+                right: -3,
+                child: IgnorePointer(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 4),
+                    constraints: const BoxConstraints(
+                      minWidth: 16,
+                      minHeight: 16,
+                    ),
+                    decoration: BoxDecoration(
+                      color: AppTheme.primary,
+                      borderRadius: BorderRadius.circular(999),
+                      border: Border.all(color: Colors.white, width: 1.5),
+                    ),
+                    child: Center(
+                      child: Text(
+                        unreadCount > 9 ? '9+' : '$unreadCount',
+                        style: GoogleFonts.outfit(
+                          fontSize: 9,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.white,
+                          height: 1.2,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final isTablet = MediaQuery.of(context).size.width >= 600;
-
     return Scaffold(
       backgroundColor: AppTheme.background,
       appBar: _buildAppBar(),
-      body: isTablet ? _buildTabletLayout() : _buildPhoneLayout(),
-      bottomNavigationBar: isTablet
-          ? null
-          : AsoukaaBottomNav(
+      body: _buildPhoneLayout(),
+      bottomNavigationBar: AsoukaaBottomNav(
               currentIndex: _currentNavIndex,
-              onTap: (i) {
+              onTap: (i) async {
                 setState(() => _currentNavIndex = i);
                 switch (i) {
                   case 0:
@@ -163,10 +398,16 @@ class _DelivererDashboardScreenState extends State<DelivererDashboardScreen>
                     );
                     break;
                   case 2:
-                    Navigator.pushNamed(context, '/chat-screen');
+                    // Boite de reception (toutes les conversations), comme
+                    // le tableau de bord client ; au retour on remet
+                    // l'onglet "Tableau de bord" actif.
+                    await Navigator.pushNamed(context, AppRoutes.conversationsInbox);
+                    if (mounted) setState(() => _currentNavIndex = 3);
                     break;
                   case 3:
-                    // Already on deliverer dashboard
+                    // "Commandes" == ce dashboard pour un livreur (ses
+                    // missions sont son équivalent de "mes commandes") :
+                    // rien à faire, on y est déjà.
                     break;
                   case 4:
                     Navigator.pushNamed(context, AppRoutes.delivererProfile);
@@ -179,7 +420,9 @@ class _DelivererDashboardScreenState extends State<DelivererDashboardScreen>
 
   PreferredSizeWidget _buildAppBar() {
     return PreferredSize(
-      preferredSize: const Size.fromHeight(104),
+      // 104 ne suffisait pas : titre + sous-titre + badge "En ligne" + barre
+      // d'onglets dépassaient de 16px (RenderFlex overflow visible en debug).
+      preferredSize: const Size.fromHeight(120),
       child: Container(
         color: AppTheme.surface,
         child: SafeArea(
@@ -192,60 +435,88 @@ class _DelivererDashboardScreenState extends State<DelivererDashboardScreen>
                 ),
                 child: Row(
                   children: [
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Espace Livreur',
-                          style: GoogleFonts.outfit(
-                            fontSize: 20,
-                            fontWeight: FontWeight.w700,
-                            color: AppTheme.textPrimary,
-                          ),
-                        ),
-                        Text(
-                          'Cotonou & Environs',
-                          style: GoogleFonts.outfit(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w400,
-                            color: AppTheme.muted,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const Spacer(),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 6,
-                      ),
-                      decoration: BoxDecoration(
-                        color: AppTheme.successContainer,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
+                    // Expanded + ellipsis à la place de l'ancien Spacer : la
+                    // barre du haut porte maintenant un bouton de plus (la
+                    // cloche), et sur un petit écran le titre doit se
+                    // tronquer au lieu de faire déborder la Row.
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Container(
-                            width: 6,
-                            height: 6,
-                            decoration: const BoxDecoration(
-                              color: AppTheme.success,
-                              shape: BoxShape.circle,
+                          Text(
+                            'Espace Livreur',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: GoogleFonts.outfit(
+                              fontSize: 20,
+                              fontWeight: FontWeight.w700,
+                              color: AppTheme.textPrimary,
                             ),
                           ),
-                          const SizedBox(width: 5),
                           Text(
-                            'En ligne',
+                            'Cotonou & Environs',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                             style: GoogleFonts.outfit(
                               fontSize: 12,
-                              fontWeight: FontWeight.w600,
-                              color: AppTheme.success,
+                              fontWeight: FontWeight.w400,
+                              color: AppTheme.muted,
                             ),
                           ),
                         ],
                       ),
                     ),
+                    const SizedBox(width: 8),
+                    // Vrai état de disponibilité du livreur (isAvailableNow),
+                    // partagé avec l'interrupteur du profil. Tant qu'il n'est
+                    // pas connu, rien n'est affiché (pas de faux « En ligne »).
+                    ValueListenableBuilder<bool?>(
+                      valueListenable:
+                          DelivererAvailability.instance.isAvailable,
+                      builder: (context, available, _) {
+                        if (available == null) return const SizedBox.shrink();
+                        return Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 6,
+                          ),
+                          decoration: BoxDecoration(
+                            color: available
+                                ? AppTheme.successContainer
+                                : AppTheme.surfaceVariant,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Container(
+                                width: 6,
+                                height: 6,
+                                decoration: BoxDecoration(
+                                  color: available
+                                      ? AppTheme.success
+                                      : AppTheme.muted,
+                                  shape: BoxShape.circle,
+                                ),
+                              ),
+                              const SizedBox(width: 5),
+                              Text(
+                                available ? 'En ligne' : 'Hors ligne',
+                                style: GoogleFonts.outfit(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  color: available
+                                      ? AppTheme.success
+                                      : AppTheme.muted,
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+                    const SizedBox(width: 10),
+                    _buildNotificationsButton(),
                     const SizedBox(width: 10),
                     Container(
                       width: 38,
@@ -367,14 +638,25 @@ class _DelivererDashboardScreenState extends State<DelivererDashboardScreen>
         Expanded(
           child: TabBarView(
             controller: _tabController,
-            children: const [
-              _MissionsDisponiblesTab(),
-              _MissionsEnCoursTab(),
-              _ColisRecuperesTab(),
-              _ColisLivresTab(),
-              _CoursesExpressTab(),
-              _RevenusTab(),
-              _RetraitTab(),
+            children: [
+              _MissionsDisponiblesTab(
+                missions: _assignedMissions,
+                onAction: _updateDeliveryStatus,
+                onRefresh: _loadData,
+              ),
+              _MissionsEnCoursTab(
+                missions: _inTransitMissions,
+                onAction: _updateDeliveryStatus,
+                onRefresh: _loadData,
+              ),
+              _ColisRecuperesTab(
+                colis: _pickedUpMissions,
+                onAction: _updateDeliveryStatus,
+              ),
+              _ColisLivresTab(colis: _finishedMissions),
+              const _CoursesExpressTab(),
+              const _RevenusTab(),
+              const _RetraitTab(),
             ],
           ),
         ),
@@ -382,66 +664,83 @@ class _DelivererDashboardScreenState extends State<DelivererDashboardScreen>
     );
   }
 
-  Widget _buildTabletLayout() {
-    return Row(
-      children: [
-        AsoukaaNavigationRail(
-          currentIndex: _currentNavIndex,
-          onTap: (i) {
-            setState(() => _currentNavIndex = i);
-            if (i == 0) Navigator.pushReplacementNamed(context, '/home-screen');
-          },
-        ),
-        const VerticalDivider(width: 1),
-        Expanded(child: _buildPhoneLayout()),
-      ],
-    );
-  }
 }
 
 // ─────────────────────────────────────────────────────────────
 // TAB 1 — Missions Disponibles
 // ─────────────────────────────────────────────────────────────
-class _MissionsDisponiblesTab extends StatefulWidget {
-  const _MissionsDisponiblesTab();
-
-  @override
-  State<_MissionsDisponiblesTab> createState() =>
-      _MissionsDisponiblesTabState();
-}
-
-class _MissionsDisponiblesTabState extends State<_MissionsDisponiblesTab> {
-  final List<Map<String, dynamic>> _availableMissions = [];
+class _MissionsDisponiblesTab extends StatelessWidget {
+  final List<Map<String, dynamic>> missions;
+  final Future<void> Function(String deliveryId, String status) onAction;
+  final Future<void> Function() onRefresh;
+  const _MissionsDisponiblesTab({
+    required this.missions,
+    required this.onAction,
+    required this.onRefresh,
+  });
 
   @override
   Widget build(BuildContext context) {
+    if (missions.isEmpty) {
+      return const Center(
+        child: _EmptyMissions(
+          icon: Icons.local_shipping_outlined,
+          message: 'Aucune mission à récupérer',
+          subtitle: 'Les vendeurs vous affectent leurs livraisons ici',
+        ),
+      );
+    }
+    final total = missions.fold<double>(
+      0,
+      (s, m) => s + ((m['rewardValue'] as num?)?.toDouble() ?? 0),
+    );
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
         _SummaryRow(
           items: [
             _SummaryItem(
-              label: 'Disponibles',
-              value: '${_availableMissions.length}',
+              label: 'À récupérer',
+              value: '${missions.length}',
               icon: Icons.local_shipping_outlined,
               color: AppTheme.primary,
             ),
             _SummaryItem(
-              label: 'Rayon max',
-              value: '25 km',
-              icon: Icons.location_on_outlined,
-              color: AppTheme.warning,
-            ),
-            _SummaryItem(
-              label: 'Moy. gain',
-              value: '4 250 F',
+              label: 'Frais livraison',
+              value: '${total.round()} F',
               icon: Icons.payments_outlined,
               color: AppTheme.success,
             ),
           ],
         ),
         const SizedBox(height: 16),
-        ..._availableMissions.map((m) => _MissionCard(mission: m)),
+        ...missions.map(
+          (m) => _MissionCard(
+            mission: m,
+            primaryLabel: 'Récupérer',
+            onPrimaryAction: () async {
+              // Le ramassage exige une preuve (photo + état du colis) —
+              // elle déclenche elle-même le passage à "récupéré" côté
+              // serveur, on ne bascule plus le statut directement ici.
+              final result = await Navigator.pushNamed(
+                context,
+                '/delivery-proof-screen',
+                arguments: {
+                  'deliveryId': m['rawId']?.toString() ?? '',
+                  'mode': 'pickup',
+                  'id': m['id'],
+                  'client': m['buyer'] ?? m['client'],
+                  'address': m['address'],
+                  'items': m['description'],
+                  'weight': m['weight'],
+                  'amount': m['reward'],
+                  'phone': m['phone'] ?? '',
+                },
+              );
+              if (result == true) await onRefresh();
+            },
+          ),
+        ),
       ],
     );
   }
@@ -449,7 +748,13 @@ class _MissionsDisponiblesTabState extends State<_MissionsDisponiblesTab> {
 
 class _MissionCard extends StatelessWidget {
   final Map<String, dynamic> mission;
-  const _MissionCard({required this.mission});
+  final String primaryLabel;
+  final VoidCallback? onPrimaryAction;
+  const _MissionCard({
+    required this.mission,
+    this.primaryLabel = 'Accepter',
+    this.onPrimaryAction,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -521,6 +826,8 @@ class _MissionCard extends StatelessWidget {
                 _RouteRow(
                   pickup: mission['pickup'],
                   delivery: mission['delivery'],
+                  latitude: mission['latitude'] as double?,
+                  longitude: mission['longitude'] as double?,
                 ),
                 const SizedBox(height: 10),
                 Row(
@@ -567,20 +874,9 @@ class _MissionCard extends StatelessWidget {
                 Container(width: 1, height: 36, color: AppTheme.outlineVariant),
                 Expanded(
                   child: TextButton(
-                    onPressed: () {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text(
-                            'Mission ${mission['id']} acceptée !',
-                            style: GoogleFonts.outfit(),
-                          ),
-                          backgroundColor: AppTheme.success,
-                          behavior: SnackBarBehavior.floating,
-                        ),
-                      );
-                    },
+                    onPressed: onPrimaryAction,
                     child: Text(
-                      'Accepter',
+                      primaryLabel,
                       style: GoogleFonts.outfit(
                         fontSize: 13,
                         fontWeight: FontWeight.w600,
@@ -601,27 +897,31 @@ class _MissionCard extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────
 // TAB 2 — Missions En Cours
 // ─────────────────────────────────────────────────────────────
-class _MissionsEnCoursTab extends StatefulWidget {
-  const _MissionsEnCoursTab();
-
-  @override
-  State<_MissionsEnCoursTab> createState() => _MissionsEnCoursTabState();
-}
-
-class _MissionsEnCoursTabState extends State<_MissionsEnCoursTab> {
-  final List<Map<String, dynamic>> _myMissions = [];
+class _MissionsEnCoursTab extends StatelessWidget {
+  final List<Map<String, dynamic>> missions;
+  final Future<void> Function(String deliveryId, String status) onAction;
+  final Future<void> Function() onRefresh;
+  const _MissionsEnCoursTab({
+    required this.missions,
+    required this.onAction,
+    required this.onRefresh,
+  });
 
   @override
   Widget build(BuildContext context) {
-    if (_myMissions.isEmpty) {
+    if (missions.isEmpty) {
       return const Center(
         child: _EmptyMissions(
           icon: Icons.directions_bike_rounded,
-          message: 'Aucune mission en cours',
-          subtitle: 'Acceptez une mission dans l\'onglet Disponibles',
+          message: 'Aucune livraison en cours',
+          subtitle: 'Démarrez une livraison depuis Colis récupérés',
         ),
       );
     }
+    final total = missions.fold<double>(
+      0,
+      (s, m) => s + ((m['rewardValue'] as num?)?.toDouble() ?? 0),
+    );
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
@@ -629,26 +929,49 @@ class _MissionsEnCoursTabState extends State<_MissionsEnCoursTab> {
           items: [
             _SummaryItem(
               label: 'En cours',
-              value: '${_myMissions.length}',
+              value: '${missions.length}',
               icon: Icons.directions_bike_rounded,
               color: AppTheme.warning,
             ),
             _SummaryItem(
-              label: 'À gagner',
-              value: '7 900 F',
+              label: 'Frais livraison',
+              value: '${total.round()} F',
               icon: Icons.payments_outlined,
               color: AppTheme.success,
-            ),
-            _SummaryItem(
-              label: 'Km restants',
-              value: '27.5',
-              icon: Icons.route_rounded,
-              color: AppTheme.primary,
             ),
           ],
         ),
         const SizedBox(height: 16),
-        ..._myMissions.map((m) => _EnCoursCard(mission: m)),
+        ...missions.map(
+          (m) => _EnCoursCard(
+            mission: m,
+            primaryLabel: 'Marquer livré',
+            onPrimaryAction: () async {
+              // La remise finale exige une preuve (scan du QR du
+              // client + GPS + signature) — c'est elle qui déclenche
+              // "Livrée", jamais un simple clic.
+              final result = await Navigator.pushNamed(
+                context,
+                '/delivery-proof-screen',
+                arguments: {
+                  'deliveryId': m['rawId']?.toString() ?? '',
+                  'mode': 'handoff',
+                  'id': m['id'],
+                  'client': m['buyer'] ?? m['client'],
+                  'address': m['address'],
+                  'items': m['description'],
+                  'weight': m['weight'],
+                  'amount': m['reward'],
+                  'phone': m['phone'] ?? '',
+                },
+              );
+              if (result == true) await onRefresh();
+            },
+            secondaryLabel: 'Échec',
+            onSecondaryAction: () =>
+                onAction(m['rawId']?.toString() ?? '', 'livraison echouée'),
+          ),
+        ),
       ],
     );
   }
@@ -656,7 +979,17 @@ class _MissionsEnCoursTabState extends State<_MissionsEnCoursTab> {
 
 class _EnCoursCard extends StatelessWidget {
   final Map<String, dynamic> mission;
-  const _EnCoursCard({required this.mission});
+  final String primaryLabel;
+  final VoidCallback? onPrimaryAction;
+  final VoidCallback? onSecondaryAction;
+  final String secondaryLabel;
+  const _EnCoursCard({
+    required this.mission,
+    this.primaryLabel = 'Confirmer',
+    this.onPrimaryAction,
+    this.secondaryLabel = 'Appeler',
+    this.onSecondaryAction,
+  });
 
   Color _statusColor() {
     switch (mission['statusColor']) {
@@ -726,7 +1059,12 @@ class _EnCoursCard extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 10),
-            _RouteRow(pickup: mission['pickup'], delivery: mission['delivery']),
+            _RouteRow(
+              pickup: mission['pickup'],
+              delivery: mission['delivery'],
+              latitude: mission['latitude'] as double?,
+              longitude: mission['longitude'] as double?,
+            ),
             const SizedBox(height: 10),
             Row(
               children: [
@@ -764,9 +1102,9 @@ class _EnCoursCard extends StatelessWidget {
               children: [
                 Expanded(
                   child: OutlinedButton.icon(
-                    onPressed: () {},
+                    onPressed: onSecondaryAction,
                     icon: const Icon(Icons.phone_rounded, size: 16),
-                    label: Text('Appeler', style: GoogleFonts.outfit()),
+                    label: Text(secondaryLabel, style: GoogleFonts.outfit()),
                     style: OutlinedButton.styleFrom(
                       foregroundColor: AppTheme.primary,
                       side: const BorderSide(color: AppTheme.primary),
@@ -777,23 +1115,12 @@ class _EnCoursCard extends StatelessWidget {
                 const SizedBox(width: 10),
                 Expanded(
                   child: ElevatedButton.icon(
-                    onPressed: () {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text(
-                            'Statut mis à jour pour ${mission['id']}',
-                            style: GoogleFonts.outfit(),
-                          ),
-                          backgroundColor: AppTheme.primary,
-                          behavior: SnackBarBehavior.floating,
-                        ),
-                      );
-                    },
+                    onPressed: onPrimaryAction,
                     icon: const Icon(
                       Icons.check_circle_outline_rounded,
                       size: 16,
                     ),
-                    label: Text('Confirmer', style: GoogleFonts.outfit()),
+                    label: Text(primaryLabel, style: GoogleFonts.outfit()),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: AppTheme.primary,
                       foregroundColor: Colors.white,
@@ -814,40 +1141,21 @@ class _EnCoursCard extends StatelessWidget {
 // TAB 3 — Colis Récupérés
 // ─────────────────────────────────────────────────────────────
 class _ColisRecuperesTab extends StatelessWidget {
-  const _ColisRecuperesTab();
+  final List<Map<String, dynamic>> colis;
+  final Future<void> Function(String deliveryId, String status) onAction;
+  const _ColisRecuperesTab({required this.colis, required this.onAction});
 
   @override
   Widget build(BuildContext context) {
-    final List<Map<String, dynamic>> colis = [
-      {
-        'id': 'CLR-101',
-        'description': 'Tissu Wax 6 yards',
-        'seller': 'Boutique Aminata',
-        'buyer': 'Rokhaya Sow',
-        'address': 'Cadjehoun, Cotonou',
-        'retrievedAt': 'Aujourd\'hui 09:15',
-        'weight': '2.5 kg',
-      },
-      {
-        'id': 'CLR-102',
-        'description': 'Chaussures x2 paires',
-        'seller': 'Mode Africaine Shop',
-        'buyer': 'Ibrahima Fall',
-        'address': 'Akpakpa, Cotonou',
-        'retrievedAt': 'Aujourd\'hui 10:40',
-        'weight': '1.8 kg',
-      },
-      {
-        'id': 'CLR-103',
-        'description': 'Accessoires bijoux',
-        'seller': 'Bijoux Cotonou',
-        'buyer': 'Aissatou Bah',
-        'address': 'Fidjrossè, Cotonou',
-        'retrievedAt': 'Aujourd\'hui 11:05',
-        'weight': '0.5 kg',
-      },
-    ];
-
+    if (colis.isEmpty) {
+      return const Center(
+        child: _EmptyMissions(
+          icon: Icons.inventory_2_outlined,
+          message: 'Aucun colis récupéré',
+          subtitle: 'Récupérez un colis depuis Missions disponibles',
+        ),
+      );
+    }
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
@@ -860,21 +1168,44 @@ class _ColisRecuperesTab extends StatelessWidget {
               color: AppTheme.primary,
             ),
             _SummaryItem(
-              label: 'Poids total',
-              value: '4.8 kg',
-              icon: Icons.scale_rounded,
-              color: AppTheme.warning,
-            ),
-            _SummaryItem(
               label: 'À livrer',
-              value: '3',
+              value: '${colis.length}',
               icon: Icons.pending_actions_rounded,
               color: AppTheme.success,
             ),
           ],
         ),
         const SizedBox(height: 16),
-        ...colis.map((c) => _ColisCard(colis: c, showDeliverButton: true)),
+        Container(
+          margin: const EdgeInsets.only(bottom: 12),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: AppTheme.warning.withAlpha(20),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.hourglass_top_rounded, size: 16, color: AppTheme.warning),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'En attente que le vendeur démarre la livraison',
+                  style: GoogleFonts.outfit(fontSize: 12, color: AppTheme.textSecondary),
+                ),
+              ),
+            ],
+          ),
+        ),
+        // Le livreur n'a plus d'action ici : la preuve de ramassage a
+        // déjà été fournie (voir Missions disponibles), et c'est
+        // désormais le vendeur qui démarre la livraison depuis son
+        // propre tableau de bord.
+        ...colis.map(
+          (c) => _ColisCard(
+            colis: c,
+            showDeliverButton: false,
+          ),
+        ),
       ],
     );
   }
@@ -884,70 +1215,45 @@ class _ColisRecuperesTab extends StatelessWidget {
 // TAB 4 — Colis Livrés
 // ─────────────────────────────────────────────────────────────
 class _ColisLivresTab extends StatelessWidget {
-  const _ColisLivresTab();
+  final List<Map<String, dynamic>> colis;
+  const _ColisLivresTab({required this.colis});
 
   @override
   Widget build(BuildContext context) {
-    final List<Map<String, dynamic>> livres = [
-      {
-        'id': 'CLV-088',
-        'description': 'Boubou brodé homme',
-        'seller': 'Tailor Cotonou',
-        'buyer': 'Cheikh Diop',
-        'address': 'Haie Vive, Cotonou',
-        'retrievedAt': 'Hier 14:30',
-        'weight': '1.2 kg',
-        'reward': '2 200 FCFA',
-      },
-      {
-        'id': 'CLV-089',
-        'description': 'Sac à main cuir',
-        'seller': 'Maroquinerie Bénin',
-        'buyer': 'Mariama Camara',
-        'address': 'Zogbo, Cotonou',
-        'retrievedAt': 'Hier 16:00',
-        'weight': '0.8 kg',
-        'reward': '1 800 FCFA',
-      },
-      {
-        'id': 'CLV-090',
-        'description': 'Épices et condiments',
-        'seller': 'Épicerie Dantokpa',
-        'buyer': 'Ndèye Mbaye',
-        'address': 'Gbèdjromèdé, Cotonou',
-        'retrievedAt': 'Avant-hier 11:20',
-        'weight': '3.0 kg',
-        'reward': '3 500 FCFA',
-      },
-    ];
-
+    if (colis.isEmpty) {
+      return const Center(
+        child: _EmptyMissions(
+          icon: Icons.check_circle_outline_rounded,
+          message: 'Aucune livraison terminée',
+          subtitle: 'Vos livraisons terminées apparaîtront ici',
+        ),
+      );
+    }
+    final total = colis.fold<double>(
+      0,
+      (s, m) => s + ((m['rewardValue'] as num?)?.toDouble() ?? 0),
+    );
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
         _SummaryRow(
           items: [
             _SummaryItem(
-              label: 'Livrés',
-              value: '${livres.length}',
+              label: 'Terminées',
+              value: '${colis.length}',
               icon: Icons.check_circle_outline_rounded,
               color: AppTheme.success,
             ),
             _SummaryItem(
-              label: 'Cette semaine',
-              value: '12',
-              icon: Icons.calendar_today_rounded,
-              color: AppTheme.primary,
-            ),
-            _SummaryItem(
-              label: 'Gains',
-              value: '7 500 F',
+              label: 'Frais livraison',
+              value: '${total.round()} F',
               icon: Icons.payments_outlined,
               color: AppTheme.warning,
             ),
           ],
         ),
         const SizedBox(height: 16),
-        ...livres.map((c) => _ColisCard(colis: c, showDeliverButton: false)),
+        ...colis.map((c) => _ColisCard(colis: c, showDeliverButton: false)),
       ],
     );
   }
@@ -957,7 +1263,14 @@ class _ColisLivresTab extends StatelessWidget {
 class _ColisCard extends StatelessWidget {
   final Map<String, dynamic> colis;
   final bool showDeliverButton;
-  const _ColisCard({required this.colis, required this.showDeliverButton});
+  final String actionLabel;
+  final VoidCallback? onAction;
+  const _ColisCard({
+    required this.colis,
+    required this.showDeliverButton,
+    this.actionLabel = 'Livré',
+    this.onAction,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1038,11 +1351,15 @@ class _ColisCard extends StatelessWidget {
             children: [
               const Icon(Icons.store_outlined, size: 13, color: AppTheme.muted),
               const SizedBox(width: 4),
-              Text(
-                colis['seller'],
-                style: GoogleFonts.outfit(
-                  fontSize: 12,
-                  color: AppTheme.textSecondary,
+              Flexible(
+                child: Text(
+                  colis['seller'],
+                  style: GoogleFonts.outfit(
+                    fontSize: 12,
+                    color: AppTheme.textSecondary,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
               const SizedBox(width: 12),
@@ -1052,11 +1369,15 @@ class _ColisCard extends StatelessWidget {
                 color: AppTheme.muted,
               ),
               const SizedBox(width: 4),
-              Text(
-                colis['buyer'],
-                style: GoogleFonts.outfit(
-                  fontSize: 12,
-                  color: AppTheme.textSecondary,
+              Flexible(
+                child: Text(
+                  colis['buyer'],
+                  style: GoogleFonts.outfit(
+                    fontSize: 12,
+                    color: AppTheme.textSecondary,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
             ],
@@ -1132,21 +1453,10 @@ class _ColisCard extends StatelessWidget {
                 const SizedBox(width: 10),
                 Expanded(
                   child: ElevatedButton.icon(
-                    onPressed: () {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text(
-                            '${colis['id']} marqué comme livré !',
-                            style: GoogleFonts.outfit(),
-                          ),
-                          backgroundColor: AppTheme.success,
-                          behavior: SnackBarBehavior.floating,
-                        ),
-                      );
-                    },
+                    onPressed: onAction,
                     icon: const Icon(Icons.check_rounded, size: 16),
                     label: Text(
-                      'Livré',
+                      actionLabel,
                       style: GoogleFonts.outfit(fontSize: 13),
                     ),
                     style: ElevatedButton.styleFrom(
@@ -1176,259 +1486,230 @@ class _RevenusTab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final List<Map<String, dynamic>> transactions = [
-      {
-        'id': 'TXN-441',
-        'description': 'Livraison CLV-090',
-        'date': '18 Mar 2026',
-        'amount': '3 500 FCFA',
-        'type': 'credit',
-      },
-      {
-        'id': 'TXN-440',
-        'description': 'Livraison CLV-089',
-        'date': '18 Mar 2026',
-        'amount': '1 800 FCFA',
-        'type': 'credit',
-      },
-      {
-        'id': 'TXN-439',
-        'description': 'Livraison CLV-088',
-        'date': '17 Mar 2026',
-        'amount': '2 200 FCFA',
-        'type': 'credit',
-      },
-      {
-        'id': 'TXN-438',
-        'description': 'Retrait Orange Money',
-        'date': '15 Mar 2026',
-        'amount': '-25 000 FCFA',
-        'type': 'debit',
-      },
-      {
-        'id': 'TXN-437',
-        'description': 'Livraison CLV-085',
-        'date': '14 Mar 2026',
-        'amount': '4 100 FCFA',
-        'type': 'credit',
-      },
-    ];
-
-    return ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
-        // Balance card
-        Container(
-          padding: const EdgeInsets.all(20),
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              colors: [AppTheme.primary, AppTheme.primary.withAlpha(191)],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-            ),
-            borderRadius: BorderRadius.circular(16),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Solde disponible',
-                style: GoogleFonts.outfit(fontSize: 13, color: Colors.white70),
-              ),
-              const SizedBox(height: 6),
-              Text(
-                '47 350 FCFA',
-                style: GoogleFonts.outfit(
-                  fontSize: 28,
-                  fontWeight: FontWeight.w800,
-                  color: Colors.white,
-                ),
-              ),
-              const SizedBox(height: 16),
-              Row(
-                children: [
-                  _BalanceStat(
-                    label: 'Ce mois',
-                    value: '38 200 F',
-                    icon: Icons.trending_up_rounded,
-                  ),
-                  const SizedBox(width: 24),
-                  _BalanceStat(
-                    label: 'Total livraisons',
-                    value: '127',
-                    icon: Icons.local_shipping_rounded,
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 16),
-        // Monthly bar chart
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: AppTheme.surface,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: AppTheme.outlineVariant),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Gains mensuels (FCFA)',
-                style: GoogleFonts.outfit(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                  color: AppTheme.textPrimary,
-                ),
-              ),
-              const SizedBox(height: 16),
-              _SimpleBarChart(
-                data: const [
-                  {'label': 'Oct', 'value': 0.55},
-                  {'label': 'Nov', 'value': 0.70},
-                  {'label': 'Déc', 'value': 0.90},
-                  {'label': 'Jan', 'value': 0.65},
-                  {'label': 'Fév', 'value': 0.80},
-                  {'label': 'Mar', 'value': 1.0},
-                ],
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 16),
-        Text(
-          'Transactions récentes',
-          style: GoogleFonts.outfit(
-            fontSize: 15,
-            fontWeight: FontWeight.w700,
-            color: AppTheme.textPrimary,
-          ),
-        ),
-        const SizedBox(height: 10),
-        ...transactions.map((t) => _TransactionRow(tx: t)),
-      ],
+    // Les chiffres affichés ici étaient inventés (graphique et
+    // transactions en dur). Tant que le calcul réel des gains livreur
+    // n'existe pas côté backend, on affiche un état honnête.
+    return const Center(
+      child: _EmptyMissions(
+        icon: Icons.bar_chart_rounded,
+        message: 'Bientôt disponible',
+        subtitle: 'Le suivi de tes gains arrive bientôt.',
+      ),
     );
   }
 }
 
-class _BalanceStat extends StatelessWidget {
-  final String label;
-  final String value;
-  final IconData icon;
-  const _BalanceStat({
-    required this.label,
-    required this.value,
-    required this.icon,
-  });
+class _RetraitTab extends StatefulWidget {
+  const _RetraitTab();
+
+  @override
+  State<_RetraitTab> createState() => _RetraitTabState();
+}
+
+// Le calcul réel des gains livreur existe maintenant côté serveur (voir
+// DeliveryService.createDeliveryEarning, déclenché à chaque remise au
+// client confirmée) — même principe que _RetraitTab côté vendeur
+// (seller_dashboard_screen.dart) : un pourcentage des frais de livraison
+// de chaque course, individualisable par livreur (80% par défaut pour lui,
+// 20% pour la plateforme, tant que l'admin n'a pas fixé un taux différent
+// pour ce livreur précis). Le vrai virement reste manuel pour l'instant —
+// pas de bouton de retrait qui déclenche un paiement automatique.
+class _RetraitTabState extends State<_RetraitTab> {
+  bool _isLoading = true;
+  bool _hasError = false;
+  num _soldeDisponible = 0;
+  num _totalRecu = 0;
+  List<Map<String, dynamic>> _history = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadEarnings();
+  }
+
+  Future<void> _loadEarnings() async {
+    setState(() {
+      _isLoading = true;
+      _hasError = false;
+    });
+    try {
+      final res = await ApiService.instance.client
+          .get('/api/v1/delivery-agents/me/earnings');
+      final data = res.data as Map<String, dynamic>;
+      final historique = (data['historique'] as List?)
+              ?.whereType<Map>()
+              .map((h) => h.cast<String, dynamic>())
+              .toList() ??
+          [];
+      if (mounted) {
+        setState(() {
+          _soldeDisponible =
+              (double.tryParse(data['soldeDisponible']?.toString() ?? '') ?? 0);
+          _totalRecu =
+              (double.tryParse(data['totalRecu']?.toString() ?? '') ?? 0);
+          _history = historique;
+          _isLoading = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() { _isLoading = false; _hasError = true; });
+    }
+  }
+
+  static String _formatAmount(num amount) {
+    final s = amount.round().toString();
+    final buf = StringBuffer();
+    for (var i = 0; i < s.length; i++) {
+      if (i > 0 && (s.length - i) % 3 == 0) buf.write(' ');
+      buf.write(s[i]);
+    }
+    return '${buf.toString()} FCFA';
+  }
+
+  static String _formatHistoryDate(dynamic dateStr) {
+    if (dateStr == null) return '';
+    try {
+      final dt = DateTime.parse(dateStr.toString());
+      const mois = [
+        'jan', 'fév', 'mars', 'avr', 'mai', 'juin',
+        'juil', 'août', 'sept', 'oct', 'nov', 'déc',
+      ];
+      return '${dt.day} ${mois[dt.month - 1]} ${dt.year}';
+    } catch (_) {
+      return '';
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Icon(icon, size: 14, color: Colors.white70),
-        const SizedBox(width: 4),
-        Column(
+    if (_isLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (_hasError) {
+      return ConnectionErrorScreen(
+        onRetry: _loadEarnings,
+        title: 'Impossible de charger vos gains',
+        message: 'Vérifiez votre connexion internet et réessayez.',
+      );
+    }
+    return RefreshIndicator(
+      onRefresh: _loadEarnings,
+      child: SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(16),
+        child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            _buildBalanceCard(),
+            const SizedBox(height: 16),
+            _buildWithdrawInfoCard(),
+            const SizedBox(height: 20),
             Text(
-              label,
-              style: GoogleFonts.outfit(fontSize: 10, color: Colors.white60),
-            ),
-            Text(
-              value,
+              'Historique des livraisons payées',
               style: GoogleFonts.outfit(
-                fontSize: 13,
+                fontSize: 15,
                 fontWeight: FontWeight.w700,
-                color: Colors.white,
+                color: AppTheme.textPrimary,
               ),
             ),
+            const SizedBox(height: 12),
+            if (_history.isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                child: Text(
+                  'Aucune livraison réglée pour le moment.',
+                  style: GoogleFonts.outfit(
+                    fontSize: 13,
+                    color: AppTheme.textSecondary,
+                  ),
+                ),
+              )
+            else
+              ..._history.map((h) => _EarningHistoryItem(
+                    amount: _formatAmount(
+                      (double.tryParse(h['montant']?.toString() ?? '') ?? 0),
+                    ),
+                    orderNumber: (h['orderNumber'] ?? '—').toString(),
+                    date: _formatHistoryDate(h['date']),
+                    isPaid: h['statut'] == 'payé',
+                  )),
           ],
         ),
-      ],
-    );
-  }
-}
-
-class _SimpleBarChart extends StatelessWidget {
-  final List<Map<String, dynamic>> data;
-  const _SimpleBarChart({required this.data});
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      height: 80,
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: data.map((d) {
-          final value = (d['value'] as double);
-          final isMax = value == 1.0;
-          return Expanded(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 3),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  Container(
-                    height: 60 * value,
-                    decoration: BoxDecoration(
-                      color: isMax
-                          ? AppTheme.primary
-                          : AppTheme.primary.withAlpha(89),
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    d['label'],
-                    style: GoogleFonts.outfit(
-                      fontSize: 10,
-                      color: AppTheme.muted,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          );
-        }).toList(),
       ),
     );
   }
-}
 
-class _TransactionRow extends StatelessWidget {
-  final Map<String, dynamic> tx;
-  const _TransactionRow({required this.tx});
-
-  @override
-  Widget build(BuildContext context) {
-    final isCredit = tx['type'] == 'credit';
+  Widget _buildBalanceCard() {
     return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: AppTheme.secondary,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Montant dû par Asoukaa (en attente de versement)',
+            style: GoogleFonts.outfit(
+              fontSize: 13,
+              color: Colors.white.withAlpha(160),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            _formatAmount(_soldeDisponible),
+            style: GoogleFonts.outfit(
+              fontSize: 30,
+              fontWeight: FontWeight.w800,
+              color: Colors.white,
+            ),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            'Total déjà reçu : ${_formatAmount(_totalRecu)}',
+            style: GoogleFonts.outfit(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: Colors.white.withAlpha(200),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Pas de bouton de retrait ici : le vrai virement reste, pour l'instant,
+  // un processus manuel piloté par l'équipe Asoukaa (même limite que côté
+  // vendeur — voir seller_dashboard_screen.dart, _buildWithdrawInfoCard).
+  Widget _buildWithdrawInfoCard() {
+    return Container(
       decoration: BoxDecoration(
         color: AppTheme.surface,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: AppTheme.outlineVariant),
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withAlpha(8),
+            blurRadius: 12,
+            offset: const Offset(0, 2),
+          ),
+        ],
       ),
+      padding: const EdgeInsets.all(16),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Container(
-            width: 36,
-            height: 36,
+            width: 40,
+            height: 40,
             decoration: BoxDecoration(
-              color: isCredit
-                  ? AppTheme.successContainer
-                  : AppTheme.errorContainer,
-              borderRadius: BorderRadius.circular(8),
+              color: AppTheme.warning.withAlpha(30),
+              borderRadius: BorderRadius.circular(10),
             ),
-            child: Icon(
-              isCredit
-                  ? Icons.arrow_downward_rounded
-                  : Icons.arrow_upward_rounded,
-              size: 18,
-              color: isCredit ? AppTheme.success : AppTheme.error,
+            child: const Icon(
+              Icons.info_outline_rounded,
+              color: AppTheme.warning,
+              size: 20,
             ),
           ),
           const SizedBox(width: 12),
@@ -1437,481 +1718,114 @@ class _TransactionRow extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  tx['description'],
+                  'Versement manuel pour l\'instant',
+                  style: GoogleFonts.outfit(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: AppTheme.textPrimary,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'L\'équipe Asoukaa te verse ce montant directement. Un versement automatique arrivera plus tard.',
+                  style: GoogleFonts.outfit(
+                    fontSize: 12,
+                    color: AppTheme.textSecondary,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _EarningHistoryItem extends StatelessWidget {
+  final String amount;
+  final String orderNumber;
+  final String date;
+  final bool isPaid;
+
+  const _EarningHistoryItem({
+    required this.amount,
+    required this.orderNumber,
+    required this.date,
+    required this.isPaid,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: AppTheme.surface,
+        borderRadius: BorderRadius.circular(14),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withAlpha(6),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Commande #$orderNumber',
                   style: GoogleFonts.outfit(
                     fontSize: 13,
                     fontWeight: FontWeight.w600,
                     color: AppTheme.textPrimary,
                   ),
                 ),
-                Text(
-                  tx['date'],
-                  style: GoogleFonts.outfit(
-                    fontSize: 11,
-                    color: AppTheme.muted,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Text(
-            tx['amount'],
-            style: GoogleFonts.outfit(
-              fontSize: 14,
-              fontWeight: FontWeight.w700,
-              color: isCredit ? AppTheme.success : AppTheme.error,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────
-// TAB 6 — Retrait (Fund Withdrawal)
-// ─────────────────────────────────────────────────────────────
-class _RetraitTab extends StatefulWidget {
-  const _RetraitTab();
-
-  @override
-  State<_RetraitTab> createState() => _RetraitTabState();
-}
-
-class _RetraitTabState extends State<_RetraitTab> {
-  final TextEditingController _amountController = TextEditingController();
-  final TextEditingController _phoneController = TextEditingController();
-  String _selectedMethod = 'MTN Mobile Money';
-  bool _isProcessing = false;
-
-  final List<String> _methods = [
-    'MTN Mobile Money',
-    'Moov Money',
-    'Wave',
-    'Virement bancaire',
-  ];
-
-  final List<Map<String, dynamic>> _withdrawalHistory = [
-    {
-      'id': 'RTR-001',
-      'amount': '15 000 FCFA',
-      'method': 'MTN Mobile Money',
-      'date': '18 Mar 2026',
-      'status': 'Validé',
-      'phone': '+229 97 XX XX XX',
-    },
-    {
-      'id': 'RTR-002',
-      'amount': '8 500 FCFA',
-      'method': 'Wave',
-      'date': '12 Mar 2026',
-      'status': 'Validé',
-      'phone': '+229 97 XX XX XX',
-    },
-    {
-      'id': 'RTR-003',
-      'amount': '22 000 FCFA',
-      'method': 'Moov Money',
-      'date': '5 Mar 2026',
-      'status': 'En attente',
-      'phone': '+229 96 XX XX XX',
-    },
-  ];
-
-  @override
-  void dispose() {
-    _amountController.dispose();
-    _phoneController.dispose();
-    super.dispose();
-  }
-
-  void _requestWithdrawal() async {
-    final amount = double.tryParse(_amountController.text.replaceAll(' ', ''));
-    if (amount == null || amount < 1000) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Montant minimum: 1 000 FCFA'),
-          backgroundColor: Colors.red,
-        ),
-      );
-      return;
-    }
-    if (_phoneController.text.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Veuillez entrer votre numéro'),
-          backgroundColor: Colors.red,
-        ),
-      );
-      return;
-    }
-    setState(() => _isProcessing = true);
-    await Future.delayed(const Duration(seconds: 2));
-    if (mounted) {
-      setState(() {
-        _isProcessing = false;
-        _withdrawalHistory.insert(0, {
-          'id': 'RTR-${_withdrawalHistory.length + 1}',
-          'amount': '${_amountController.text} FCFA',
-          'method': _selectedMethod,
-          'date': 'Aujourd\'hui',
-          'status': 'En attente',
-          'phone': _phoneController.text,
-        });
-        _amountController.clear();
-        _phoneController.clear();
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Demande de retrait soumise avec succès !'),
-          backgroundColor: Color(0xFF10B981),
-        ),
-      );
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Balance card
-          Container(
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                colors: [Color(0xFFFF6210), Color(0xFFFF8C42)],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-              ),
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: Row(
-              children: [
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Solde disponible',
-                      style: GoogleFonts.outfit(
-                        fontSize: 13,
-                        color: Colors.white.withAlpha(200),
-                      ),
+                if (date.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    date,
+                    style: GoogleFonts.outfit(
+                      fontSize: 11,
+                      color: AppTheme.textSecondary,
                     ),
-                    const SizedBox(height: 4),
-                    Text(
-                      '45 700 FCFA',
-                      style: GoogleFonts.outfit(
-                        fontSize: 28,
-                        fontWeight: FontWeight.w800,
-                        color: Colors.white,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      'Cotonou, Bénin',
-                      style: GoogleFonts.outfit(
-                        fontSize: 12,
-                        color: Colors.white.withAlpha(180),
-                      ),
-                    ),
-                  ],
-                ),
-                const Spacer(),
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withAlpha(30),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: const Icon(
-                    Icons.account_balance_wallet_rounded,
-                    color: Colors.white,
-                    size: 28,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 20),
-          Text(
-            'Demander un retrait',
-            style: GoogleFonts.outfit(
-              fontSize: 16,
-              fontWeight: FontWeight.w700,
-              color: const Color(0xFF1A1A1A),
-            ),
-          ),
-          const SizedBox(height: 12),
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(14),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withAlpha(8),
-                  blurRadius: 10,
-                  offset: const Offset(0, 2),
-                ),
-              ],
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Méthode de paiement',
-                  style: GoogleFonts.outfit(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: const Color(0xFF1A1A1A),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                DropdownButtonFormField<String>(
-                  initialValue: _selectedMethod,
-                  decoration: InputDecoration(
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(10),
-                      borderSide: const BorderSide(color: Color(0xFFE0E0E0)),
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 10,
-                    ),
-                  ),
-                  items: _methods
-                      .map(
-                        (m) => DropdownMenuItem(
-                          value: m,
-                          child: Text(
-                            m,
-                            style: GoogleFonts.outfit(fontSize: 13),
-                          ),
-                        ),
-                      )
-                      .toList(),
-                  onChanged: (v) => setState(() => _selectedMethod = v!),
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  'Numéro de téléphone',
-                  style: GoogleFonts.outfit(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: const Color(0xFF1A1A1A),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: _phoneController,
-                  keyboardType: TextInputType.phone,
-                  decoration: InputDecoration(
-                    hintText: '+229 97 XX XX XX',
-                    hintStyle: GoogleFonts.outfit(
-                      fontSize: 13,
-                      color: const Color(0xFF9E9E9E),
-                    ),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(10),
-                      borderSide: const BorderSide(color: Color(0xFFE0E0E0)),
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 10,
-                    ),
-                    prefixIcon: const Icon(
-                      Icons.phone_rounded,
-                      size: 18,
-                      color: Color(0xFF9E9E9E),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  'Montant (FCFA)',
-                  style: GoogleFonts.outfit(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: const Color(0xFF1A1A1A),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: _amountController,
-                  keyboardType: TextInputType.number,
-                  decoration: InputDecoration(
-                    hintText: 'Ex: 10000',
-                    hintStyle: GoogleFonts.outfit(
-                      fontSize: 13,
-                      color: const Color(0xFF9E9E9E),
-                    ),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(10),
-                      borderSide: const BorderSide(color: Color(0xFFE0E0E0)),
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 10,
-                    ),
-                    prefixIcon: const Icon(
-                      Icons.payments_rounded,
-                      size: 18,
-                      color: Color(0xFF9E9E9E),
-                    ),
-                    suffixText: 'FCFA',
-                  ),
-                ),
-                const SizedBox(height: 16),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton(
-                    onPressed: _isProcessing ? null : _requestWithdrawal,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFFFF6210),
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      elevation: 0,
-                    ),
-                    child: _isProcessing
-                        ? const SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(
-                              color: Colors.white,
-                              strokeWidth: 2,
-                            ),
-                          )
-                        : Text(
-                            'Demander le retrait',
-                            style: GoogleFonts.outfit(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 20),
-          Text(
-            'Historique des retraits',
-            style: GoogleFonts.outfit(
-              fontSize: 16,
-              fontWeight: FontWeight.w700,
-              color: const Color(0xFF1A1A1A),
-            ),
-          ),
-          const SizedBox(height: 12),
-          ..._withdrawalHistory.map((w) {
-            final isValidated = w['status'] == 'Validé';
-            return Container(
-              margin: const EdgeInsets.only(bottom: 10),
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: const Color(0xFFE0E0E0)),
-              ),
-              child: Row(
-                children: [
-                  Container(
-                    width: 40,
-                    height: 40,
-                    decoration: BoxDecoration(
-                      color: isValidated
-                          ? const Color(0xFF10B981).withAlpha(25)
-                          : const Color(0xFFD97706).withAlpha(25),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Icon(
-                      isValidated
-                          ? Icons.check_circle_rounded
-                          : Icons.pending_rounded,
-                      color: isValidated
-                          ? const Color(0xFF10B981)
-                          : const Color(0xFFD97706),
-                      size: 20,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          w['method'] as String,
-                          style: GoogleFonts.outfit(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
-                            color: const Color(0xFF1A1A1A),
-                          ),
-                        ),
-                        Text(
-                          '${w['phone']} · ${w['date']}',
-                          style: GoogleFonts.outfit(
-                            fontSize: 11,
-                            color: const Color(0xFF9E9E9E),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      Text(
-                        w['amount'] as String,
-                        style: GoogleFonts.outfit(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w700,
-                          color: const Color(0xFFFF6210),
-                        ),
-                      ),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 6,
-                          vertical: 2,
-                        ),
-                        decoration: BoxDecoration(
-                          color: isValidated
-                              ? const Color(0xFF10B981).withAlpha(25)
-                              : const Color(0xFFD97706).withAlpha(25),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: Text(
-                          w['status'] as String,
-                          style: GoogleFonts.outfit(
-                            fontSize: 10,
-                            fontWeight: FontWeight.w600,
-                            color: isValidated
-                                ? const Color(0xFF10B981)
-                                : const Color(0xFFD97706),
-                          ),
-                        ),
-                      ),
-                    ],
                   ),
                 ],
+              ],
+            ),
+          ),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Text(
+                amount,
+                style: GoogleFonts.outfit(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                  color: AppTheme.textPrimary,
+                ),
               ),
-            );
-          }),
+              const SizedBox(height: 2),
+              Text(
+                isPaid ? 'Reçu' : 'En attente',
+                style: GoogleFonts.outfit(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  color: isPaid ? AppTheme.success : AppTheme.warning,
+                ),
+              ),
+            ],
+          ),
         ],
       ),
     );
   }
 }
-
-// ─────────────────────────────────────────────────────────────
-// SHARED HELPER WIDGETS
-// ─────────────────────────────────────────────────────────────
-
 class _SummaryRow extends StatelessWidget {
   final List<_SummaryItem> items;
   const _SummaryRow({required this.items});
@@ -1977,7 +1891,43 @@ class _SummaryItem {
 class _RouteRow extends StatelessWidget {
   final String pickup;
   final String delivery;
-  const _RouteRow({required this.pickup, required this.delivery});
+  final double? latitude;
+  final double? longitude;
+  const _RouteRow({
+    required this.pickup,
+    required this.delivery,
+    this.latitude,
+    this.longitude,
+  });
+
+  Future<void> _openMaps(BuildContext context) async {
+    final lat = latitude;
+    final lng = longitude;
+    if (lat == null || lng == null) return;
+    final uri = Uri.parse(
+      'https://www.google.com/maps/search/?api=1&query=$lat,$lng',
+    );
+    try {
+      final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!ok && context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Impossible d\'ouvrir Maps'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } catch (_) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Impossible d\'ouvrir Maps'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -2015,6 +1965,7 @@ class _RouteRow extends StatelessWidget {
                   fontSize: 12,
                   color: AppTheme.textSecondary,
                 ),
+                maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
               const SizedBox(height: 10),
@@ -2025,11 +1976,19 @@ class _RouteRow extends StatelessWidget {
                   fontWeight: FontWeight.w600,
                   color: AppTheme.textPrimary,
                 ),
+                maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
             ],
           ),
         ),
+        if (latitude != null && longitude != null)
+          IconButton(
+            onPressed: () => _openMaps(context),
+            icon: const Icon(Icons.map_rounded, color: AppTheme.primary),
+            tooltip: 'Ouvrir dans Maps',
+            visualDensity: VisualDensity.compact,
+          ),
       ],
     );
   }
@@ -2144,11 +2103,13 @@ class _CoursesExpressTabState extends State<_CoursesExpressTab> {
     try {
       final String path;
       final Map<String, dynamic> params;
+      // Routes réelles du backend (module delivery, préfixe au singulier) :
+      // les courses express = les "livraisons indépendantes".
       if (_filter == 'pending') {
-        path = '/api/v1/delivery-requests';
-        params = {'status': 'pending'};
+        path = '/api/v1/delivery/independent/available';
+        params = {};
       } else {
-        path = '/api/v1/delivery-requests/mine';
+        path = '/api/v1/delivery/independent/mine';
         params = {};
       }
 
@@ -2170,7 +2131,7 @@ class _CoursesExpressTabState extends State<_CoursesExpressTab> {
   Future<void> _acceptRequest(String requestId) async {
     try {
       await ApiService.instance.client.patch(
-        '/api/v1/delivery-requests/$requestId/accept',
+        '/api/v1/delivery/independent/$requestId/accept',
       );
 
       if (mounted) {
@@ -2471,11 +2432,15 @@ class _DeliveryRequestCard extends StatelessWidget {
                       color: AppTheme.muted,
                     ),
                     const SizedBox(width: 5),
-                    Text(
-                      requesterName,
-                      style: GoogleFonts.outfit(
-                        fontSize: 12,
-                        color: AppTheme.muted,
+                    Flexible(
+                      child: Text(
+                        requesterName,
+                        style: GoogleFonts.outfit(
+                          fontSize: 12,
+                          color: AppTheme.muted,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                       ),
                     ),
                   ],

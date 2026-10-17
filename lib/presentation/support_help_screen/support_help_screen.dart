@@ -1,13 +1,24 @@
-import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
-import '../../theme/app_theme.dart';
-import '../../routes/app_routes.dart';
-import '../../widgets/app_toast.dart';
-import '../../services/api_service.dart';
-import '../../services/nest_auth_service.dart';
 
+import '../../routes/app_routes.dart';
+import '../../services/nest_auth_service.dart';
+import '../../services/support_ticket_service.dart';
+import '../../theme/app_theme.dart';
+import '../../widgets/app_toast.dart';
+import 'ticket_widgets.dart';
+
+/// Support et aide : ouvrir un ticket (avec captures d'ecran), suivre ses
+/// tickets et consulter la FAQ.
+///
+/// Arguments facultatifs (ModalRoute) : une Map avec
+///  - 'category'    : categorie a preselectionner (ex. 'Commande')
+///  - 'orderId'     : identifiant (uuid) de la commande concernee
+///  - 'orderNumber' : numero de commande, pour l'affichage
+///  - 'tab'         : 'tickets' pour ouvrir directement " Mes tickets "
+/// ou simplement une String (la categorie).
 class SupportHelpScreen extends StatefulWidget {
   const SupportHelpScreen({super.key});
 
@@ -15,12 +26,32 @@ class SupportHelpScreen extends StatefulWidget {
   State<SupportHelpScreen> createState() => _SupportHelpScreenState();
 }
 
+const List<String> _kCategories = [
+  'Commande',
+  'Paiement',
+  'Livraison',
+  'Produit d\u00e9fectueux',
+  'Remboursement',
+  'Compte',
+  'Vendeur',
+  'Autre',
+];
+
+final RegExp _kUuid = RegExp(
+  r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
+);
+
 class _SupportHelpScreenState extends State<SupportHelpScreen>
     with SingleTickerProviderStateMixin {
-  late TabController _tabController;
-  bool _isLoading = false;
-  List<Map<String, dynamic>> _myTickets = [];
-  bool _loadingTickets = true;
+  late final TabController _tabController;
+  final GlobalKey<_MyTicketsTabState> _ticketsKey =
+      GlobalKey<_MyTicketsTabState>();
+
+  bool _argsRead = false;
+  String? _initialCategory;
+  String? _initialOrderId;
+  String? _initialOrderNumber;
+  int _unreadTickets = 0;
 
   @override
   void initState() {
@@ -34,7 +65,52 @@ class _SupportHelpScreenState extends State<SupportHelpScreen>
       );
     }
     _tabController = TabController(length: 2, vsync: this);
-    _loadMyTickets();
+    _loadUnread();
+  }
+
+  /// Pastille " non lu " de l'onglet, disponible des l'ouverture de l'ecran.
+  Future<void> _loadUnread() async {
+    try {
+      final loggedIn = await NestAuthService.instance
+          .isLoggedIn()
+          .timeout(const Duration(seconds: 5), onTimeout: () => false);
+      if (!loggedIn || !mounted) return;
+      final n = await SupportTicketService.instance.unreadCount();
+      if (mounted && n != _unreadTickets) setState(() => _unreadTickets = n);
+    } catch (_) {
+      // Simple confort visuel : aucune erreur a afficher.
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_argsRead) return;
+    _argsRead = true;
+    final args = ModalRoute.of(context)?.settings.arguments;
+    if (args is Map) {
+      _initialCategory = _matchCategory(args['category']?.toString());
+      final orderId = args['orderId']?.toString().trim();
+      if (orderId != null && _kUuid.hasMatch(orderId)) {
+        _initialOrderId = orderId;
+        final number = args['orderNumber']?.toString().trim();
+        if (number != null && number.isNotEmpty) _initialOrderNumber = number;
+      }
+      if (args['tab']?.toString() == 'tickets') {
+        _tabController.index = 1;
+      }
+    } else if (args is String) {
+      _initialCategory = _matchCategory(args);
+    }
+  }
+
+  static String? _matchCategory(String? value) {
+    if (value == null) return null;
+    final wanted = value.trim().toLowerCase();
+    for (final c in _kCategories) {
+      if (c.toLowerCase() == wanted) return c;
+    }
+    return null;
   }
 
   @override
@@ -43,73 +119,9 @@ class _SupportHelpScreenState extends State<SupportHelpScreen>
     super.dispose();
   }
 
-  Future<void> _loadMyTickets() async {
-    setState(() => _loadingTickets = true);
-    final isLoggedIn = await NestAuthService.instance
-        .isLoggedIn()
-        .timeout(const Duration(seconds: 5), onTimeout: () => false);
-    if (!isLoggedIn) {
-      if (mounted) setState(() => _loadingTickets = false);
-      return;
-    }
-    try {
-      final r = await ApiService.instance.client.get('/api/v1/support-tickets');
-      final raw = r.data;
-      final list = raw is List
-          ? raw
-          : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) as List : []);
-      if (mounted) {
-        setState(() {
-          _myTickets = list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
-          _loadingTickets = false;
-        });
-      }
-    } catch (_) {
-      if (mounted) setState(() => _loadingTickets = false);
-    }
-  }
-
-  Future<void> _submitTicket(
-    String subject,
-    String message,
-    String category,
-  ) async {
-    setState(() => _isLoading = true);
-    final isLoggedIn = await NestAuthService.instance
-        .isLoggedIn()
-        .timeout(const Duration(seconds: 5), onTimeout: () => false);
-    if (!isLoggedIn) {
-      if (mounted) {
-        setState(() => _isLoading = false);
-        Navigator.pushNamed(context, AppRoutes.signUpLogin);
-      }
-      return;
-    }
-    try {
-      await ApiService.instance.client.post(
-        '/api/v1/support-tickets',
-        data: {'subject': subject, 'message': message, 'category': category},
-      );
-      if (mounted) {
-        AppToast.show(
-          context,
-          message: 'Ticket envoyé ! Notre équipe vous répondra sous 24h.',
-          type: ToastType.success,
-        );
-        _loadMyTickets();
-        _tabController.animateTo(1);
-      }
-    } catch (e) {
-      if (mounted) {
-        AppToast.show(
-          context,
-          message: 'Erreur lors de l\'envoi. Réessayez.',
-          type: ToastType.error,
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _isLoading = false);
-    }
+  void _onTicketCreated() {
+    _ticketsKey.currentState?.refresh();
+    _tabController.animateTo(1);
   }
 
   @override
@@ -138,7 +150,7 @@ class _SupportHelpScreenState extends State<SupportHelpScreen>
               ),
             ),
             Text(
-              'Asoukaa — Bénin Facile',
+              'Asoukaa \u2014 B\u00e9nin Facile',
               style: GoogleFonts.outfit(fontSize: 11, color: AppTheme.muted),
             ),
           ],
@@ -153,20 +165,57 @@ class _SupportHelpScreenState extends State<SupportHelpScreen>
             fontWeight: FontWeight.w600,
           ),
           unselectedLabelStyle: GoogleFonts.outfit(fontSize: 13),
-          tabs: const [
-            Tab(text: '🎫 Nouveau Ticket'),
-            Tab(text: '📋 Mes Tickets'),
+          tabs: [
+            const Tab(text: 'Nouveau ticket'),
+            Tab(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('Mes tickets'),
+                  if (_unreadTickets > 0) ...[
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 1,
+                      ),
+                      decoration: BoxDecoration(
+                        color: AppTheme.primary,
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: Text(
+                        '$_unreadTickets',
+                        style: GoogleFonts.outfit(
+                          fontSize: 10,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
           ],
         ),
       ),
       body: TabBarView(
         controller: _tabController,
         children: [
-          _NewTicketTab(onSubmit: _submitTicket, isLoading: _isLoading),
+          _NewTicketTab(
+            initialCategory: _initialCategory,
+            initialOrderId: _initialOrderId,
+            initialOrderNumber: _initialOrderNumber,
+            onCreated: _onTicketCreated,
+          ),
           _MyTicketsTab(
-            tickets: _myTickets,
-            isLoading: _loadingTickets,
-            onRefresh: _loadMyTickets,
+            key: _ticketsKey,
+            onUnreadChanged: (n) {
+              if (mounted && n != _unreadTickets) {
+                setState(() => _unreadTickets = n);
+              }
+            },
+            onNewTicket: () => _tabController.animateTo(0),
           ),
         ],
       ),
@@ -174,34 +223,48 @@ class _SupportHelpScreenState extends State<SupportHelpScreen>
   }
 }
 
-// ─── New Ticket Tab ───────────────────────────────────────────────────────────
+// --- Onglet " Nouveau ticket " -----------------------------------------------
 
 class _NewTicketTab extends StatefulWidget {
-  final Future<void> Function(String subject, String message, String category)
-  onSubmit;
-  final bool isLoading;
+  final String? initialCategory;
+  final String? initialOrderId;
+  final String? initialOrderNumber;
+  final VoidCallback onCreated;
 
-  const _NewTicketTab({required this.onSubmit, required this.isLoading});
+  const _NewTicketTab({
+    required this.initialCategory,
+    required this.initialOrderId,
+    required this.initialOrderNumber,
+    required this.onCreated,
+  });
 
   @override
   State<_NewTicketTab> createState() => _NewTicketTabState();
 }
 
-class _NewTicketTabState extends State<_NewTicketTab> {
+class _NewTicketTabState extends State<_NewTicketTab>
+    with AutomaticKeepAliveClientMixin<_NewTicketTab> {
+  final _formKey = GlobalKey<FormState>();
   final _subjectCtrl = TextEditingController();
   final _messageCtrl = TextEditingController();
-  String _selectedCategory = 'Commande';
+  final List<PickedTicketImage> _images = [];
 
-  final List<String> _categories = [
-    'Commande',
-    'Paiement',
-    'Livraison',
-    'Produit défectueux',
-    'Remboursement',
-    'Compte',
-    'Vendeur',
-    'Autre',
-  ];
+  late String _category;
+  String? _orderId;
+  String? _orderNumber;
+  bool _sending = false;
+  bool _picking = false;
+
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  void initState() {
+    super.initState();
+    _category = widget.initialCategory ?? _kCategories.first;
+    _orderId = widget.initialOrderId;
+    _orderNumber = widget.initialOrderNumber;
+  }
 
   @override
   void dispose() {
@@ -210,14 +273,125 @@ class _NewTicketTabState extends State<_NewTicketTab> {
     super.dispose();
   }
 
+  Future<void> _addImage() async {
+    if (_sending || _picking) return;
+    if (_images.length >= SupportTicketService.maxImages) {
+      AppToast.show(
+        context,
+        message: 'Vous pouvez joindre 3 images au maximum.',
+        type: ToastType.info,
+      );
+      return;
+    }
+    setState(() => _picking = true);
+    final img = await pickTicketImage(context);
+    if (!mounted) return;
+    setState(() {
+      _picking = false;
+      if (img != null && _images.length < SupportTicketService.maxImages) {
+        _images.add(img);
+      }
+    });
+  }
+
+  Future<void> _submit() async {
+    if (_sending) return;
+    FocusScope.of(context).unfocus();
+    if (!(_formKey.currentState?.validate() ?? false)) return;
+
+    setState(() => _sending = true);
+    try {
+      final loggedIn = await NestAuthService.instance
+          .isLoggedIn()
+          .timeout(const Duration(seconds: 5), onTimeout: () => false);
+      if (!mounted) return;
+      if (!loggedIn) {
+        Navigator.pushNamed(context, AppRoutes.signUpLogin);
+        return;
+      }
+
+      // 1. Envoi des images (une par une ; une image deja envoyee n'est
+      //    jamais renvoyee si on reessaie apres une erreur).
+      final urls = <String>[];
+      for (final img in List<PickedTicketImage>.of(_images)) {
+        var url = img.uploadedUrl;
+        if (url == null) {
+          url = await SupportTicketService.instance.uploadImage(img.file);
+          img.uploadedUrl = url;
+        }
+        urls.add(url);
+      }
+      if (!mounted) return;
+
+      // 2. Creation du ticket.
+      final ticket = await SupportTicketService.instance.create(
+        subject: _subjectCtrl.text,
+        message: _messageCtrl.text,
+        category: _category,
+        orderId: _orderId,
+        attachments: urls,
+      );
+      if (!mounted) return;
+
+      _formKey.currentState?.reset();
+      setState(() {
+        _images.clear();
+        _orderId = null;
+        _orderNumber = null;
+      });
+      AppToast.show(
+        context,
+        message:
+            'Ticket ${ticket.reference} envoy\u00e9 ! Notre \u00e9quipe vous r\u00e9pondra sous 24h.',
+        type: ToastType.success,
+      );
+      widget.onCreated();
+    } on TicketException catch (e) {
+      if (mounted) {
+        AppToast.show(context, message: e.message, type: ToastType.error);
+      }
+    } catch (_) {
+      if (mounted) {
+        AppToast.show(
+          context,
+          message: 'Erreur lors de l\'envoi. R\u00e9essayez.',
+          type: ToastType.error,
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  InputDecoration _decoration({
+    required String label,
+    required String hint,
+    bool alignLabelWithHint = false,
+  }) {
+    return InputDecoration(
+      labelText: label,
+      hintText: hint,
+      alignLabelWithHint: alignLabelWithHint,
+      filled: true,
+      fillColor: AppTheme.surface,
+      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: const BorderSide(color: AppTheme.primary, width: 1.5),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    super.build(context);
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(20),
+      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+      padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Contact info banner
+          // Bandeau d'accueil
           Container(
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
@@ -248,7 +422,7 @@ class _NewTicketTabState extends State<_NewTicketTab> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        'Nous sommes là pour vous aider',
+                        'Nous sommes l\u00e0 pour vous aider',
                         style: GoogleFonts.outfit(
                           fontSize: 14,
                           fontWeight: FontWeight.w700,
@@ -257,7 +431,7 @@ class _NewTicketTabState extends State<_NewTicketTab> {
                       ),
                       const SizedBox(height: 2),
                       Text(
-                        'Réponse garantie sous 24h ouvrables',
+                        'R\u00e9ponse garantie sous 24h ouvrables',
                         style: GoogleFonts.outfit(
                           fontSize: 12,
                           color: Colors.white.withAlpha(220),
@@ -271,7 +445,7 @@ class _NewTicketTabState extends State<_NewTicketTab> {
           ),
           const SizedBox(height: 20),
 
-          // Quick contact options
+          // Contacts rapides
           Row(
             children: [
               Expanded(
@@ -305,147 +479,219 @@ class _NewTicketTabState extends State<_NewTicketTab> {
           ),
           const SizedBox(height: 4),
           Text(
-            'Décrivez votre problème et notre équipe vous contactera.',
+            'D\u00e9crivez votre probl\u00e8me et notre \u00e9quipe vous r\u00e9pondra ici m\u00eame.',
             style: GoogleFonts.outfit(fontSize: 13, color: AppTheme.muted),
           ),
           const SizedBox(height: 16),
 
-          // Category
-          Text(
-            'Catégorie',
-            style: GoogleFonts.outfit(
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-              color: AppTheme.textPrimary,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: _categories.map((cat) {
-              final isSelected = _selectedCategory == cat;
-              return GestureDetector(
-                onTap: () => setState(() => _selectedCategory = cat),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 200),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 14,
-                    vertical: 8,
+          Form(
+            key: _formKey,
+            autovalidateMode: AutovalidateMode.onUserInteraction,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Categorie
+                Text(
+                  'Cat\u00e9gorie',
+                  style: GoogleFonts.outfit(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: AppTheme.textPrimary,
                   ),
-                  decoration: BoxDecoration(
-                    color: isSelected
-                        ? AppTheme.primaryMuted
-                        : AppTheme.surface,
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(
-                      color: isSelected ? AppTheme.primary : AppTheme.outline,
-                      width: isSelected ? 1.5 : 1,
-                    ),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: _kCategories.map((cat) {
+                    final isSelected = _category == cat;
+                    return GestureDetector(
+                      onTap: _sending
+                          ? null
+                          : () => setState(() => _category = cat),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 200),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 8,
+                        ),
+                        decoration: BoxDecoration(
+                          color: isSelected
+                              ? AppTheme.primaryMuted
+                              : AppTheme.surface,
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color:
+                                isSelected ? AppTheme.primary : AppTheme.outline,
+                            width: isSelected ? 1.5 : 1,
+                          ),
+                        ),
+                        child: Text(
+                          cat,
+                          style: GoogleFonts.outfit(
+                            fontSize: 13,
+                            fontWeight:
+                                isSelected ? FontWeight.w600 : FontWeight.w400,
+                            color: isSelected
+                                ? AppTheme.primary
+                                : AppTheme.textSecondary,
+                          ),
+                        ),
+                      ),
+                    );
+                  }).toList(),
+                ),
+
+                // Carte d'info " Remboursement "
+                if (_category == 'Remboursement') ...[
+                  const SizedBox(height: 12),
+                  _buildRefundCard(),
+                ],
+
+                // Commande liee
+                if (_orderId != null) ...[
+                  const SizedBox(height: 12),
+                  _buildOrderCard(),
+                ],
+                const SizedBox(height: 16),
+
+                // Sujet
+                TextFormField(
+                  controller: _subjectCtrl,
+                  enabled: !_sending,
+                  maxLength: 150,
+                  textCapitalization: TextCapitalization.sentences,
+                  textInputAction: TextInputAction.next,
+                  decoration: _decoration(
+                    label: 'Sujet *',
+                    hint: 'Ex: Commande non re\u00e7ue, produit d\u00e9fectueux...',
                   ),
-                  child: Text(
-                    cat,
+                  style: GoogleFonts.outfit(fontSize: 14),
+                  validator: (v) {
+                    final t = (v ?? '').trim();
+                    if (t.isEmpty) return 'Le sujet est obligatoire';
+                    if (t.length < 3) {
+                      return 'Le sujet doit contenir au moins 3 caract\u00e8res';
+                    }
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 10),
+
+                // Message
+                TextFormField(
+                  controller: _messageCtrl,
+                  enabled: !_sending,
+                  minLines: 5,
+                  maxLines: 8,
+                  maxLength: 4000,
+                  textCapitalization: TextCapitalization.sentences,
+                  keyboardType: TextInputType.multiline,
+                  decoration: _decoration(
+                    label: 'Description *',
+                    hint: 'D\u00e9crivez votre probl\u00e8me en d\u00e9tail...',
+                    alignLabelWithHint: true,
+                  ),
+                  style: GoogleFonts.outfit(fontSize: 14),
+                  validator: (v) {
+                    final t = (v ?? '').trim();
+                    if (t.isEmpty) return 'Le message ne peut pas \u00eatre vide';
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 12),
+
+                // Captures d'ecran
+                Text(
+                  'Captures d\'\u00e9cran (facultatif)',
+                  style: GoogleFonts.outfit(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: AppTheme.textPrimary,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'Jusqu\'\u00e0 3 images (JPG, PNG ou WEBP, 5 Mo maximum chacune).',
+                  style: GoogleFonts.outfit(fontSize: 12, color: AppTheme.muted),
+                ),
+                if (_images.isNotEmpty)
+                  PickedImagesStrip(
+                    images: _images,
+                    size: 72,
+                    onRemove: (i) {
+                      if (_sending) return;
+                      setState(() => _images.removeAt(i));
+                    },
+                  ),
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  onPressed: (_sending ||
+                          _picking ||
+                          _images.length >= SupportTicketService.maxImages)
+                      ? null
+                      : _addImage,
+                  icon: const Icon(Icons.add_photo_alternate_outlined, size: 20),
+                  label: Text(
+                    'Ajouter une image (${_images.length}/${SupportTicketService.maxImages})',
                     style: GoogleFonts.outfit(
                       fontSize: 13,
-                      fontWeight: isSelected
-                          ? FontWeight.w600
-                          : FontWeight.w400,
-                      color: isSelected
-                          ? AppTheme.primary
-                          : AppTheme.textSecondary,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppTheme.primary,
+                    side: const BorderSide(color: AppTheme.primary),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 12,
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
                     ),
                   ),
                 ),
-              );
-            }).toList(),
-          ),
-          const SizedBox(height: 16),
-
-          // Subject
-          TextField(
-            controller: _subjectCtrl,
-            decoration: InputDecoration(
-              labelText: 'Sujet *',
-              hintText: 'Ex: Commande non reçue, produit défectueux...',
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: const BorderSide(
-                  color: AppTheme.primary,
-                  width: 1.5,
-                ),
-              ),
+              ],
             ),
-            style: GoogleFonts.outfit(fontSize: 14),
-          ),
-          const SizedBox(height: 14),
-
-          // Message
-          TextField(
-            controller: _messageCtrl,
-            maxLines: 5,
-            decoration: InputDecoration(
-              labelText: 'Description *',
-              hintText: 'Décrivez votre problème en détail...',
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: const BorderSide(
-                  color: AppTheme.primary,
-                  width: 1.5,
-                ),
-              ),
-              alignLabelWithHint: true,
-            ),
-            style: GoogleFonts.outfit(fontSize: 14),
           ),
           const SizedBox(height: 20),
 
           SizedBox(
             width: double.infinity,
             child: ElevatedButton(
-              onPressed: widget.isLoading
-                  ? null
-                  : () {
-                      if (_subjectCtrl.text.trim().isEmpty ||
-                          _messageCtrl.text.trim().isEmpty) {
-                        AppToast.show(
-                          context,
-                          message:
-                              'Veuillez remplir tous les champs obligatoires.',
-                          type: ToastType.error,
-                        );
-                        return;
-                      }
-                      widget.onSubmit(
-                        _subjectCtrl.text.trim(),
-                        _messageCtrl.text.trim(),
-                        _selectedCategory,
-                      );
-                      _subjectCtrl.clear();
-                      _messageCtrl.clear();
-                    },
+              onPressed: _sending ? null : _submit,
               style: ElevatedButton.styleFrom(
                 backgroundColor: AppTheme.primary,
                 foregroundColor: Colors.white,
+                disabledBackgroundColor: AppTheme.primary.withAlpha(150),
+                disabledForegroundColor: Colors.white,
                 padding: const EdgeInsets.symmetric(vertical: 16),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(14),
                 ),
                 elevation: 0,
               ),
-              child: widget.isLoading
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(
-                        color: Colors.white,
-                        strokeWidth: 2,
-                      ),
+              child: _sending
+                  ? Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                            color: Colors.white,
+                            strokeWidth: 2,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Text(
+                          'Envoi en cours...',
+                          style: GoogleFonts.outfit(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
                     )
                   : Text(
                       'Envoyer le ticket',
@@ -458,9 +704,9 @@ class _NewTicketTabState extends State<_NewTicketTab> {
           ),
           const SizedBox(height: 24),
 
-          // FAQ section
+          // FAQ
           Text(
-            'Questions fréquentes',
+            'Questions fr\u00e9quentes',
             style: GoogleFonts.outfit(
               fontSize: 15,
               fontWeight: FontWeight.w700,
@@ -476,26 +722,138 @@ class _NewTicketTabState extends State<_NewTicketTab> {
     );
   }
 
+  Widget _buildRefundCard() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: AppTheme.primaryContainer,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: AppTheme.primary.withAlpha(90)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Icon(
+                Icons.info_outline_rounded,
+                color: AppTheme.primary,
+                size: 20,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Le remboursement suit un circuit \u00e0 part : pour \u00eatre '
+                  'rembours\u00e9, faites une demande d\u00e9di\u00e9e avec votre commande. '
+                  'Vous pouvez quand m\u00eame cr\u00e9er ce ticket si vous avez une '
+                  'question.',
+                  style: GoogleFonts.outfit(
+                    fontSize: 13,
+                    color: AppTheme.textPrimary,
+                    height: 1.4,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: () =>
+                  Navigator.pushNamed(context, AppRoutes.refundRequest),
+              icon: const Icon(Icons.payments_outlined, size: 18),
+              label: Text(
+                'Faire une demande de remboursement',
+                style: GoogleFonts.outfit(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppTheme.primary,
+                foregroundColor: Colors.white,
+                elevation: 0,
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildOrderCard() {
+    final number = _orderNumber;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(14, 6, 6, 6),
+      decoration: BoxDecoration(
+        color: AppTheme.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppTheme.outline),
+      ),
+      child: Row(
+        children: [
+          const Icon(
+            Icons.receipt_long_outlined,
+            color: AppTheme.primary,
+            size: 20,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              number != null
+                  ? 'Commande concern\u00e9e : $number'
+                  : 'Ce ticket sera li\u00e9 \u00e0 votre commande',
+              style: GoogleFonts.outfit(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: AppTheme.textPrimary,
+              ),
+            ),
+          ),
+          IconButton(
+            tooltip: 'Retirer la commande',
+            icon: const Icon(Icons.close_rounded, size: 18),
+            color: AppTheme.muted,
+            onPressed: _sending
+                ? null
+                : () => setState(() {
+                      _orderId = null;
+                      _orderNumber = null;
+                    }),
+          ),
+        ],
+      ),
+    );
+  }
+
   static const List<Map<String, String>> _faqItems = [
     {
       'q': 'Comment suivre ma commande ?',
       'a':
-          'Allez dans votre tableau de bord → Commandes → cliquez sur votre commande pour voir le suivi en temps réel.',
+          'Allez dans votre tableau de bord \u2192 Commandes \u2192 cliquez sur votre commande pour voir le suivi en temps r\u00e9el.',
     },
     {
       'q': 'Comment demander un remboursement ?',
       'a':
-          'Ouvrez un ticket de support avec la catégorie "Remboursement" et indiquez votre numéro de commande. Notre équipe traitera votre demande sous 24h.',
+          'Choisissez la cat\u00e9gorie "Remboursement" ci-dessus, puis appuyez sur "Faire une demande de remboursement" et indiquez votre num\u00e9ro de commande. Notre \u00e9quipe traitera votre demande sous 24h.',
     },
     {
       'q': 'Comment contacter un vendeur ?',
       'a':
-          'Sur la page produit, cliquez sur "Contacter le vendeur" pour démarrer une conversation directe.',
+          'Sur la page produit, cliquez sur "Contacter le vendeur" pour d\u00e9marrer une conversation directe.',
     },
     {
-      'q': 'Quels sont les délais de livraison ?',
+      'q': 'Quels sont les d\u00e9lais de livraison ?',
       'a':
-          'Livraison locale à Cotonou : 24-48h. Autres villes du Bénin : 2-5 jours. Import Chine : 10-18 jours.',
+          'Livraison locale \u00e0 Cotonou : 24-48h. Autres villes du B\u00e9nin : 2-5 jours. Import Chine : 10-18 jours.',
     },
   ];
 }
@@ -637,233 +995,490 @@ class _FaqItemState extends State<_FaqItem> {
   }
 }
 
-// ─── My Tickets Tab ───────────────────────────────────────────────────────────
+// --- Onglet " Mes tickets " --------------------------------------------------
 
-class _MyTicketsTab extends StatelessWidget {
-  final List<Map<String, dynamic>> tickets;
-  final bool isLoading;
-  final VoidCallback onRefresh;
+class _MyTicketsTab extends StatefulWidget {
+  final ValueChanged<int> onUnreadChanged;
+  final VoidCallback onNewTicket;
 
   const _MyTicketsTab({
-    required this.tickets,
-    required this.isLoading,
-    required this.onRefresh,
+    super.key,
+    required this.onUnreadChanged,
+    required this.onNewTicket,
   });
 
   @override
+  State<_MyTicketsTab> createState() => _MyTicketsTabState();
+}
+
+class _MyTicketsTabState extends State<_MyTicketsTab>
+    with AutomaticKeepAliveClientMixin<_MyTicketsTab> {
+  final ScrollController _scroll = ScrollController();
+  final List<TicketSummary> _items = [];
+
+  bool _loading = true;
+  bool _loadingMore = false;
+  bool _loadMoreFailed = false;
+  bool _loggedIn = true;
+  bool _hasMore = false;
+  String? _error;
+  int _page = 1;
+  int _generation = 0;
+
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  void initState() {
+    super.initState();
+    _scroll.addListener(_onScroll);
+    _loadFirst(showSpinner: false);
+  }
+
+  @override
+  void dispose() {
+    _scroll.removeListener(_onScroll);
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  /// Rechargement silencieux (appele quand un ticket vient d'etre cree).
+  Future<void> refresh() => _loadFirst(showSpinner: false);
+
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    final pos = _scroll.position;
+    if (pos.pixels >= pos.maxScrollExtent - 300) {
+      _loadMore();
+    }
+  }
+
+  Future<void> _loadFirst({bool showSpinner = true}) async {
+    final gen = ++_generation;
+    if (showSpinner) {
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
+    }
+    final loggedIn = await NestAuthService.instance
+        .isLoggedIn()
+        .timeout(const Duration(seconds: 5), onTimeout: () => false);
+    if (!mounted || gen != _generation) return;
+    if (!loggedIn) {
+      setState(() {
+        _loggedIn = false;
+        _loading = false;
+        _loadingMore = false;
+        _hasMore = false;
+        _items.clear();
+      });
+      widget.onUnreadChanged(0);
+      return;
+    }
+    try {
+      final page = await SupportTicketService.instance.list(page: 1);
+      if (!mounted || gen != _generation) return;
+      setState(() {
+        _loggedIn = true;
+        _items
+          ..clear()
+          ..addAll(page.items);
+        _page = page.page;
+        _hasMore = page.hasMore;
+        _loading = false;
+        _loadingMore = false;
+        _loadMoreFailed = false;
+        _error = null;
+      });
+      _refreshUnread();
+    } on TicketException catch (e) {
+      if (!mounted || gen != _generation) return;
+      final hadItems = _items.isNotEmpty;
+      setState(() {
+        _loading = false;
+        _loadingMore = false;
+        if (!hadItems) _error = e.message;
+      });
+      if (hadItems) {
+        AppToast.show(context, message: e.message, type: ToastType.error);
+      }
+    }
+  }
+
+  Future<void> _loadMore() async {
+    if (_loading || _loadingMore || !_hasMore || _loadMoreFailed) return;
+    final gen = _generation;
+    setState(() => _loadingMore = true);
+    try {
+      final page = await SupportTicketService.instance.list(page: _page + 1);
+      if (!mounted || gen != _generation) return;
+      final known = _items.map((t) => t.id).toSet();
+      setState(() {
+        _items.addAll(page.items.where((t) => !known.contains(t.id)));
+        _page = page.page;
+        _hasMore = page.hasMore;
+        _loadingMore = false;
+      });
+    } on TicketException {
+      if (!mounted || gen != _generation) return;
+      setState(() {
+        _loadingMore = false;
+        _loadMoreFailed = true;
+      });
+    }
+  }
+
+  void _retryLoadMore() {
+    setState(() => _loadMoreFailed = false);
+    _loadMore();
+  }
+
+  Future<void> _refreshUnread() async {
+    try {
+      final n = await SupportTicketService.instance.unreadCount();
+      if (mounted) widget.onUnreadChanged(n);
+    } catch (_) {
+      // Le badge est un confort : une erreur ici ne doit rien afficher.
+    }
+  }
+
+  Future<void> _open(TicketSummary t) async {
+    final result = await Navigator.pushNamed<String>(
+      context,
+      AppRoutes.ticketDetail,
+      arguments: {'ticketId': t.id, 'fromSupport': true},
+    );
+    if (!mounted) return;
+    // Au retour : la pastille " non lu " doit avoir disparu.
+    _loadFirst(showSpinner: false);
+    if (result == 'new_ticket') widget.onNewTicket();
+  }
+
+  Widget _scrollableCenter(Widget child) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minHeight: constraints.maxHeight),
+            child: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(32),
+                child: child,
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _stateView({
+    required IconData icon,
+    required String title,
+    required String message,
+    String? buttonLabel,
+    VoidCallback? onButton,
+  }) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 80,
+          height: 80,
+          decoration: BoxDecoration(
+            color: AppTheme.primaryMuted,
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: Icon(icon, size: 40, color: AppTheme.primary),
+        ),
+        const SizedBox(height: 16),
+        Text(
+          title,
+          textAlign: TextAlign.center,
+          style: GoogleFonts.outfit(
+            fontSize: 16,
+            fontWeight: FontWeight.w700,
+            color: AppTheme.textPrimary,
+          ),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          message,
+          textAlign: TextAlign.center,
+          style: GoogleFonts.outfit(
+            fontSize: 13,
+            color: AppTheme.muted,
+            height: 1.4,
+          ),
+        ),
+        if (buttonLabel != null && onButton != null) ...[
+          const SizedBox(height: 20),
+          ElevatedButton(
+            onPressed: onButton,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppTheme.primary,
+              foregroundColor: Colors.white,
+              elevation: 0,
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+            child: Text(
+              buttonLabel,
+              style: GoogleFonts.outfit(
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
-    if (isLoading) {
+    super.build(context);
+
+    if (_loading) {
       return const Center(
         child: CircularProgressIndicator(color: AppTheme.primary),
       );
     }
 
-    if (tickets.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Container(
-              width: 80,
-              height: 80,
-              decoration: BoxDecoration(
-                color: AppTheme.primaryMuted,
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: const Icon(
-                Icons.confirmation_number_outlined,
-                size: 40,
-                color: AppTheme.primary,
-              ),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              'Aucun ticket ouvert',
-              style: GoogleFonts.outfit(
-                fontSize: 16,
-                fontWeight: FontWeight.w700,
-                color: AppTheme.textPrimary,
-              ),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              'Vos tickets de support apparaîtront ici.',
-              style: GoogleFonts.outfit(fontSize: 13, color: AppTheme.muted),
-            ),
-          ],
+    if (!_loggedIn) {
+      return _scrollableCenter(
+        _stateView(
+          icon: Icons.lock_outline_rounded,
+          title: 'Connectez-vous',
+          message: 'Connectez-vous pour voir vos tickets et les r\u00e9ponses de notre \u00e9quipe.',
+          buttonLabel: 'Se connecter',
+          onButton: () {
+            Navigator.pushNamed(context, AppRoutes.signUpLogin).then((_) {
+              if (mounted) _loadFirst();
+            });
+          },
         ),
       );
     }
 
-    return RefreshIndicator(
-      onRefresh: () async => onRefresh(),
-      color: AppTheme.primary,
-      child: ListView.separated(
-        padding: const EdgeInsets.all(16),
-        itemCount: tickets.length,
+    final Widget content;
+    if (_items.isEmpty) {
+      content = _scrollableCenter(
+        _error != null
+            ? _stateView(
+                icon: Icons.cloud_off_rounded,
+                title: 'Chargement impossible',
+                message: _error!,
+                buttonLabel: 'R\u00e9essayer',
+                onButton: () => _loadFirst(),
+              )
+            : _stateView(
+                icon: Icons.confirmation_number_outlined,
+                title: 'Aucun ticket pour le moment',
+                message:
+                    'Vos demandes d\'aide appara\u00eetront ici avec les r\u00e9ponses de notre \u00e9quipe.',
+                buttonLabel: 'Ouvrir un ticket',
+                onButton: widget.onNewTicket,
+              ),
+      );
+    } else {
+      final showFooter = _loadingMore || _loadMoreFailed;
+      content = ListView.separated(
+        controller: _scroll,
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+        itemCount: _items.length + (showFooter ? 1 : 0),
         separatorBuilder: (_, __) => const SizedBox(height: 10),
         itemBuilder: (_, i) {
-          final t = tickets[i];
-          final status = t['status'] as String? ?? 'open';
-          final statusColors = {
-            'open': const Color(0xFFD97706),
-            'in_progress': const Color(0xFF3B82F6),
-            'resolved': const Color(0xFF10B981),
-            'closed': const Color(0xFF9E9E9E),
-          };
-          final statusLabels = {
-            'open': 'Ouvert',
-            'in_progress': 'En cours',
-            'resolved': 'Résolu',
-            'closed': 'Fermé',
-          };
-          final statusColor = statusColors[status] ?? const Color(0xFFD97706);
-          final createdAt = t['created_at'] as String? ?? '';
-          String dateStr = '';
-          if (createdAt.isNotEmpty) {
-            try {
-              final dt = DateTime.parse(createdAt).toLocal();
-              dateStr =
-                  '${dt.day.toString().padLeft(2, '0')}/${dt.month.toString().padLeft(2, '0')}/${dt.year}';
-            } catch (_) {}
-          }
-
-          return Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: AppTheme.surface,
-              borderRadius: BorderRadius.circular(14),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withAlpha(6),
-                  blurRadius: 8,
-                  offset: const Offset(0, 2),
-                ),
-              ],
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 3,
-                      ),
-                      decoration: BoxDecoration(
-                        color: statusColor.withAlpha(25),
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      child: Text(
-                        statusLabels[status] ?? status,
-                        style: GoogleFonts.outfit(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                          color: statusColor,
+          if (i >= _items.length) {
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Center(
+                child: _loadMoreFailed
+                    ? TextButton.icon(
+                        onPressed: _retryLoadMore,
+                        icon: const Icon(Icons.refresh_rounded, size: 18),
+                        label: Text(
+                          'Impossible de charger la suite. R\u00e9essayer',
+                          style: GoogleFonts.outfit(fontSize: 13),
                         ),
+                        style: TextButton.styleFrom(
+                          foregroundColor: AppTheme.primary,
+                        ),
+                      )
+                    : const SizedBox(
+                        width: 24,
+                        height: 24,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: AppTheme.primary,
+                        ),
+                      ),
+              ),
+            );
+          }
+          final t = _items[i];
+          return _TicketCard(ticket: t, onTap: () => _open(t));
+        },
+      );
+    }
+
+    return RefreshIndicator(
+      color: AppTheme.primary,
+      onRefresh: () => _loadFirst(showSpinner: false),
+      child: content,
+    );
+  }
+}
+
+class _TicketCard extends StatelessWidget {
+  final TicketSummary ticket;
+  final VoidCallback onTap;
+
+  const _TicketCard({required this.ticket, required this.onTap});
+
+  String _previewText() {
+    final last = ticket.lastMessage;
+    if (last == null) return '';
+    final who = last.fromAdmin ? '\u00c9quipe Asoukaa : ' : 'Vous : ';
+    if (last.preview.isEmpty) {
+      if (last.attachmentCount > 0) {
+        return '$who${last.attachmentCount} image(s) jointe(s)';
+      }
+      return '';
+    }
+    return '$who${last.preview}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final unread = ticket.hasUnread;
+    final preview = _previewText();
+    final attachments = ticket.lastMessage?.attachmentCount ?? 0;
+
+    return Material(
+      color: AppTheme.surface,
+      borderRadius: BorderRadius.circular(14),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(14),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: unread ? AppTheme.primary.withAlpha(110) : AppTheme.outline,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Flexible(
+                    child: Text(
+                      ticket.reference,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.outfit(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: AppTheme.textSecondary,
                       ),
                     ),
-                    const SizedBox(width: 8),
-                    if (t['category'] != null)
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 3,
-                        ),
-                        decoration: BoxDecoration(
-                          color: AppTheme.surfaceVariant,
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: Text(
-                          t['category'] as String,
-                          style: GoogleFonts.outfit(
-                            fontSize: 11,
-                            color: AppTheme.textSecondary,
-                          ),
+                  ),
+                  const SizedBox(width: 8),
+                  TicketStatusChip(status: ticket.status),
+                  const Spacer(),
+                  Text(
+                    ticketListDate(ticket.lastMessageAt),
+                    style: GoogleFonts.outfit(
+                      fontSize: 11,
+                      color: unread ? AppTheme.primary : AppTheme.muted,
+                      fontWeight: unread ? FontWeight.w600 : FontWeight.w400,
+                    ),
+                  ),
+                  if (unread) ...[
+                    const SizedBox(width: 6),
+                    Container(
+                      width: 10,
+                      height: 10,
+                      decoration: const BoxDecoration(
+                        color: AppTheme.primary,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+              const SizedBox(height: 10),
+              Text(
+                ticket.subject.isEmpty ? 'Sans sujet' : ticket.subject,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: GoogleFonts.outfit(
+                  fontSize: 14,
+                  fontWeight: unread ? FontWeight.w800 : FontWeight.w700,
+                  color: AppTheme.textPrimary,
+                ),
+              ),
+              if (preview.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    if (attachments > 0 && ticket.lastMessage!.preview.isNotEmpty)
+                      const Padding(
+                        padding: EdgeInsets.only(right: 4),
+                        child: Icon(
+                          Icons.attach_file_rounded,
+                          size: 14,
+                          color: AppTheme.muted,
                         ),
                       ),
-                    const Spacer(),
-                    Text(
-                      dateStr,
-                      style: GoogleFonts.outfit(
-                        fontSize: 11,
-                        color: AppTheme.muted,
+                    Expanded(
+                      child: Text(
+                        preview,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: GoogleFonts.outfit(
+                          fontSize: 13,
+                          color: unread
+                              ? AppTheme.textPrimary
+                              : AppTheme.textSecondary,
+                          height: 1.35,
+                        ),
                       ),
                     ),
                   ],
                 ),
-                const SizedBox(height: 10),
-                Text(
-                  t['subject'] as String? ?? 'Sans sujet',
-                  style: GoogleFonts.outfit(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w700,
-                    color: AppTheme.textPrimary,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  t['message'] as String? ?? '',
-                  style: GoogleFonts.outfit(
-                    fontSize: 13,
-                    color: AppTheme.textSecondary,
-                  ),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                // Admin response
-                if (t['admin_response'] != null &&
-                    (t['admin_response'] as String).isNotEmpty) ...[
-                  const SizedBox(height: 10),
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: AppTheme.primaryMuted,
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Icon(
-                          Icons.support_agent_rounded,
-                          size: 16,
-                          color: AppTheme.primary,
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                'Réponse de l\'équipe Asoukaa',
-                                style: GoogleFonts.outfit(
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w600,
-                                  color: AppTheme.primary,
-                                ),
-                              ),
-                              const SizedBox(height: 2),
-                              Text(
-                                t['admin_response'] as String,
-                                style: GoogleFonts.outfit(
-                                  fontSize: 13,
-                                  color: AppTheme.textPrimary,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
               ],
-            ),
-          );
-        },
+              if (ticket.category.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 3,
+                  ),
+                  decoration: BoxDecoration(
+                    color: AppTheme.surfaceVariant,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    ticket.category,
+                    style: GoogleFonts.outfit(
+                      fontSize: 11,
+                      color: AppTheme.textSecondary,
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
       ),
     );
   }

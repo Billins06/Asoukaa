@@ -120,13 +120,29 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
           icon: const Icon(Icons.arrow_back_rounded, color: Color(0xFF1A1A1A)),
           onPressed: () => Navigator.pop(context),
         ),
-        title: Text(
-          'Super Admin',
-          style: GoogleFonts.outfit(
-            fontSize: 18,
-            fontWeight: FontWeight.w700,
-            color: AppTheme.textPrimary,
-          ),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'Super Admin',
+              style: GoogleFonts.outfit(
+                fontSize: 18,
+                fontWeight: FontWeight.w700,
+                color: AppTheme.textPrimary,
+              ),
+            ),
+            // Rappel discret : n'apparaît que dans une version de test.
+            if (kAdminLoginActif)
+              Text(
+                'Mode test administrateur',
+                style: GoogleFonts.outfit(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w500,
+                  color: AppTheme.muted,
+                ),
+              ),
+          ],
         ),
         actions: [
           IconButton(
@@ -4864,7 +4880,11 @@ class _WithdrawalsTabState extends State<_WithdrawalsTab> {
   Future<void> _loadWithdrawals() async {
     setState(() => _isLoading = true);
     try {
-      final res = await ApiService.instance.client.get('/api/v1/admin/withdrawals?limit=200');
+      // Route reelle du module de retrait vendeur. L'ancienne
+      // (/admin/withdrawals) n'a jamais existe cote serveur : l'onglet
+      // restait donc vide et aucune demande ne pouvait etre traitee.
+      final res = await ApiService.instance.client
+          .get('/api/v1/admin/vendor-withdrawals?limit=200');
       final raw = res.data;
       final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) : []);
       if (mounted) {
@@ -4878,14 +4898,91 @@ class _WithdrawalsTabState extends State<_WithdrawalsTab> {
     }
   }
 
-  Future<void> _updateStatus(String id, String status) async {
+  // Le serveur expose deux actions distinctes (et non une mise a jour de
+  // statut) : marquer comme paye, avec une note facultative ; ou rejeter,
+  // avec un motif OBLIGATOIRE.
+  Future<void> _marquerPaye(String id) async {
+    final note = await _demanderTexte(
+      titre: 'Confirmer le virement',
+      message:
+          "Confirmez que le virement Mobile Money a bien ete effectue. Vous pouvez ajouter une reference (facultatif).",
+      labelChamp: 'Reference du virement (facultatif)',
+      obligatoire: false,
+    );
+    if (note == null) return;
     try {
-      await ApiService.instance.client.patch(
-        '/api/v1/admin/withdrawals/$id',
-        data: {'status': status},
+      await ApiService.instance.client.post(
+        '/api/v1/admin/vendor-withdrawals/$id/mark-paid',
+        data: note.isEmpty ? {} : {'noteAdmin': note},
       );
       _loadWithdrawals();
     } catch (_) {}
+  }
+
+  Future<void> _rejeterDemande(String id) async {
+    final motif = await _demanderTexte(
+      titre: 'Rejeter la demande',
+      message: 'Le vendeur verra ce motif dans son historique.',
+      labelChamp: 'Motif du refus (obligatoire)',
+      obligatoire: true,
+    );
+    if (motif == null || motif.isEmpty) return;
+    try {
+      await ApiService.instance.client.post(
+        '/api/v1/admin/vendor-withdrawals/$id/reject',
+        data: {'motif': motif},
+      );
+      _loadWithdrawals();
+    } catch (_) {}
+  }
+
+  // Retourne le texte saisi, ou null si l'admin annule.
+  Future<String?> _demanderTexte({
+    required String titre,
+    required String message,
+    required String labelChamp,
+    required bool obligatoire,
+  }) async {
+    final ctrl = TextEditingController();
+    final resultat = await showDialog<String>(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        title: Text(titre, style: GoogleFonts.outfit(fontWeight: FontWeight.w700)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(message, style: GoogleFonts.outfit(fontSize: 13)),
+            const SizedBox(height: 12),
+            TextField(
+              controller: ctrl,
+              autofocus: true,
+              decoration: InputDecoration(
+                labelText: labelChamp,
+                labelStyle: GoogleFonts.outfit(fontSize: 12),
+                border: const OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogCtx),
+            child: Text('Annuler', style: GoogleFonts.outfit()),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              final texte = ctrl.text.trim();
+              if (obligatoire && texte.isEmpty) return;
+              Navigator.pop(dialogCtx, texte);
+            },
+            child: Text('Confirmer', style: GoogleFonts.outfit()),
+          ),
+        ],
+      ),
+    );
+    ctrl.dispose();
+    return resultat;
   }
 
   String _formatPrice(double price) {
@@ -4944,9 +5041,23 @@ class _WithdrawalsTabState extends State<_WithdrawalsTab> {
                   separatorBuilder: (_, __) => const SizedBox(height: 10),
                   itemBuilder: (_, i) {
                     final w = _withdrawals[i];
-                    final seller = w['user_profiles'] as Map<String, dynamic>?;
-                    final status = w['status'] as String? ?? 'pending';
-                    final amount = (w['amount'] as num? ?? 0).toDouble();
+                    // Champs reels renvoyes par le serveur (relations
+                    // vendor / vendor.user chargees cote NestJS).
+                    final vendor = w['vendor'] as Map<String, dynamic>?;
+                    final vendorUser =
+                        vendor?['user'] as Map<String, dynamic>?;
+                    final seller = <String, dynamic>{
+                      'full_name': vendor?['shopName'] ??
+                          vendorUser?['name'] ??
+                          'Vendeur',
+                      'phone': w['mobileNumber'] ??
+                          vendorUser?['phone'] ??
+                          '',
+                    };
+                    final status = w['status'] as String? ?? 'en attente';
+                    // Colonne `decimal` de Postgres : arrive en chaine.
+                    final amount =
+                        double.tryParse('${w['montant'] ?? ''}') ?? 0;
                     return Container(
                       padding: const EdgeInsets.all(14),
                       decoration: BoxDecoration(
@@ -4999,22 +5110,20 @@ class _WithdrawalsTabState extends State<_WithdrawalsTab> {
                           ),
                           const SizedBox(height: 8),
                           Text(
-                            'Via: ${w['payment_method'] ?? 'mobile_money'}',
+                            'Via: ${w['paymentMethod'] ?? 'Mobile Money'} · ${w['mobileNumber'] ?? ''}',
                             style: GoogleFonts.outfit(
                               fontSize: 12,
                               color: AppTheme.textSecondary,
                             ),
                           ),
                           const SizedBox(height: 10),
-                          if (status == 'pending')
+                          if (status == 'en attente')
                             Row(
                               children: [
                                 Expanded(
                                   child: OutlinedButton(
-                                    onPressed: () => _updateStatus(
-                                      w['id'] as String,
-                                      'rejected',
-                                    ),
+                                    onPressed: () =>
+                                        _rejeterDemande(w['id'] as String),
                                     style: OutlinedButton.styleFrom(
                                       foregroundColor: AppTheme.error,
                                       side: const BorderSide(
@@ -5030,10 +5139,8 @@ class _WithdrawalsTabState extends State<_WithdrawalsTab> {
                                 const SizedBox(width: 8),
                                 Expanded(
                                   child: ElevatedButton(
-                                    onPressed: () => _updateStatus(
-                                      w['id'] as String,
-                                      'completed',
-                                    ),
+                                    onPressed: () =>
+                                        _marquerPaye(w['id'] as String),
                                     style: ElevatedButton.styleFrom(
                                       backgroundColor: AppTheme.success,
                                       foregroundColor: Colors.white,

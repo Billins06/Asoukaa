@@ -1,6 +1,31 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'api_service.dart';
+import 'deliverer_availability.dart';
+import 'notification_service.dart';
+import 'presence_service.dart';
 import 'token_storage_service.dart';
+import 'wishlist_service.dart';
+import '../utils/telephone.dart';
+
+/// Interrupteur de la connexion administrateur DE TEST.
+///
+/// Pourquoi : le compte admin du site web vit dans la table des
+/// administrateurs, alors que l'application se connecte via la table des
+/// utilisateurs. Pour pouvoir seulement VOIR l'écran admin pendant les tests,
+/// on autorise un repli vers /auth/admin/login, mais uniquement :
+///  - en debug (`flutter run`), ou
+///  - dans un APK compilé exprès avec
+///    `--dart-define=ALLOW_ADMIN_LOGIN=true`.
+/// Dans un APK de production normal, les deux valeurs sont fausses et ce
+/// chemin n'est jamais exécuté.
+const bool kAllowAdminLogin =
+    bool.fromEnvironment('ALLOW_ADMIN_LOGIN', defaultValue: false);
+
+/// Vrai seulement en version de test (voir [kAllowAdminLogin]).
+const bool kAdminLoginActif = kDebugMode || kAllowAdminLogin;
+
+enum EtatSessionPerdue { visiteur, definitive, temporaire }
 
 class NestAuthResult {
   final bool success;
@@ -59,7 +84,7 @@ class NestAuthService {
         'prenom': prenom,
         'name': name,
         'email': email.trim().toLowerCase(),
-        'phone': phone.trim(),
+        'phone': normaliserTelephone(phone),
         'password': password,
       });
 
@@ -161,11 +186,72 @@ class NestAuthService {
         ),
       ]);
 
+      // Présence « En ligne » : premier ping tout de suite pour ce compte.
+      PresenceService.instance.pingNow();
+
+      // Nouvelle session : on oublie les échecs de renouvellement passés et on
+      // démarre le sondage des notifications (avant, il ne démarrait qu'au
+      // lancement à froid de l'appli).
+      ApiService.reinitialiserRafraichissement();
+      NotificationService.instance.subscribeToUserNotifications();
+
       return NestAuthResult.success(data);
     } on DioException catch (e) {
+      // Version de test seulement : identifiants inconnus côté utilisateurs
+      // (401) -> on essaie la table des administrateurs. Un 403 (compte
+      // bloqué / e-mail non vérifié) prouve que le compte existe côté
+      // utilisateurs : on ne tente pas l'admin dans ce cas.
+      if (kAdminLoginActif && e.response?.statusCode == 401) {
+        final admin = await _tenterConnexionAdminTest(identifier, password);
+        if (admin != null) return admin;
+      }
       return NestAuthResult.failure(_extractError(e));
     } catch (_) {
       return NestAuthResult.failure('Erreur inattendue. Veuillez réessayer.');
+    }
+  }
+
+  /// Connexion admin de test. Retourne null si elle échoue (le message
+  /// d'erreur affiché reste alors celui de la connexion normale).
+  /// La réponse serveur est { accessToken, admin: { id, email, role, ... } } :
+  /// pas de refreshToken, pas de tableau `roles`.
+  Future<NestAuthResult?> _tenterConnexionAdminTest(
+    String identifier,
+    String password,
+  ) async {
+    // Double verrou : même appelée par erreur, rien ne part en production.
+    if (!kAdminLoginActif) return null;
+    try {
+      final response = await _client.post('/api/v1/auth/admin/login', data: {
+        'identifier': identifier.trim(),
+        'password': password,
+      });
+      final data = Map<String, dynamic>.from(response.data as Map);
+      final accessToken = data['accessToken'] as String;
+      final admin = Map<String, dynamic>.from(data['admin'] as Map);
+
+      final roleAdmin = (admin['role'] as String? ?? 'admin').toLowerCase();
+      final nestRole = roleAdmin == 'superadmin' ? 'superadmin' : 'admin';
+
+      await Future.wait([
+        // Refresh token vide : le serveur n'en fournit pas pour les admins
+        // et l'application ne s'en sert nulle part.
+        TokenStorageService.instance.saveTokens(
+          accessToken: accessToken,
+          refreshToken: '',
+        ),
+        TokenStorageService.instance.saveUserInfo(
+          role: nestRole,
+          userId: admin['id']?.toString() ?? '',
+          email: admin['email'] as String? ?? '',
+        ),
+      ]);
+
+      // Pas de PresenceService.pingNow() : le ping de présence concerne les
+      // utilisateurs, pas la table des administrateurs.
+      return NestAuthResult.success({...data, 'user': admin});
+    } catch (_) {
+      return null;
     }
   }
 
@@ -174,21 +260,28 @@ class NestAuthService {
   Future<NestAuthResult> submitVendorProfile({
     required String shopName,
     required String shopAddress,
-    required String activityType,
+    // Catégories de la plateforme (1 a 5) ; activityType n'est plus
+    // envoye que si aucune categorie n'est fournie (repli ancien format).
+    List<String>? categoryIds,
+    String? activityType,
     required String description,
-    required String idDocumentUrl,
-    required String selfieUrl,
-    required List<String> sampleProductUrls,
+    String? idDocumentUrl,
+    String? selfieUrl,
+    List<String>? sampleProductUrls,
   }) async {
     try {
+      final hasCategories = categoryIds != null && categoryIds.isNotEmpty;
       await _client.post('/api/v1/vendors/apply', data: {
         'shopName': shopName,
         'shopAddress': shopAddress,
-        'activityType': activityType,
+        if (hasCategories) 'categoryIds': categoryIds,
+        if (!hasCategories && (activityType ?? '').isNotEmpty)
+          'activityType': activityType,
         'description': description,
-        'idDocumentUrl': idDocumentUrl,
-        'selfieUrl': selfieUrl,
-        'sampleProductUrls': sampleProductUrls,
+        if (idDocumentUrl != null) 'idDocumentUrl': idDocumentUrl,
+        if (selfieUrl != null) 'selfieUrl': selfieUrl,
+        if (sampleProductUrls != null && sampleProductUrls.isNotEmpty)
+          'sampleProductUrls': sampleProductUrls,
         'termsAccepted': true,
         'fraudPenaltiesAccepted': true,
       });
@@ -208,9 +301,9 @@ class NestAuthService {
     required String ville,
     required String quartier,
     required String preciseAddress,
-    required String idDocumentUrl,
-    required String selfieUrl,
-    required String vehiclePhotoUrl,
+    String? idDocumentUrl,
+    String? selfieUrl,
+    String? vehiclePhotoUrl,
     required String licensePlate,
   }) async {
     try {
@@ -220,9 +313,9 @@ class NestAuthService {
         'ville': ville,
         'quartier': quartier,
         'preciseAddress': preciseAddress,
-        'idDocumentUrl': idDocumentUrl,
-        'selfieUrl': selfieUrl,
-        'vehiclePhotoUrl': vehiclePhotoUrl,
+        if (idDocumentUrl != null) 'idDocumentUrl': idDocumentUrl,
+        if (selfieUrl != null) 'selfieUrl': selfieUrl,
+        if (vehiclePhotoUrl != null) 'vehiclePhotoUrl': vehiclePhotoUrl,
         'licensePlate': licensePlate,
         'termsAccepted': true,
         'fraudPenaltiesAccepted': true,
@@ -232,6 +325,49 @@ class NestAuthService {
       return NestAuthResult.failure(_extractError(e));
     } catch (_) {
       return NestAuthResult.failure('Erreur lors de la soumission du profil livreur.');
+    }
+  }
+
+  // ── Compléter mes documents (vendeur, dossier en attente) ──────────────────
+
+  Future<NestAuthResult> completeVendorDocuments({
+    String? idDocumentUrl,
+    String? selfieUrl,
+    List<String>? sampleProductUrls,
+  }) async {
+    try {
+      await _client.patch('/api/v1/vendors/me/documents', data: {
+        if (idDocumentUrl != null) 'idDocumentUrl': idDocumentUrl,
+        if (selfieUrl != null) 'selfieUrl': selfieUrl,
+        if (sampleProductUrls != null && sampleProductUrls.isNotEmpty)
+          'sampleProductUrls': sampleProductUrls,
+      });
+      return NestAuthResult.success();
+    } on DioException catch (e) {
+      return NestAuthResult.failure(_extractError(e));
+    } catch (_) {
+      return NestAuthResult.failure('Erreur lors de la mise à jour des documents.');
+    }
+  }
+
+  // ── Compléter mes documents (livreur, dossier en attente) ──────────────────
+
+  Future<NestAuthResult> completeAgentDocuments({
+    String? idDocumentUrl,
+    String? selfieUrl,
+    String? vehiclePhotoUrl,
+  }) async {
+    try {
+      await _client.patch('/api/v1/delivery-agents/me/documents', data: {
+        if (idDocumentUrl != null) 'idDocumentUrl': idDocumentUrl,
+        if (selfieUrl != null) 'selfieUrl': selfieUrl,
+        if (vehiclePhotoUrl != null) 'vehiclePhotoUrl': vehiclePhotoUrl,
+      });
+      return NestAuthResult.success();
+    } on DioException catch (e) {
+      return NestAuthResult.failure(_extractError(e));
+    } catch (_) {
+      return NestAuthResult.failure('Erreur lors de la mise à jour des documents.');
     }
   }
 
@@ -250,16 +386,92 @@ class NestAuthService {
     }
   }
 
+  // Avant : rien n'appelait jamais POST /auth/reset-password — le code OTP
+  // envoyé par forgotPassword() n'avait donc aucun endroit où être saisi.
+  // Voir ResetPasswordScreen, qui appelle cette méthode.
+  Future<NestAuthResult> resetPassword({
+    required String email,
+    required String code,
+    required String newPassword,
+    required String confirmPassword,
+  }) async {
+    try {
+      await _client.post('/api/v1/auth/reset-password', data: {
+        'email': email.trim().toLowerCase(),
+        'code': code.trim(),
+        'newPassword': newPassword,
+        'confirmPassword': confirmPassword,
+      });
+      return NestAuthResult.success();
+    } on DioException catch (e) {
+      return NestAuthResult.failure(_extractError(e));
+    } catch (_) {
+      return NestAuthResult.failure('Erreur lors de la réinitialisation.');
+    }
+  }
+
+  // Renvoie un code de réinitialisation de mot de passe (type différent de
+  // resendOtp() ci-dessus, qui est pour la vérification d'email).
+  Future<NestAuthResult> resendPasswordResetOtp(String email) async {
+    try {
+      await _client.post('/api/v1/auth/resend-otp', data: {
+        'email': email.trim().toLowerCase(),
+        'type': 'réinitialisation du mot de passe',
+      });
+      return NestAuthResult.success();
+    } on DioException catch (e) {
+      return NestAuthResult.failure(_extractError(e));
+    } catch (_) {
+      return NestAuthResult.failure('Erreur lors du renvoi.');
+    }
+  }
+
   // ── Session ───────────────────────────────────────────────────────────────
 
-  Future<bool> isLoggedIn() => TokenStorageService.instance.hasValidSession();
+  Future<bool> isLoggedIn() async {
+    if (await TokenStorageService.instance.hasValidSession()) return true;
+    // Jeton d'accès périmé : si un jeton de rafraîchissement existe, on tente
+    // de renouveler la session au lieu de renvoyer l'utilisateur à la
+    // connexion (une seule tentative partagée, voir ApiService).
+    final refresh = await TokenStorageService.instance.getRefreshToken();
+    if (refresh == null || refresh.isEmpty) return false;
+    final r = await ApiService.rafraichirSession();
+    return r == ResultatRafraichissement.reussi;
+  }
+
+  /// À appeler par un écran connecté quand [isLoggedIn] vient de répondre
+  /// « non ». Distingue :
+  ///  - [EtatSessionPerdue.visiteur] : personne n'a jamais été connecté ici ;
+  ///  - [EtatSessionPerdue.definitive] : la session est perdue (jeton refusé
+  ///    ou sans possibilité de renouvellement) -> déconnexion lancée ici ;
+  ///  - [EtatSessionPerdue.temporaire] : renouvellement impossible pour
+  ///    l'instant (réseau...) -> l'écran doit proposer « Réessayer ».
+  Future<EtatSessionPerdue> gererSessionPerdue() async {
+    final acces = await TokenStorageService.instance.getAccessToken();
+    if (acces == null || acces.isEmpty) return EtatSessionPerdue.visiteur;
+    final refresh = await TokenStorageService.instance.getRefreshToken();
+    final sansRefresh = refresh == null || refresh.isEmpty;
+    if (sansRefresh ||
+        ApiService.derniereIssueRafraichissement ==
+            ResultatRafraichissement.refuse) {
+      ApiService.sessionExpiree();
+      return EtatSessionPerdue.definitive;
+    }
+    return EtatSessionPerdue.temporaire;
+  }
 
   Future<String> getUserRole() async {
     final stored = await TokenStorageService.instance.getUserRole();
     return nestRoleToFlutterRoute(stored ?? 'client');
   }
 
-  Future<void> logout() => TokenStorageService.instance.clearAll();
+  Future<void> logout() {
+    NotificationService.instance.unsubscribe();
+    // Ne pas montrer au compte suivant l'état du compte précédent.
+    DelivererAvailability.instance.reset();
+    WishlistService.instance.reset();
+    return TokenStorageService.instance.clearAll();
+  }
 
   // ── Extraction d'erreur Dio ───────────────────────────────────────────────
 

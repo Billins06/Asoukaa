@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
+import '../services/unread_messages_notifier.dart';
+
 class AsoukaaBottomNav extends StatefulWidget {
   final int currentIndex;
   final ValueChanged<int> onTap;
@@ -18,16 +20,20 @@ class AsoukaaBottomNav extends StatefulWidget {
 }
 
 class _AsoukaaBottomNavState extends State<AsoukaaBottomNav> {
-  final int _unreadCount = 0;
-
+  // Le compteur (nombre de DISCUSSIONS avec au moins un message non lu)
+  // vient de UnreadMessagesNotifier : une seule source partagée par toutes
+  // les barres du bas, rafraîchie toutes les 30 s et à chaque lecture d'une
+  // discussion.
   @override
   void initState() {
     super.initState();
-    _loadUnreadCount();
+    UnreadMessagesNotifier.instance.attach();
   }
 
-  Future<void> _loadUnreadCount() async {
-    // Compteur de messages non lus — sera connecté à l'API NestJS
+  @override
+  void dispose() {
+    UnreadMessagesNotifier.instance.detach();
+    super.dispose();
   }
 
   static const List<_NavItem> _items = [
@@ -39,7 +45,7 @@ class _AsoukaaBottomNavState extends State<AsoukaaBottomNav> {
     _NavItem(
       icon: Icons.storefront_outlined,
       activeIcon: Icons.storefront_rounded,
-      label: 'Marché',
+      label: 'Catégories',
     ),
     _NavItem(
       icon: Icons.chat_bubble_outline_rounded,
@@ -49,7 +55,7 @@ class _AsoukaaBottomNavState extends State<AsoukaaBottomNav> {
     _NavItem(
       icon: Icons.receipt_long_outlined,
       activeIcon: Icons.receipt_long_rounded,
-      label: 'Commandes',
+      label: 'Tableau de bord',
     ),
     _NavItem(
       icon: Icons.person_outline_rounded,
@@ -60,10 +66,18 @@ class _AsoukaaBottomNavState extends State<AsoukaaBottomNav> {
 
   @override
   Widget build(BuildContext context) {
-    final effectiveUnread = widget.unreadMessages > 0
-        ? widget.unreadMessages
-        : _unreadCount;
+    return ValueListenableBuilder<int>(
+      valueListenable: UnreadMessagesNotifier.instance.count,
+      builder: (context, unreadCount, _) {
+        final effectiveUnread = widget.unreadMessages > 0
+            ? widget.unreadMessages
+            : unreadCount;
+        return _buildBar(effectiveUnread);
+      },
+    );
+  }
 
+  Widget _buildBar(int effectiveUnread) {
     return Container(
       decoration: BoxDecoration(
         color: Colors.white,
@@ -127,27 +141,46 @@ class _AsoukaaBottomNavState extends State<AsoukaaBottomNav> {
                                   ),
                                   if (showBadge)
                                     Positioned(
-                                      right: -6,
-                                      top: -4,
-                                      child: Container(
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 4,
-                                          vertical: 1,
-                                        ),
-                                        decoration: BoxDecoration(
-                                          color: const Color(0xFFFF6210),
-                                          borderRadius: BorderRadius.circular(
-                                            8,
-                                          ),
-                                        ),
-                                        child: Text(
-                                          effectiveUnread > 9
-                                              ? '9+'
-                                              : '$effectiveUnread',
-                                          style: GoogleFonts.outfit(
-                                            fontSize: 8,
-                                            fontWeight: FontWeight.w700,
-                                            color: Colors.white,
+                                      right: -9,
+                                      top: -6,
+                                      child: IgnorePointer(
+                                        child: Semantics(
+                                          label: effectiveUnread == 1
+                                              ? '1 discussion non lue'
+                                              : '$effectiveUnread discussions non lues',
+                                          child: ExcludeSemantics(
+                                            child: Container(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                    horizontal: 4,
+                                                  ),
+                                              constraints: const BoxConstraints(
+                                                minWidth: 16,
+                                                minHeight: 16,
+                                              ),
+                                              decoration: BoxDecoration(
+                                                color: const Color(0xFFFF6210),
+                                                borderRadius:
+                                                    BorderRadius.circular(999),
+                                                border: Border.all(
+                                                  color: Colors.white,
+                                                  width: 1.5,
+                                                ),
+                                              ),
+                                              child: Center(
+                                                child: Text(
+                                                  effectiveUnread > 9
+                                                      ? '9+'
+                                                      : '$effectiveUnread',
+                                                  style: GoogleFonts.outfit(
+                                                    fontSize: 9,
+                                                    fontWeight: FontWeight.w700,
+                                                    color: Colors.white,
+                                                    height: 1.2,
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
                                           ),
                                         ),
                                       ),
@@ -210,7 +243,7 @@ class AsoukaaNavigationRail extends StatelessWidget {
   Widget build(BuildContext context) {
     // ⚠️ Ce rail n'a que 2 destinations (Dashboard, Compte), mais les
     // écrans appelants réutilisent souvent le même index que la barre
-    // de navigation du téléphone (0=Accueil, 1=Marché, 2=Messages,
+    // de navigation du téléphone (0=Accueil, 1=Catégories, 2=Messages,
     // 3=Commandes, 4=Profil). Un index hors bornes (3 ou 4, par ex. sur
     // BuyerDashboardScreen ou DelivererDashboardScreen) faisait planter
     // NavigationRail (assertion sur selectedIndex >= destinations.length),

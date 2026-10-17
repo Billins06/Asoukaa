@@ -2,8 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../../../routes/app_routes.dart';
 import '../../../services/nest_auth_service.dart';
 import '../../../widgets/app_toast.dart';
+import '../../../widgets/category_multi_select.dart';
+import '../../../utils/telephone.dart';
 
 class AuthFormWidget extends StatefulWidget {
   final bool isLogin;
@@ -18,7 +21,7 @@ class AuthFormWidget extends StatefulWidget {
     // Vendeur
     String? shopName,
     String? shopAddress,
-    String? activityType,
+    List<String>? categoryIds,
     String? shopDescription,
     // Livreur
     String? ville,
@@ -63,28 +66,16 @@ class _AuthFormWidgetState extends State<AuthFormWidget> {
   final _shopNameController = TextEditingController();
   final _shopAddressController = TextEditingController();
   final _shopDescController = TextEditingController();
-  String _selectedActivityType = 'Mode & Vêtements';
+  List<String> _selectedCategoryIds = [];
+  String? _categoryError;
 
   // Livreur controllers
   final _villeController = TextEditingController();
   final _quartierController = TextEditingController();
   final _preciseAddressController = TextEditingController();
   final _licensePlateController = TextEditingController();
-  String _selectedVehicleType = 'MOTO';
+  String _selectedVehicleType = 'moto';
   String _selectedAvailability = 'Temps_plein';
-
-  // Files
-  final _picker = ImagePicker();
-  XFile? _idDocumentFile;
-  XFile? _selfieFile;
-  final List<XFile> _sampleProductFiles = [];
-  XFile? _vehiclePhotoFile;
-
-  // File errors
-  String? _idDocumentError;
-  String? _selfieError;
-  String? _sampleProductsError;
-  String? _vehiclePhotoError;
 
   bool _obscurePassword = true;
   bool _rememberMe = false;
@@ -114,24 +105,11 @@ class _AuthFormWidgetState extends State<AuthFormWidget> {
   bool _preciseAddressValid = false;
   bool _licensePlateValid = false;
 
-  final List<String> _activityTypes = [
-    'Mode & Vêtements',
-    'Électronique',
-    'Alimentation',
-    'Beauté & Cosmétiques',
-    'Automobile',
-    'Maison & Déco',
-    'Sports & Loisirs',
-    'Santé',
-    'Enfants & Jouets',
-    'Autres',
-  ];
-
   final List<Map<String, String>> _vehicleTypes = [
-    {'value': 'MOTO', 'label': 'Moto'},
-    {'value': 'VOITURE', 'label': 'Voiture'},
-    {'value': 'TRICYCLE', 'label': 'Tricycle'},
-    {'value': 'VELO', 'label': 'Vélo'},
+    {'value': 'moto', 'label': 'Moto'},
+    {'value': 'voiture', 'label': 'Voiture'},
+    {'value': 'tricycle', 'label': 'Tricycle'},
+    {'value': 'velo', 'label': 'Vélo'},
   ];
 
   final List<Map<String, String>> _availabilities = [
@@ -426,42 +404,6 @@ class _AuthFormWidgetState extends State<AuthFormWidget> {
     );
   }
 
-  // ── Photo pickers ───────────────────────────────────────────────────────────
-
-  Future<void> _pickDocument() async {
-    final file = await _picker.pickImage(source: ImageSource.gallery, imageQuality: 90);
-    if (file != null) {
-      setState(() { _idDocumentFile = file; _idDocumentError = null; });
-      widget.onFilesChanged?.call(idDocument: file);
-    }
-  }
-
-  Future<void> _pickSelfie() async {
-    // Galerie en priorité — la caméra peut ne pas être disponible sur tous les appareils
-    final file = await _picker.pickImage(source: ImageSource.gallery, imageQuality: 90);
-    if (file != null) {
-      setState(() { _selfieFile = file; _selfieError = null; });
-      widget.onFilesChanged?.call(selfie: file);
-    }
-  }
-
-  Future<void> _pickSampleProduct() async {
-    if (_sampleProductFiles.length >= 3) return;
-    final file = await _picker.pickImage(source: ImageSource.gallery, imageQuality: 85);
-    if (file != null) {
-      setState(() { _sampleProductFiles.add(file); _sampleProductsError = null; });
-      widget.onFilesChanged?.call(sampleProducts: List.from(_sampleProductFiles));
-    }
-  }
-
-  Future<void> _pickVehiclePhoto() async {
-    final file = await _picker.pickImage(source: ImageSource.gallery, imageQuality: 85);
-    if (file != null) {
-      setState(() { _vehiclePhotoFile = file; _vehiclePhotoError = null; });
-      widget.onFilesChanged?.call(vehiclePhoto: file);
-    }
-  }
-
   // ── Submit ──────────────────────────────────────────────────────────────────
 
   void _handleSubmit() {
@@ -483,59 +425,33 @@ class _AuthFormWidgetState extends State<AuthFormWidget> {
       _validateLicensePlate();
     }
 
+    // Les documents (pièce d'identité, selfie, photos produits/véhicule) ne
+    // sont plus exigés à l'inscription : ils pourront être complétés plus
+    // tard depuis l'écran "compléter mon dossier". hasFileError reste donc
+    // toujours false — conservé pour ne pas modifier la logique de validation
+    // du formulaire ci-dessous.
     bool hasFileError = false;
-    if (!widget.isLogin) {
-      if (widget.accountType == 'vendeur') {
-        if (_idDocumentFile == null) {
-          setState(() => _idDocumentError = 'Pièce d\'identité requise');
-          hasFileError = true;
-        }
-        if (_selfieFile == null) {
-          setState(() => _selfieError = 'Selfie requis');
-          hasFileError = true;
-        }
-        if (_sampleProductFiles.isEmpty) {
-          setState(() => _sampleProductsError = 'Au moins une photo de produit requise');
-          hasFileError = true;
-        }
-      }
-      if (widget.accountType == 'livreur') {
-        if (_idDocumentFile == null) {
-          setState(() => _idDocumentError = 'Pièce d\'identité requise');
-          hasFileError = true;
-        }
-        if (_selfieFile == null) {
-          setState(() => _selfieError = 'Selfie requis');
-          hasFileError = true;
-        }
-        if (_vehiclePhotoFile == null) {
-          setState(() => _vehiclePhotoError = 'Photo du véhicule requise');
-          hasFileError = true;
-        }
-      }
-    }
 
     final formValid = _formKey.currentState?.validate() ?? false;
+
+    // Vendeur : au moins une categorie de la plateforme est obligatoire.
+    if (widget.accountType == 'vendeur' && _selectedCategoryIds.isEmpty) {
+      setState(() => _categoryError =
+          'Choisissez au moins une catégorie pour votre boutique');
+      return;
+    }
     if (!formValid || hasFileError) return;
 
     if (widget.accountType == 'vendeur') {
-      widget.onFormDataChanged?.call(activityType: _selectedActivityType);
-      widget.onFilesChanged?.call(
-        idDocument: _idDocumentFile,
-        selfie: _selfieFile,
-        sampleProducts: List.from(_sampleProductFiles),
-      );
+      widget.onFormDataChanged?.call(categoryIds: _selectedCategoryIds);
+      widget.onFilesChanged?.call();
     }
     if (widget.accountType == 'livreur') {
       widget.onFormDataChanged?.call(
         vehicleType: _selectedVehicleType,
         availability: _selectedAvailability,
       );
-      widget.onFilesChanged?.call(
-        idDocument: _idDocumentFile,
-        selfie: _selfieFile,
-        vehiclePhoto: _vehiclePhotoFile,
-      );
+      widget.onFilesChanged?.call();
     }
     widget.onSubmit();
   }
@@ -572,7 +488,7 @@ class _AuthFormWidgetState extends State<AuthFormWidget> {
               isValid: _phoneValid,
               validator: (v) {
                 if (v == null || v.isEmpty) return 'Numéro requis';
-                if (!RegExp(r'^\+?[0-9]{8,15}$').hasMatch(v.replaceAll(' ', ''))) {
+                if (!RegExp(r'^\+?[0-9]{8,15}$').hasMatch(normaliserTelephone(v))) {
                   return 'Numéro invalide (ex: +229 97 000 000)';
                 }
                 return null;
@@ -791,9 +707,21 @@ class _AuthFormWidgetState extends State<AuthFormWidget> {
                       if (!ctx.mounted) return;
                       Navigator.pop(ctx);
                       if (result.success) {
-                        AppToast.show(context, message: 'Email de réinitialisation envoyé à $email.', type: ToastType.success);
+                        // Avant : on affichait juste "Email envoyé" et on
+                        // s'arrêtait là — rien n'amenait ensuite la
+                        // personne vers un endroit où saisir le code reçu
+                        // et son nouveau mot de passe.
+                        if (context.mounted) {
+                          Navigator.pushNamed(
+                            context,
+                            AppRoutes.resetPassword,
+                            arguments: email,
+                          );
+                        }
                       } else {
-                        AppToast.show(context, message: result.error ?? 'Erreur lors de l\'envoi', type: ToastType.error);
+                        if (context.mounted) {
+                          AppToast.show(context, message: result.error ?? 'Erreur lors de l\'envoi', type: ToastType.error);
+                        }
                       }
                     },
               style: ElevatedButton.styleFrom(
@@ -835,11 +763,6 @@ class _AuthFormWidgetState extends State<AuthFormWidget> {
               ),
             ],
           ),
-          const SizedBox(height: 12),
-          _buildInfoBanner(
-            'Vos documents seront envoyés automatiquement après la vérification de votre email.',
-            icon: Icons.info_outline_rounded,
-          ),
           const SizedBox(height: 14),
           _FloatingLabelField(
             controller: _shopNameController,
@@ -866,18 +789,34 @@ class _AuthFormWidgetState extends State<AuthFormWidget> {
             },
           ),
           const SizedBox(height: 14),
-          _buildDropdown(
-            label: 'Type d\'activité',
-            icon: Icons.category_outlined,
-            value: _selectedActivityType,
-            items: _activityTypes.map((t) => {'value': t, 'label': t}).toList(),
-            onChanged: (val) {
-              if (val != null) {
-                setState(() => _selectedActivityType = val);
-                widget.onFormDataChanged?.call(activityType: val);
-              }
+          Text(
+            'Catégories de la boutique (5 maximum)',
+            style: GoogleFonts.outfit(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: const Color(0xFF444444),
+            ),
+          ),
+          const SizedBox(height: 8),
+          CategoryMultiSelect(
+            selectedIds: _selectedCategoryIds,
+            maxSelection: 5,
+            onChanged: (ids) {
+              setState(() {
+                _selectedCategoryIds = ids;
+                _categoryError = null;
+              });
+              widget.onFormDataChanged?.call(categoryIds: ids);
             },
           ),
+          if (_categoryError != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(
+                _categoryError!,
+                style: GoogleFonts.outfit(fontSize: 12, color: Colors.red.shade700),
+              ),
+            ),
           const SizedBox(height: 14),
           _FloatingLabelField(
             controller: _shopDescController,
@@ -892,26 +831,6 @@ class _AuthFormWidgetState extends State<AuthFormWidget> {
               return null;
             },
           ),
-          const SizedBox(height: 16),
-          _buildSectionLabel('DOCUMENTS REQUIS'),
-          const SizedBox(height: 10),
-          _buildPhotoPickerRow(
-            label: 'Pièce d\'identité (recto/verso)',
-            icon: Icons.badge_outlined,
-            file: _idDocumentFile,
-            errorText: _idDocumentError,
-            onPick: _pickDocument,
-          ),
-          const SizedBox(height: 10),
-          _buildPhotoPickerRow(
-            label: 'Selfie avec pièce d\'identité',
-            icon: Icons.face_outlined,
-            file: _selfieFile,
-            errorText: _selfieError,
-            onPick: _pickSelfie,
-          ),
-          const SizedBox(height: 10),
-          _buildMultiPhotoPicker(),
         ],
       ),
     );
@@ -939,14 +858,6 @@ class _AuthFormWidgetState extends State<AuthFormWidget> {
                 style: GoogleFonts.outfit(fontSize: 14, fontWeight: FontWeight.w700, color: const Color(0xFF1A1A1A)),
               ),
             ],
-          ),
-          const SizedBox(height: 12),
-          _buildInfoBanner(
-            'Votre compte sera vérifié sous 24–48h après soumission de vos documents.',
-            icon: Icons.info_rounded,
-            color: const Color(0xFFFEF3C7),
-            iconColor: const Color(0xFFD97706),
-            textColor: const Color(0xFF92400E),
           ),
           const SizedBox(height: 14),
           _buildDropdown(
@@ -1025,32 +936,6 @@ class _AuthFormWidgetState extends State<AuthFormWidget> {
               return null;
             },
           ),
-          const SizedBox(height: 16),
-          _buildSectionLabel('DOCUMENTS REQUIS'),
-          const SizedBox(height: 10),
-          _buildPhotoPickerRow(
-            label: 'Pièce d\'identité',
-            icon: Icons.badge_outlined,
-            file: _idDocumentFile,
-            errorText: _idDocumentError,
-            onPick: _pickDocument,
-          ),
-          const SizedBox(height: 10),
-          _buildPhotoPickerRow(
-            label: 'Selfie avec pièce d\'identité',
-            icon: Icons.face_outlined,
-            file: _selfieFile,
-            errorText: _selfieError,
-            onPick: _pickSelfie,
-          ),
-          const SizedBox(height: 10),
-          _buildPhotoPickerRow(
-            label: 'Photo du véhicule',
-            icon: Icons.two_wheeler_rounded,
-            file: _vehiclePhotoFile,
-            errorText: _vehiclePhotoError,
-            onPick: _pickVehiclePhoto,
-          ),
         ],
       ),
     );
@@ -1066,224 +951,6 @@ class _AuthFormWidgetState extends State<AuthFormWidget> {
         fontWeight: FontWeight.w700,
         color: const Color(0xFF9E9E9E),
         letterSpacing: 0.8,
-      ),
-    );
-  }
-
-  Widget _buildPhotoPickerRow({
-    required String label,
-    required IconData icon,
-    required XFile? file,
-    required String? errorText,
-    required VoidCallback onPick,
-  }) {
-    final bool hasFile = file != null;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        GestureDetector(
-          onTap: onPick,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-            decoration: BoxDecoration(
-              color: hasFile ? const Color(0xFFF0FDF4) : const Color(0xFFF8F8F8),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(
-                color: errorText != null
-                    ? const Color(0xFFDC2626)
-                    : hasFile
-                        ? const Color(0xFF16A34A)
-                        : const Color(0xFFE0E0E0),
-                width: hasFile ? 1.5 : 1,
-              ),
-            ),
-            child: Row(
-              children: [
-                Icon(
-                  hasFile ? Icons.check_circle_rounded : icon,
-                  size: 20,
-                  color: hasFile
-                      ? const Color(0xFF16A34A)
-                      : errorText != null
-                          ? const Color(0xFFDC2626)
-                          : const Color(0xFF9E9E9E),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    hasFile ? file.name : label,
-                    style: GoogleFonts.outfit(
-                      fontSize: 13,
-                      color: hasFile
-                          ? const Color(0xFF16A34A)
-                          : errorText != null
-                              ? const Color(0xFFDC2626)
-                              : const Color(0xFF9E9E9E),
-                      fontWeight: hasFile ? FontWeight.w500 : FontWeight.w400,
-                    ),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                Icon(
-                  hasFile ? Icons.edit_rounded : Icons.upload_rounded,
-                  size: 16,
-                  color: hasFile ? const Color(0xFF16A34A) : const Color(0xFF9E9E9E),
-                ),
-              ],
-            ),
-          ),
-        ),
-        if (errorText != null)
-          Padding(
-            padding: const EdgeInsets.only(top: 6, left: 4),
-            child: Row(
-              children: [
-                const Icon(Icons.info_outline_rounded, size: 13, color: Color(0xFFDC2626)),
-                const SizedBox(width: 4),
-                Expanded(
-                  child: Text(
-                    errorText,
-                    style: GoogleFonts.outfit(fontSize: 11, color: const Color(0xFFDC2626)),
-                  ),
-                ),
-              ],
-            ),
-          ),
-      ],
-    );
-  }
-
-  Widget _buildMultiPhotoPicker() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: Text(
-                'Photos produits (${_sampleProductFiles.length}/3)',
-                style: GoogleFonts.outfit(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w400,
-                  color: _sampleProductsError != null && _sampleProductFiles.isEmpty
-                      ? const Color(0xFFDC2626)
-                      : const Color(0xFF9E9E9E),
-                ),
-              ),
-            ),
-            if (_sampleProductFiles.length < 3)
-              GestureDetector(
-                onTap: _pickSampleProduct,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFFF6210).withAlpha(15),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: const Color(0xFFFF6210).withAlpha(80)),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(Icons.add_photo_alternate_rounded, size: 14, color: Color(0xFFFF6210)),
-                      const SizedBox(width: 4),
-                      Text(
-                        'Ajouter',
-                        style: GoogleFonts.outfit(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                          color: const Color(0xFFFF6210),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-          ],
-        ),
-        if (_sampleProductsError != null && _sampleProductFiles.isEmpty)
-          Padding(
-            padding: const EdgeInsets.only(top: 6, left: 4),
-            child: Row(
-              children: [
-                const Icon(Icons.info_outline_rounded, size: 13, color: Color(0xFFDC2626)),
-                const SizedBox(width: 4),
-                Expanded(
-                  child: Text(
-                    _sampleProductsError!,
-                    style: GoogleFonts.outfit(fontSize: 11, color: const Color(0xFFDC2626)),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        if (_sampleProductFiles.isNotEmpty) ...[
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            runSpacing: 6,
-            children: _sampleProductFiles.asMap().entries.map((e) {
-              return Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFF0FDF4),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: const Color(0xFF16A34A).withAlpha(80)),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(Icons.image_rounded, size: 13, color: Color(0xFF16A34A)),
-                    const SizedBox(width: 4),
-                    ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 120),
-                      child: Text(
-                        e.value.name,
-                        style: GoogleFonts.outfit(fontSize: 11, color: const Color(0xFF16A34A)),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    const SizedBox(width: 4),
-                    GestureDetector(
-                      onTap: () => setState(() => _sampleProductFiles.removeAt(e.key)),
-                      child: const Icon(Icons.close_rounded, size: 13, color: Color(0xFF16A34A)),
-                    ),
-                  ],
-                ),
-              );
-            }).toList(),
-          ),
-        ],
-      ],
-    );
-  }
-
-  Widget _buildInfoBanner(
-    String text, {
-    IconData icon = Icons.upload_file_rounded,
-    Color color = const Color(0xFFEFF6FF),
-    Color iconColor = const Color(0xFF2563EB),
-    Color textColor = const Color(0xFF1E40AF),
-  }) {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(10)),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon, size: 16, color: iconColor),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              text,
-              style: GoogleFonts.outfit(
-                fontSize: 12,
-                fontWeight: FontWeight.w400,
-                color: textColor,
-                height: 1.4,
-              ),
-            ),
-          ),
-        ],
       ),
     );
   }

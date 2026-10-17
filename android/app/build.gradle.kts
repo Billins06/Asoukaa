@@ -22,16 +22,21 @@ android {
 
     signingConfigs {
         create("release") {
-            // Release signing config — configure keystore credentials via environment variables
-            // or local.properties before publishing to Play Store
-            val keystorePath = System.getenv("KEYSTORE_PATH") ?: "keystore/release.keystore"
-            val keystoreFile = file(keystorePath)
+            // Les identifiants viennent exclusivement de l'environnement : aucune
+            // valeur par défaut, sans quoi le mot de passe de signature se
+            // retrouve en clair dans le dépôt.
+            // Exporter KEYSTORE_PATH, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD
+            // avant `flutter build apk --release`.
+            val keystoreFile = file(System.getenv("KEYSTORE_PATH") ?: "keystore/release.keystore")
+            val storePass = System.getenv("KEYSTORE_PASSWORD")
+            val alias = System.getenv("KEY_ALIAS")
+            val keyPass = System.getenv("KEY_PASSWORD")
 
-            if (keystoreFile.exists()) {
+            if (keystoreFile.exists() && storePass != null && alias != null && keyPass != null) {
                 storeFile = keystoreFile
-                storePassword = System.getenv("KEYSTORE_PASSWORD") ?: "asoukaa2026"
-                keyAlias = System.getenv("KEY_ALIAS") ?: "asoukaa"
-                keyPassword = System.getenv("KEY_PASSWORD") ?: "asoukaa2026"
+                storePassword = storePass
+                keyAlias = alias
+                keyPassword = keyPass
             }
         }
     }
@@ -50,6 +55,14 @@ android {
             signingConfig = if (releaseConfig.storeFile != null && releaseConfig.storeFile!!.exists()) {
                 releaseConfig
             } else {
+                // Un APK signé avec la clé de debug ne peut pas être publié sur le
+                // Play Store et utilise une clé publiquement connue : on prévient
+                // bruyamment au lieu de laisser passer un build "release" trompeur.
+                logger.warn(
+                    "ATTENTION : keystore de release absent ou identifiants manquants " +
+                    "(KEYSTORE_PATH / KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD). " +
+                    "L'APK sera signé avec la clé de DEBUG — ne pas distribuer."
+                )
                 signingConfigs.getByName("debug")
             }
             isMinifyEnabled = false

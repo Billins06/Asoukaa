@@ -10,6 +10,8 @@ import '../../services/api_service.dart';
 import '../../services/user_service.dart';
 import '../../services/delivery_zone_service.dart';
 import '../../widgets/app_toast.dart';
+import '../../widgets/delivery_selector_widget.dart';
+import '../../utils/lecture_json.dart';
 
 class CartScreen extends StatefulWidget {
   const CartScreen({super.key});
@@ -55,8 +57,25 @@ class _CartScreenState extends State<CartScreen> {
       final fee = await DeliveryZoneService.instance.feeForCommune(
         defaultAddress.ville,
       );
-      if (mounted) setState(() => _deliveryFee = fee.toDouble());
+      if (mounted) {
+        setState(() {
+          _deliveryFee = fee.toDouble();
+          _selectedCity = defaultAddress.ville;
+          _deliverySelectorSeed++;
+        });
+      }
     } catch (_) {}
+  }
+
+  void _onDeliverySelectionChanged(DeliverySelection selection) {
+    setState(() {
+      _deliveryMode = selection.mode;
+      _selectedCity = selection.city;
+      _deliveryFee = selection.fee;
+      _isNordZone = selection.isNordZone;
+      _transportMode = selection.transportMode;
+      _deliverySelectionComplete = selection.isComplete;
+    });
   }
 
   @override
@@ -142,12 +161,19 @@ class _CartScreenState extends State<CartScreen> {
       shopId = shopData is Map ? (shopData['id'] as String? ?? '') : '';
     }
 
-    // Prix : unitPrice (figé au moment de l'ajout) ou variant.price
+    // Prix : unitPrice (calculé par le backend : prix dégressif du palier
+    // atteint par la quantité, sinon prix normal) ou variant.price
     final unitPriceRaw = item['unitPrice'] ?? (variant != null ? variant['price'] : null);
     final price = (unitPriceRaw is num)
         ? unitPriceRaw.toInt()
         : (double.tryParse(unitPriceRaw?.toString() ?? '') ?? 0).toInt();
-    final originalPrice = price;
+    // Prix normal de la variante : s'il est supérieur au prix unitaire, un
+    // prix dégressif s'applique → prix normal barré + ligne "Économies".
+    final variantPriceRaw = variant != null ? variant['price'] : null;
+    final variantPrice = (variantPriceRaw is num)
+        ? variantPriceRaw.toInt()
+        : (double.tryParse(variantPriceRaw?.toString() ?? '') ?? 0).toInt();
+    final originalPrice = variantPrice > price ? variantPrice : price;
 
     // Stock
     final stockQty = variant != null
@@ -193,9 +219,20 @@ class _CartScreenState extends State<CartScreen> {
             (item['quantity'] as int).toDouble(),
   );
 
-  // Estimation ; recalculée pour de bon à l'étape de paiement selon la
-  // commune finalement choisie (voir checkout_screen).
+  // Choix de livraison : vit ici depuis que ce reglage a ete deplace du
+  // paiement vers le panier, pour que le client voie le total exact avant
+  // meme d'arriver a l'ecran de paiement (voir DeliverySelectorWidget).
   double _deliveryFee = 0;
+  String _deliveryMode = 'livraison';
+  String _selectedCity = '';
+  String? _transportMode;
+  bool _isNordZone = false;
+  bool _deliverySelectionComplete = true;
+  // Ne change que quand une adresse par défaut est chargée en arrière-plan
+  // (voir _loadDeliveryFeeEstimate) — sert de clé au widget ci-dessous pour
+  // qu'il se réinitialise avec la commune préremplie SANS se recréer à
+  // chaque lettre tapée par l'utilisateur (voir ValueKey plus bas).
+  int _deliverySelectorSeed = 0;
 
   double get _total => _subtotal - _promoDiscount + _deliveryFee;
 
@@ -232,10 +269,30 @@ class _CartScreenState extends State<CartScreen> {
       // Le backend n'expose que PUT sur cette route (pas PATCH) :
       // un PATCH échoue silencieusement (404/405) et la quantité
       // affichée localement n'est jamais persistée côté serveur.
-      await ApiService.instance.client.put(
+      final res = await ApiService.instance.client.put(
         '/api/v1/cart/items/$cartItemId',
         data: {'quantity': qty},
       );
+      // Le backend renvoie le panier recalculé : changer la quantité peut
+      // faire franchir (ou quitter) un palier de prix dégressif, on reprend
+      // donc le prix unitaire serveur de cet article.
+      final body = res.data;
+      final rawItems = body is Map ? body['items'] : null;
+      if (rawItems is List && mounted) {
+        for (final raw in rawItems.whereType<Map>()) {
+          if ((raw['id'] ?? '').toString() != cartItemId) continue;
+          final fresh = _normalizeCartItem(Map<String, dynamic>.from(raw));
+          final idx = _cartItems.indexWhere((e) => e['id'] == cartItemId);
+          // Ignoré si l'utilisateur a encore changé la quantité entre-temps
+          if (idx != -1 && _cartItems[idx]['quantity'] == fresh['quantity']) {
+            setState(() {
+              _cartItems[idx]['price'] = fresh['price'];
+              _cartItems[idx]['originalPrice'] = fresh['originalPrice'];
+            });
+          }
+          break;
+        }
+      }
     } catch (_) {}
   }
 
@@ -367,7 +424,7 @@ class _CartScreenState extends State<CartScreen> {
       setState(() {
         _promoApplied = true;
         _promoCode = code;
-        _promoDiscount = discount is num ? discount.toDouble() : 0;
+        _promoDiscount = lireDouble(discount);
         _promoMessage = message ?? 'Code "$code" appliqué';
       });
       AppToast.show(context, message: _promoMessage, type: ToastType.success);
@@ -404,49 +461,22 @@ class _CartScreenState extends State<CartScreen> {
       return;
     }
 
-    // Enforce single-shop constraint
-    final shopIds = inStockItems
-        .map((i) => i['shop_id'] as String? ?? '')
-        .where((id) => id.isNotEmpty)
-        .toSet();
-    if (shopIds.length > 1) {
-      showDialog(
-        context: context,
-        builder: (_) => AlertDialog(
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-          ),
-          title: Text(
-            'Articles de plusieurs boutiques',
-            style: GoogleFonts.outfit(
-              fontSize: 16,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-          content: Text(
-            'Une commande ne peut contenir des articles que d\'une seule boutique. Veuillez retirer les articles des autres boutiques avant de continuer.',
-            style: GoogleFonts.outfit(
-              fontSize: 14,
-              color: AppTheme.textSecondary,
-              height: 1.5,
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: Text(
-                'Compris',
-                style: GoogleFonts.outfit(
-                  color: AppTheme.primary,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-          ],
-        ),
+    if (!_deliverySelectionComplete) {
+      AppToast.show(
+        context,
+        message: _selectedCity.trim().isEmpty
+            ? 'Choisissez votre commune de livraison'
+            : 'Choisissez bus ou taxi pour cette commune',
+        type: ToastType.error,
       );
       return;
     }
+
+    // ⚠️ Un panier réparti sur plusieurs boutiques n'est plus bloqué ici :
+    // le backend (OrdersService.createFromCart) crée automatiquement une
+    // commande par boutique, et un seul paiement est demandé au client
+    // pour l'ensemble (voir PaymentsService.initiateGroupPayment). Le
+    // client n'a donc plus besoin de retirer les articles manuellement.
 
     // Pass cart items to checkout
     Navigator.pushNamed(
@@ -456,8 +486,14 @@ class _CartScreenState extends State<CartScreen> {
         'cartItems': inStockItems,
         'subtotal': _subtotal,
         'promoDiscount': _promoDiscount,
+        // Code promo validé : transmis à la création de la commande.
+        'couponCode': (_promoApplied && _promoCode.isNotEmpty) ? _promoCode : null,
         'deliveryFee': _deliveryFee,
         'total': _total,
+        'deliveryMode': _deliveryMode,
+        'city': _selectedCity,
+        'transportMode': _transportMode,
+        'isNordZone': _isNordZone,
       },
     );
   }
@@ -658,6 +694,8 @@ class _CartScreenState extends State<CartScreen> {
                   (e) => _buildCartItem(e.key, e.value),
                 ),
                 const SizedBox(height: 8),
+                _buildDeliverySection(),
+                const SizedBox(height: 8),
                 _buildPromoSection(),
                 const SizedBox(height: 8),
                 _buildPriceSummary(),
@@ -695,6 +733,8 @@ class _CartScreenState extends State<CartScreen> {
                 child: ListView(
                   padding: const EdgeInsets.all(16),
                   children: [
+                    _buildDeliverySection(),
+                    const SizedBox(height: 12),
                     _buildPromoSection(),
                     const SizedBox(height: 12),
                     _buildPriceSummary(),
@@ -1062,6 +1102,54 @@ class _CartScreenState extends State<CartScreen> {
                 ),
               ],
             ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDeliverySection() {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: AppTheme.surface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppTheme.outline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(
+                Icons.local_shipping_outlined,
+                size: 18,
+                color: AppTheme.primary,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                'Mode de réception',
+                style: GoogleFonts.outfit(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: AppTheme.textPrimary,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          DeliverySelectorWidget(
+            // ⚠️ Avant : key: ValueKey(_selectedCity) — _selectedCity change
+            // à CHAQUE lettre tapée dans le champ commune (via onChanged plus
+            // bas), donc Flutter détruisait et recréait tout le widget (et
+            // son clavier) à chaque frappe. La clé ne doit changer que
+            // lorsqu'une adresse par défaut est chargée en arrière-plan.
+            key: ValueKey(_deliverySelectorSeed),
+            initialMode: _deliveryMode,
+            initialCity: _selectedCity,
+            initialTransportMode: _transportMode,
+            onChanged: _onDeliverySelectionChanged,
+          ),
         ],
       ),
     );

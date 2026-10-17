@@ -1,10 +1,13 @@
 import 'package:flutter/foundation.dart';
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:feexpay_flutter/feexpay_flutter.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../../theme/app_theme.dart';
+import '../../services/upload_service.dart';
 import '../../widgets/app_navigation.dart';
 import '../../widgets/status_badge_widget.dart';
 import '../../routes/app_routes.dart';
@@ -13,7 +16,12 @@ import '../../widgets/loading_skeleton_widget.dart';
 import '../../widgets/connection_error_widget.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import '../../services/nest_auth_service.dart';
+import '../../services/mode_service.dart';
 import '../../services/api_service.dart';
+import '../../widgets/app_toast.dart';
+import '../../widgets/delivery_selector_widget.dart';
+import '../../services/delivery_zone_service.dart';
+import '../../utils/telephone.dart';
 
 class SellerDashboardScreen extends StatefulWidget {
   const SellerDashboardScreen({super.key});
@@ -39,6 +47,8 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
   @override
   void initState() {
     super.initState();
+    // Ouvrir l'espace vendeur = être en mode vendeur (mémorisé pour la prochaine ouverture).
+    ModeService.instance.setLastMode(ModeService.vendeur);
     _tabController = TabController(length: 7, vsync: this);
     if (!kIsWeb) {
       SystemChrome.setSystemUIOverlayStyle(
@@ -84,7 +94,9 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
     switch ((raw ?? '').toLowerCase()) {
       case 'en cours':
         return OrderStatus.processing;
+      case 'livreur affecté':
       case 'expedié':
+      case 'en transit':
         return OrderStatus.inDelivery;
       case 'livré':
         return OrderStatus.completed;
@@ -107,21 +119,59 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
     );
     final rawStatus = (p['status'] as String? ?? '');
     final isActive = rawStatus == 'active';
+    // On garde les 4 statuts backend distincts (avant, tout ce qui
+    // n'etait pas 'active' devenait 'draft'), donc un produit desactive
+    // ('inactive') apparaissait a tort dans l'onglet "Brouillons".
+    final normalizedStatus = switch (rawStatus) {
+      'active' => 'published',
+      'inactive' => 'unpublished',
+      'out_of_stock' => 'out_of_stock',
+      _ => 'draft',
+    };
     final rawPrice = p['basePrice'];
     final amount = rawPrice is num
         ? rawPrice.round()
         : (double.tryParse(rawPrice?.toString() ?? '') ?? 0).round();
+    // Paliers degressifs bruts {minQuantity, price} (int), meme logique que
+    // product_detail_screen.dart (variable parsedTiers) -- utilises par
+    // unitPriceForProduct() dans _showInitiateOrderDialog pour calculer le
+    // prix unitaire reel selon la quantite choisie par le vendeur.
+    final rawTiers = p['tierPrices'];
+    final List<Map<String, int>> tierPrices = [];
+    if (rawTiers is List) {
+      for (final t in rawTiers) {
+        if (t is! Map) continue;
+        final minQty = int.tryParse('${t['minQuantity'] ?? ''}');
+        final tierPrice = double.tryParse('${t['price'] ?? ''}');
+        if (minQty == null || minQty < 1) continue;
+        if (tierPrice == null || tierPrice <= 0) continue;
+        tierPrices.add({'minQuantity': minQty, 'price': tierPrice.round()});
+      }
+    }
+    tierPrices.sort((a, b) => a['minQuantity']!.compareTo(b['minQuantity']!));
     return {
       'id': (p['id'] ?? '').toString(),
       'name': p['prod_name'] as String? ?? 'Produit',
       'price': '${_formatPrice(amount)} FCFA',
+      // Prix de base numérique (avant paliers dégressifs), utilisé par le
+      // formulaire "Initier une commande" pour calculer le total en direct
+      // (voir _unitPriceForQty dans _showInitiateOrderDialog).
+      'rawPrice': amount,
+      'tierPrices': tierPrices,
       'image': imageUrl,
       'stock': stock,
-      // Pas encore fourni par le backend (pas de compteur de vues côté API).
-      'views': 0,
+      // Compteur de vues réel : colonne products."nombreVues", incrémentée
+      // à chaque ouverture d'une fiche produit (GET /products/:id).
+      'views': (p['nombreVues'] as num?)?.toInt() ?? 0,
+      // Quantité réellement vendue, incrémentée au passage d'une commande
+      // au statut "livré" (avant, cette valeur restait figée à zéro).
       'sales': (p['totalVentes'] as num?)?.toInt() ?? 0,
-      'status': isActive ? 'published' : 'draft',
+      'status': normalizedStatus,
       'is_active': isActive,
+      // Variante par défaut utilisée pour "Initier une commande pour un
+      // client" (POST /orders/vendor-initiated attend un variantId, pas un
+      // productId — c'est la variante qui porte le stock et le prix réel).
+      'variantId': variants.isNotEmpty ? (variants.first['id'] ?? '').toString() : '',
     };
   }
 
@@ -143,8 +193,30 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
     final amount = rawTotal is num
         ? rawTotal.round()
         : (double.tryParse(rawTotal?.toString() ?? '') ?? 0).round();
+    // Pastille d'une commande « en attente » : depuis le nouveau flux, une
+    // commande payée reste « en attente » jusqu'au « Confirmer » du vendeur.
+    // « À confirmer » = c'est au vendeur d'agir (paiement réussi, ou paiement
+    // à la livraison) ; « Paiement en attente » = le client n'a pas encore
+    // payé. Même règle que le serveur (computeConfirmBy).
+    String? badgeAttente;
+    if ((o['status'] ?? '').toString().toLowerCase() == 'en attente') {
+      final paiement = o['payment'] as Map?;
+      final payStatus = paiement?['status'];
+      final payMethod = paiement?['method'];
+      final aConfirmer = payStatus == 'success' ||
+          (payMethod == 'cash_on_delivery' && payStatus == 'en attente');
+      badgeAttente = aConfirmer ? 'À confirmer' : 'Paiement en attente';
+    }
     return {
-      'id': (o['orderNumber'] ?? o['id'] ?? '').toString(),
+      // Prefixe '#' pour rester identique a l'affichage cote client
+      // (buyer_dashboard_screen.dart / order_tracking_screen.dart) : avant
+      // ce correctif, le tableau de bord vendeur affichait le code SANS le
+      // '#', par ex. "ASK-2026-00007" au lieu de "#ASK-2026-00007" — le
+      // numero etait deja correct, seul le format d'affichage differait.
+      'id': (() {
+        final raw = (o['orderNumber'] ?? o['id'] ?? '').toString();
+        return raw.isEmpty ? raw : '#$raw';
+      })(),
       'rawId': (o['id'] ?? '').toString(),
       'status': _mapOrderStatus(o['status'] as String?),
       'image': imageUrl,
@@ -156,6 +228,28 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
       'qty': qty,
       'date': _formatShortDate(o['createdAt'] as String?),
       'price': '${_formatPrice(amount)} FCFA',
+      // ⚠️ Le vendeur ne peut plus marquer une commande "payée en
+      // espèces" lui-même (voir suppression de _confirmCodPayment /
+      // PATCH /payments/:id/confirm-cod) : c'est désormais au CLIENT de
+      // payer via le bouton "Payer la commande" côté app (Mobile Money),
+      // comme pour une commande normale.
+      // Commande payée par mobile money dont le paiement n'a PAS abouti
+      // (annulé/échoué côté client, jamais confirmé) : le serveur refuse
+      // désormais de la laisser "Confirmer" (voir orders.service.ts,
+      // updateStatus). On l'affiche ici pour que le vendeur comprenne
+      // pourquoi, au lieu d'un simple échec silencieux au clic.
+      'mobileMoneyUnpaid': (o['payment'] as Map?)?['method'] == 'mobile_money'
+          && (o['payment'] as Map?)?['status'] != 'success',
+      'paymentId': ((o['payment'] as Map?)?['id'] ?? '').toString(),
+      // Nécessaires pour savoir quelle action de preuve proposer au
+      // vendeur (Cas A = livreur, Cas B = retrait, Cas C = bus/taxi).
+      'deliveryMode':  (o['deliveryMode'] ?? 'livraison').toString(),
+      'transportMode': o['transportMode'] as String?,
+      'rawStatus':     (o['status'] ?? '').toString(),
+      // Date limite théorique de confirmation (commande en attente), ou null.
+      'confirmBy':     o['confirmBy'],
+      // Libellé de la pastille d'une commande en attente (null sinon).
+      'badgeAttente':  badgeAttente,
     };
   }
 
@@ -181,13 +275,27 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
       final isLoggedIn = await NestAuthService.instance.isLoggedIn()
           .timeout(const Duration(seconds: 5), onTimeout: () => false);
       if (!isLoggedIn) {
-        if (mounted) setState(() => _isLoading = false);
+        // Session perdue : ne pas afficher un faux « 0 » (voir
+        // NestAuthService.gererSessionPerdue).
+        final etat = await NestAuthService.instance.gererSessionPerdue();
+        if (mounted) {
+          setState(() {
+            _isLoading = false;
+            if (etat == EtatSessionPerdue.temporaire) {
+              _hasConnectionError = true;
+            }
+          });
+        }
         return;
       }
 
       Map<String, dynamic>? shop;
       List<Map<String, dynamic>> products = [];
       List<Map<String, dynamic>> orders = [];
+      // Un échec sur les produits ou les commandes ne doit pas s'afficher
+      // comme « 0 produit / 0 commande » : erreur + « Réessayer ».
+      var echecProduits = false;
+      var echecCommandes = false;
 
       try {
         final r = await ApiService.instance.client.get('/api/v1/vendors/me');
@@ -202,7 +310,9 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
             .whereType<Map>()
             .map((e) => _normalizeSellerProduct(Map<String, dynamic>.from(e)))
             .toList();
-      } catch (_) {}
+      } catch (_) {
+        echecProduits = true;
+      }
 
       try {
         final r = await ApiService.instance.client.get('/api/v1/orders/vendor/me');
@@ -212,7 +322,19 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
             .whereType<Map>()
             .map((e) => _normalizeSellerOrder(Map<String, dynamic>.from(e)))
             .toList();
-      } catch (_) {}
+      } catch (_) {
+        echecCommandes = true;
+      }
+
+      if (echecProduits || echecCommandes) {
+        if (mounted) {
+          setState(() {
+            _isLoading = false;
+            _hasConnectionError = true;
+          });
+        }
+        return;
+      }
 
       if (mounted) {
         setState(() {
@@ -242,17 +364,13 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
 
   @override
   Widget build(BuildContext context) {
-    final isTablet = MediaQuery.of(context).size.width >= 600;
-
     return Scaffold(
       backgroundColor: AppTheme.background,
       appBar: _buildAppBar(),
-      body: isTablet ? _buildTabletLayout() : _buildPhoneLayout(),
-      bottomNavigationBar: isTablet
-          ? null
-          : AsoukaaBottomNav(
+      body: _buildPhoneLayout(),
+      bottomNavigationBar: AsoukaaBottomNav(
               currentIndex: _currentNavIndex,
-              onTap: (i) {
+              onTap: (i) async {
                 setState(() => _currentNavIndex = i);
                 switch (i) {
                   case 0:
@@ -266,7 +384,11 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
                     );
                     break;
                   case 2:
-                    Navigator.pushNamed(context, '/chat-screen');
+                    // Boite de reception (toutes les conversations), comme
+                    // le tableau de bord client ; au retour on remet
+                    // l'onglet "Tableau de bord" actif.
+                    await Navigator.pushNamed(context, AppRoutes.conversationsInbox);
+                    if (mounted) setState(() => _currentNavIndex = 3);
                     break;
                   case 3:
                     // Already on seller dashboard
@@ -280,9 +402,25 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
     );
   }
 
+  // Bascule vers l'espace d'achat du client (accueil) et mémorise le choix.
+  Future<void> _switchToClientMode() async {
+    await ModeService.instance.setLastMode(ModeService.client);
+    if (!mounted) return;
+    Navigator.pushNamedAndRemoveUntil(
+      context,
+      AppRoutes.home,
+      (route) => false,
+    );
+  }
+
   PreferredSizeWidget _buildAppBar() {
+    // Hauteur de base 128 + surplus quand la police systeme est agrandie
+    // (sinon "BOTTOM OVERFLOWED" dans l'en-tete des ~150 %).
+    final scaler = MediaQuery.textScalerOf(context);
+    final extraForText =
+        ((scaler.scale(20) + scaler.scale(12) - 32) * 1.3).clamp(0.0, 120.0);
     return PreferredSize(
-      preferredSize: const Size.fromHeight(128),
+      preferredSize: Size.fromHeight(128 + extraForText),
       child: Container(
         color: AppTheme.surface,
         child: SafeArea(
@@ -295,7 +433,8 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
                 ),
                 child: Row(
                   children: [
-                    Column(
+                    Expanded(
+                      child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
@@ -305,48 +444,119 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
                             fontWeight: FontWeight.w700,
                             color: AppTheme.textPrimary,
                           ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                         ),
-                        Text(
-                          _shop?['shopName'] as String? ?? 'Ma boutique',
-                          style: GoogleFonts.outfit(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w400,
-                            color: AppTheme.muted,
-                          ),
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                _shop?['shopName'] as String? ?? 'Ma boutique',
+                                style: GoogleFonts.outfit(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w400,
+                                  color: AppTheme.muted,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            // Boutique masquée par son vendeur (GET /vendors/me
+                            // -> shopVisible == false) : pastille grise.
+                            Container(
+                              width: 6,
+                              height: 6,
+                              decoration: BoxDecoration(
+                                color: _shop?['shopVisible'] == false
+                                    ? AppTheme.muted
+                                    : AppTheme.success,
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              _shop?['shopVisible'] == false
+                                  ? 'Masquée'
+                                  : 'Actif',
+                              style: GoogleFonts.outfit(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: _shop?['shopVisible'] == false
+                                    ? AppTheme.muted
+                                    : AppTheme.success,
+                              ),
+                            ),
+                          ],
                         ),
                       ],
                     ),
-                    const Spacer(),
+                    ),
+                    const SizedBox(width: 10),
+                    // Passage en mode client : l'espace d'achat (accueil).
+                    Tooltip(
+                      message: 'Passer en mode client',
+                      child: Material(
+                        color: AppTheme.primary,
+                        borderRadius: BorderRadius.circular(10),
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(10),
+                          onTap: _switchToClientMode,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 10),
+                            child: SizedBox(
+                              height: 38,
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(
+                                    Icons.shopping_bag_outlined,
+                                    color: Colors.white,
+                                    size: 18,
+                                  ),
+                                  // Libelle court ; icone seule sur petit ecran
+                                  // pour ne pas tronquer "Espace Vendeur" ni
+                                  // le nom de la boutique (le tooltip reste).
+                                  if (MediaQuery.of(context).size.width >= 380) ...[
+                                    const SizedBox(width: 5),
+                                    Text(
+                                      'Client',
+                                      style: GoogleFonts.outfit(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w600,
+                                        color: Colors.white,
+                                      ),
+                                    ),
+                                  ],
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    // Acces a "Mes gains" : solde retirable + demande de
+                    // retrait Mobile Money (commandes livrees uniquement).
                     Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 6,
-                      ),
+                      width: 38,
+                      height: 38,
                       decoration: BoxDecoration(
-                        color: AppTheme.successContainer,
-                        borderRadius: BorderRadius.circular(8),
+                        color: AppTheme.primaryMuted,
+                        borderRadius: BorderRadius.circular(10),
                       ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Container(
-                            width: 6,
-                            height: 6,
-                            decoration: const BoxDecoration(
-                              color: AppTheme.success,
-                              shape: BoxShape.circle,
-                            ),
-                          ),
-                          const SizedBox(width: 5),
-                          Text(
-                            'Actif',
-                            style: GoogleFonts.outfit(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
-                              color: AppTheme.success,
-                            ),
-                          ),
-                        ],
+                      child: IconButton(
+                        padding: EdgeInsets.zero,
+                        tooltip: 'Mes gains',
+                        icon: const Icon(
+                          Icons.account_balance_wallet_outlined,
+                          color: AppTheme.primary,
+                          size: 20,
+                        ),
+                        onPressed: () => Navigator.pushNamed(
+                          context,
+                          AppRoutes.vendorWithdrawals,
+                        ),
                       ),
                     ),
                     const SizedBox(width: 10),
@@ -441,8 +651,8 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
             child: TabBarView(
               controller: _tabController,
               children: [
-                _ProduitsTab(products: _products),
-                _CommandesTab(orders: _orders),
+                _ProduitsTab(products: _products, onChanged: _loadData),
+                _CommandesTab(orders: _orders, onChanged: _loadData),
                 const _DevisTab(),
                 const _StockTab(),
                 const _RevenusTab(),
@@ -457,8 +667,8 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
     return TabBarView(
       controller: _tabController,
       children: [
-        _ProduitsTab(products: _products),
-        _CommandesTab(orders: _orders),
+        _ProduitsTab(products: _products, onChanged: _loadData),
+        _CommandesTab(orders: _orders, onChanged: _loadData),
         const _DevisTab(),
         const _StockTab(),
         const _RevenusTab(),
@@ -468,21 +678,6 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
     );
   }
 
-  Widget _buildTabletLayout() {
-    return Row(
-      children: [
-        AsoukaaNavigationRail(
-          currentIndex: _currentNavIndex,
-          onTap: (i) {
-            setState(() => _currentNavIndex = i);
-            if (i == 0) Navigator.pushReplacementNamed(context, '/home-screen');
-          },
-        ),
-        const VerticalDivider(width: 1),
-        Expanded(child: _buildPhoneLayout()),
-      ],
-    );
-  }
 }
 
 // ─────────────────────────────────────────────
@@ -491,7 +686,8 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
 
 class _ProduitsTab extends StatefulWidget {
   final List<Map<String, dynamic>> products;
-  const _ProduitsTab({this.products = const []});
+  final VoidCallback onChanged;
+  const _ProduitsTab({this.products = const [], required this.onChanged});
 
   @override
   State<_ProduitsTab> createState() => _ProduitsTabState();
@@ -517,10 +713,13 @@ class _ProduitsTabState extends State<_ProduitsTab> {
 
   List<Map<String, dynamic>> get _filtered {
     if (_filter == 'Publiés') {
-      return _products.where((p) => p['is_active'] == true).toList();
+      return _products.where((p) => p['status'] == 'published').toList();
     }
     if (_filter == 'Brouillons') {
-      return _products.where((p) => p['is_active'] == false).toList();
+      return _products.where((p) => p['status'] == 'draft').toList();
+    }
+    if (_filter == 'Dépubliés') {
+      return _products.where((p) => p['status'] == 'unpublished').toList();
     }
     return _products;
   }
@@ -533,7 +732,7 @@ class _ProduitsTabState extends State<_ProduitsTab> {
         _buildFilterChips(),
         Expanded(
           child: _filtered.isEmpty
-              ? EmptyStateWidget(
+              ? _ScrollableEmpty(child: EmptyStateWidget(
                   icon: Icons.inventory_2_outlined,
                   title: 'Aucun produit trouvé',
                   description: _filter == 'Tous'
@@ -541,36 +740,106 @@ class _ProduitsTabState extends State<_ProduitsTab> {
                       : 'Aucun produit dans la catégorie "$_filter".',
                   ctaLabel: _filter == 'Tous' ? 'Ajouter un produit' : null,
                   onCtaTap: _filter == 'Tous'
-                      ? () => Navigator.pushNamed(
-                          context,
-                          AppRoutes.publierProduit,
-                        )
+                      ? () async {
+                          final created = await Navigator.pushNamed(
+                            context,
+                            AppRoutes.publierProduit,
+                          );
+                          if (created == true) widget.onChanged();
+                        }
                       : null,
-                )
+                ))
               : ListView.separated(
                   padding: const EdgeInsets.all(16),
                   itemCount: _filtered.length,
                   separatorBuilder: (_, __) => const SizedBox(height: 12),
                   itemBuilder: (context, index) => _ProductCard(
                     product: _filtered[index],
-                    onTogglePublish: () {
-                      setState(() {
-                        final idx = _products.indexWhere(
-                          (p) => p['id'] == _filtered[index]['id'],
-                        );
-                        if (idx != -1) {
-                          _products[idx]['status'] =
-                              _products[idx]['status'] == 'published'
-                              ? 'draft'
-                              : 'published';
-                        }
-                      });
-                    },
+                    onTogglePublish: () =>
+                        _handleTogglePublish(context, _filtered[index]),
+                    onEdit: () => _handleEditProduct(context, _filtered[index]),
                   ),
                 ),
         ),
       ],
     );
+  }
+
+  Future<void> _handleTogglePublish(
+    BuildContext context,
+    Map<String, dynamic> product,
+  ) async {
+    final id = product['id']?.toString();
+    if (id == null || id.isEmpty) return;
+    final wasPublished = product['status'] == 'published';
+    final newBackendStatus = wasPublished ? 'inactive' : 'active';
+    // On garde le VRAI statut d'origine pour pouvoir le restaurer tel
+    // quel en cas d'echec (un produit "unpublished" qu'on republie et
+    // qui echoue doit redevenir "unpublished", pas "draft").
+    final originalStatus = product['status'];
+
+    setState(() {
+      final idx = _products.indexWhere((p) => p['id'] == id);
+      if (idx != -1) {
+        _products[idx]['status'] = wasPublished ? 'unpublished' : 'published';
+      }
+    });
+
+    try {
+      await ApiService.instance.client.put(
+        '/api/v1/products/$id',
+        data: {'status': newBackendStatus},
+      );
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          final idx = _products.indexWhere((p) => p['id'] == id);
+          if (idx != -1) {
+            _products[idx]['status'] = originalStatus;
+          }
+        });
+        AppToast.show(
+          context,
+          message: 'Impossible de mettre à jour le statut du produit.',
+          type: ToastType.error,
+        );
+      }
+    }
+  }
+
+  Future<void> _handleEditProduct(
+    BuildContext context,
+    Map<String, dynamic> product,
+  ) async {
+    final id = product['id']?.toString();
+    if (id == null || id.isEmpty) return;
+
+    Map<String, dynamic> fullProduct;
+    try {
+      // Route réservée au vendeur propriétaire : renvoie aussi les
+      // brouillons et produits désactivés (la route publique les cache).
+      final r = await ApiService.instance
+          .client
+          .get('/api/v1/products/vendor/me/$id');
+      fullProduct = Map<String, dynamic>.from(r.data as Map);
+    } catch (_) {
+      if (mounted) {
+        AppToast.show(
+          context,
+          message: 'Impossible de charger le produit.',
+          type: ToastType.error,
+        );
+      }
+      return;
+    }
+
+    if (!mounted) return;
+    final updated = await Navigator.pushNamed(
+      context,
+      AppRoutes.publierProduit,
+      arguments: fullProduct,
+    );
+    if (updated == true) widget.onChanged();
   }
 
   Widget _buildHeader() {
@@ -579,7 +848,8 @@ class _ProduitsTabState extends State<_ProduitsTab> {
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
       child: Row(
         children: [
-          Column(
+          Expanded(
+            child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
@@ -596,10 +866,16 @@ class _ProduitsTabState extends State<_ProduitsTab> {
               ),
             ],
           ),
-          const Spacer(),
+          ),
+          const SizedBox(width: 8),
           ElevatedButton.icon(
-            onPressed: () =>
-                Navigator.pushNamed(context, AppRoutes.publierProduit),
+            onPressed: () async {
+              final created = await Navigator.pushNamed(
+                context,
+                AppRoutes.publierProduit,
+              );
+              if (created == true) widget.onChanged();
+            },
             icon: const Icon(Icons.add_rounded, size: 16),
             label: const Text('Ajouter'),
             style: ElevatedButton.styleFrom(
@@ -625,8 +901,10 @@ class _ProduitsTabState extends State<_ProduitsTab> {
     return Container(
       color: AppTheme.surface,
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-      child: Row(
-        children: ['Tous', 'Publiés', 'Brouillons'].map((f) {
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+        children: ['Tous', 'Publiés', 'Brouillons', 'Dépubliés'].map((f) {
           final isSelected = _filter == f;
           return Padding(
             padding: const EdgeInsets.only(right: 8),
@@ -657,6 +935,7 @@ class _ProduitsTabState extends State<_ProduitsTab> {
             ),
           );
         }).toList(),
+        ),
       ),
     );
   }
@@ -674,8 +953,13 @@ class _ProduitsTabState extends State<_ProduitsTab> {
 class _ProductCard extends StatelessWidget {
   final Map<String, dynamic> product;
   final VoidCallback onTogglePublish;
+  final VoidCallback onEdit;
 
-  const _ProductCard({required this.product, required this.onTogglePublish});
+  const _ProductCard({
+    required this.product,
+    required this.onTogglePublish,
+    required this.onEdit,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -736,7 +1020,7 @@ class _ProductCard extends StatelessWidget {
                         ),
                       ),
                       const SizedBox(width: 8),
-                      _StatusChip(isPublished: isPublished),
+                      _StatusChip(status: product['status'] as String? ?? 'draft'),
                     ],
                   ),
                   const SizedBox(height: 4),
@@ -749,7 +1033,9 @@ class _ProductCard extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 6),
-                  Row(
+                  Wrap(
+                    spacing: 12,
+                    runSpacing: 4,
                     children: [
                       _MiniStat(
                         icon: Icons.inventory_2_outlined,
@@ -758,13 +1044,11 @@ class _ProductCard extends StatelessWidget {
                             ? AppTheme.error
                             : AppTheme.textSecondary,
                       ),
-                      const SizedBox(width: 12),
                       _MiniStat(
                         icon: Icons.visibility_outlined,
                         value: '${product['views']}',
                         color: AppTheme.textSecondary,
                       ),
-                      const SizedBox(width: 12),
                       _MiniStat(
                         icon: Icons.shopping_bag_outlined,
                         value: '${product['sales']} ventes',
@@ -773,14 +1057,15 @@ class _ProductCard extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: 8),
-                  Row(
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 6,
                     children: [
                       _ActionBtn(
                         icon: Icons.edit_outlined,
                         label: 'Modifier',
-                        onTap: () {},
+                        onTap: onEdit,
                       ),
-                      const SizedBox(width: 8),
                       _ActionBtn(
                         icon: isPublished
                             ? Icons.visibility_off_outlined
@@ -802,25 +1087,29 @@ class _ProductCard extends StatelessWidget {
 }
 
 class _StatusChip extends StatelessWidget {
-  final bool isPublished;
-  const _StatusChip({required this.isPublished});
+  final String status;
+  const _StatusChip({required this.status});
 
   @override
   Widget build(BuildContext context) {
+    final (label, bg, fg) = switch (status) {
+      'published' => ('Publié', AppTheme.successContainer, AppTheme.success),
+      'unpublished' => ('Dépublié', AppTheme.warningContainer, AppTheme.warning),
+      'out_of_stock' => ('Rupture de stock', AppTheme.errorContainer, AppTheme.error),
+      _ => ('Brouillon', AppTheme.surfaceVariant, AppTheme.muted),
+    };
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
       decoration: BoxDecoration(
-        color: isPublished
-            ? AppTheme.successContainer
-            : AppTheme.surfaceVariant,
+        color: bg,
         borderRadius: BorderRadius.circular(6),
       ),
       child: Text(
-        isPublished ? 'Publié' : 'Brouillon',
+        label,
         style: GoogleFonts.outfit(
           fontSize: 10,
           fontWeight: FontWeight.w600,
-          color: isPublished ? AppTheme.success : AppTheme.muted,
+          color: fg,
         ),
       ),
     );
@@ -997,7 +1286,8 @@ class _AddProductSheetState extends State<_AddProductSheet> {
 
 class _CommandesTab extends StatefulWidget {
   final List<Map<String, dynamic>> orders;
-  const _CommandesTab({this.orders = const []});
+  final VoidCallback onChanged;
+  const _CommandesTab({this.orders = const [], required this.onChanged});
 
   @override
   State<_CommandesTab> createState() => _CommandesTabState();
@@ -1006,11 +1296,35 @@ class _CommandesTab extends StatefulWidget {
 class _CommandesTabState extends State<_CommandesTab> {
   String _filter = 'Toutes';
   late List<Map<String, dynamic>> _orders;
+  List<Map<String, dynamic>> _sellerProducts = [];
+  bool _loadingSellerProducts = false;
 
   @override
   void initState() {
     super.initState();
     _orders = List.from(widget.orders);
+  }
+
+  // Utilisé par le formulaire "Initier une commande" pour proposer un vrai
+  // combo des produits du vendeur (avant : un simple champ texte libre).
+  Future<void> _loadSellerProducts() async {
+    if (_sellerProducts.isNotEmpty || _loadingSellerProducts) return;
+    setState(() => _loadingSellerProducts = true);
+    try {
+      final r = await ApiService.instance.client.get('/api/v1/products/vendor/me');
+      final raw = r.data;
+      final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) as List : []);
+      final products = list
+          .whereType<Map>()
+          .map((e) => _SellerDashboardScreenState._normalizeSellerProduct(Map<String, dynamic>.from(e)))
+          .where((p) => p['status'] == 'published')
+          .toList();
+      if (mounted) setState(() => _sellerProducts = products);
+    } catch (_) {
+      // silencieux : le champ retombe sur une saisie libre si l'appel échoue
+    } finally {
+      if (mounted) setState(() => _loadingSellerProducts = false);
+    }
   }
 
   @override
@@ -1021,24 +1335,26 @@ class _CommandesTabState extends State<_CommandesTab> {
     }
   }
 
+  // NB: o['status'] est un OrderStatus (enum), pas une chaine — l'ancien code
+  // comparait a des mots ('confirme', 'en_preparation'...) qui ne
+  // correspondaient a rien de reel, ce qui rendait les filtres inoperants.
   List<Map<String, dynamic>> get _filtered {
     switch (_filter) {
       case 'En cours':
         return _orders.where((o) {
-          final s = o['status'] as String? ?? '';
-          return s == 'confirme' ||
-              s == 'en_preparation' ||
-              s == 'en_livraison' ||
-              s == 'expedie';
+          final s = o['status'];
+          return s == OrderStatus.received ||
+              s == OrderStatus.processing ||
+              s == OrderStatus.inDelivery;
         }).toList();
       case 'Terminées':
         return _orders
-            .where((o) => (o['status'] as String? ?? '') == 'livre')
+            .where((o) => o['status'] == OrderStatus.completed)
             .toList();
       case 'Annulées':
         return _orders.where((o) {
-          final s = o['status'] as String? ?? '';
-          return s == 'annule' || s == 'rembourse';
+          final s = o['status'];
+          return s == OrderStatus.cancelled || s == OrderStatus.failed;
         }).toList();
       default:
         return _orders;
@@ -1057,7 +1373,10 @@ class _CommandesTabState extends State<_CommandesTab> {
           child: SizedBox(
             width: double.infinity,
             child: OutlinedButton.icon(
-              onPressed: () => _showInitiateOrderDialog(context),
+              onPressed: () {
+                _loadSellerProducts();
+                _showInitiateOrderDialog(context);
+              },
               icon: const Icon(Icons.add_shopping_cart_rounded, size: 16),
               label: Text(
                 'Initier une commande pour un client',
@@ -1079,19 +1398,766 @@ class _CommandesTabState extends State<_CommandesTab> {
         ),
         Expanded(
           child: _filtered.isEmpty
-              ? EmptyStateWidget(
+              ? _ScrollableEmpty(child: EmptyStateWidget(
                   icon: Icons.inbox_outlined,
                   title: 'Aucune commande',
                   description: 'Aucune commande dans cette catégorie',
-                )
+                ))
               : ListView.separated(
                   padding: const EdgeInsets.all(16),
                   itemCount: _filtered.length,
                   separatorBuilder: (_, __) => const SizedBox(height: 12),
-                  itemBuilder: (_, i) => _SellerOrderCard(order: _filtered[i]),
+                  itemBuilder: (ctx, i) => _SellerOrderCard(
+                    order: _filtered[i],
+                    onConfirm: () => _handleConfirm(context, _filtered[i]),
+                    onDetails: () => _showOrderDetails(context, _filtered[i]),
+                  ),
                 ),
         ),
       ],
+    );
+  }
+
+  static String? _nextBackendStatus(dynamic status) {
+    if (status == OrderStatus.received) return 'en cours';
+    // ⚠️ Il n'y a plus de transition directe "en cours" → "expedié" ici
+    // : ce changement exige désormais une preuve concrète (ramassage
+    // livreur, scan de retrait en boutique, ou remise au transporteur
+    // bus/taxi selon le cas) et passe par des actions dédiées — voir
+    // le bouton "Démarrer" dans _showAssignAgentSheet (Cas A) et
+    // l'action à ajouter pour les Cas B/C.
+    return null;
+  }
+
+  Future<void> _handleConfirm(
+    BuildContext context,
+    Map<String, dynamic> order,
+  ) async {
+    final nextStatus = _nextBackendStatus(order['status']);
+    final orderId = order['rawId']?.toString();
+    if (nextStatus == null || orderId == null || orderId.isEmpty) {
+      // Rien à confirmer directement à ce stade : la suite exige une
+      // preuve (voir "Détails" → l'action correspondant au mode de
+      // livraison de cette commande).
+      if (order['status'] == OrderStatus.processing && mounted) {
+        AppToast.show(
+          context,
+          message: 'Ouvrez "Détails" pour l\'action suivante '
+              '(livraison, retrait ou remise au transporteur).',
+          type: ToastType.info,
+        );
+      }
+      return;
+    }
+
+    try {
+      await ApiService.instance.client.patch(
+        '/api/v1/orders/$orderId/status',
+        data: {'status': nextStatus},
+      );
+      if (mounted) widget.onChanged();
+    } on DioException catch (e) {
+      // Cas fréquent : paiement mobile money annulé/échoué (voir
+      // 'mobileMoneyUnpaid' ci-dessus) — le serveur renvoie alors un
+      // message explicite qu'on affiche tel quel plutôt qu'un message
+      // générique qui masquerait la vraie raison.
+      if (mounted) {
+        final msg = (e.response?.data is Map)
+            ? (e.response?.data['message']?.toString() ??
+                'Impossible de confirmer cette commande.')
+            : 'Impossible de confirmer cette commande.';
+        AppToast.show(context, message: msg, type: ToastType.error);
+      }
+    } catch (_) {
+      if (mounted) {
+        AppToast.show(
+          context,
+          message: 'Impossible de confirmer cette commande.',
+          type: ToastType.error,
+        );
+      }
+    }
+  }
+
+  // Libellé + icône du bouton Cas A dans "Détails", selon l'avancement
+  // réel de la livraison — pour ne plus jamais réafficher "Affecter un
+  // livreur" une fois que c'est déjà fait.
+  (String, IconData) _casALabelFor(String? rawStatus) {
+    switch (rawStatus) {
+      case 'en cours':
+        return ('Livraison / Affecter un livreur', Icons.local_shipping_outlined);
+      case 'livreur affecté':
+        return ('Livraison — en attente du livreur', Icons.hourglass_top_rounded);
+      case 'expedié':
+        return ('Démarrer la livraison', Icons.play_arrow_rounded);
+      case 'en transit':
+        return ('Livraison en cours', Icons.route_rounded);
+      default:
+        return ('Livraison / Affecter un livreur', Icons.local_shipping_outlined);
+    }
+  }
+
+  void _showOrderDetails(BuildContext context, Map<String, dynamic> order) {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Commande ${order['id']}',
+                style: GoogleFonts.outfit(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 12),
+              _buildDetailRow('Produit', order['product']?.toString() ?? ''),
+              _buildDetailRow('Acheteur', order['buyer']?.toString() ?? ''),
+              _buildDetailRow('Quantité', order['qty']?.toString() ?? ''),
+              _buildDetailRow('Date', order['date']?.toString() ?? ''),
+              _buildDetailRow('Montant', order['price']?.toString() ?? ''),
+              const SizedBox(height: 16),
+              // ⚠️ Bouton "Marquer payé (espèces reçues)" retiré : le
+              // vendeur ne peut plus marquer unilatéralement une commande
+              // comme payée. C'est désormais au client de payer via
+              // Mobile Money (bouton "Payer la commande" côté app), comme
+              // pour une commande normale.
+              // Paiement mobile money annulé/échoué : rien à faire ici
+              // (pas de bouton — c'est au client de retenter le paiement),
+              // juste expliquer pourquoi "Confirmer" ne fonctionne pas.
+              if (order['mobileMoneyUnpaid'] == true) ...[
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFF7ED),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: AppTheme.warning.withAlpha(60)),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(
+                        Icons.error_outline_rounded,
+                        size: 14,
+                        color: AppTheme.warning,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Paiement mobile money non confirmé (annulé ou échoué) — '
+                          'le client doit retenter le paiement avant que vous '
+                          'puissiez confirmer cette commande.',
+                          style: GoogleFonts.outfit(
+                            fontSize: 12,
+                            color: AppTheme.warning,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 8),
+              ],
+              // Cas A — livraison avec un livreur interne. Ce bouton sert
+              // à la fois à affecter le livreur (statut "en cours") ET à
+              // suivre/faire avancer la livraison ensuite (livreur affecté,
+              // expédié, en transit) — voir _showAssignAgentSheet, qui
+              // affiche le bon contenu selon l'état actuel. On ne le
+              // cache que quand il n'y a plus rien à y faire : avant
+              // confirmation de la commande, ou une fois livrée/annulée.
+              //
+              // Le LIBELLÉ change avec le statut (voir _casALabelFor) :
+              // avant, il affichait toujours "Livraison / Affecter un
+              // livreur", même une fois le livreur déjà affecté et le
+              // colis déjà récupéré — le vendeur devait cliquer "pour
+              // rien" avant de voir apparaître le vrai bouton "Démarrer"
+              // à l'intérieur. Le bouton reflète maintenant directement
+              // l'action à faire.
+              if (order['deliveryMode'] == 'livraison' &&
+                  order['transportMode'] == null &&
+                  order['rawStatus'] != 'en attente' &&
+                  order['rawStatus'] != 'livré' &&
+                  order['rawStatus'] != 'annulé') ...[
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    icon: Icon(_casALabelFor(order['rawStatus'] as String?).$2, size: 18),
+                    label: Text(_casALabelFor(order['rawStatus'] as String?).$1),
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      _showAssignAgentSheet(context, order);
+                    },
+                  ),
+                ),
+                const SizedBox(height: 8),
+              ],
+              // Cas B — retrait en boutique : on scanne le QR du client
+              // venu récupérer sa commande.
+              if (order['deliveryMode'] == 'retrait' &&
+                  order['rawStatus'] == 'en cours') ...[
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.qr_code_scanner_rounded, size: 18),
+                    label: const Text('Scanner le retrait du client'),
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      _scanStorePickupProof(context, order);
+                    },
+                  ),
+                ),
+                const SizedBox(height: 8),
+              ],
+              // Cas C — bus/taxi (zone Nord) : preuve de remise au
+              // transporteur (photo + état), démarre le délai de 3 jours.
+              if (order['deliveryMode'] == 'livraison' &&
+                  order['transportMode'] != null &&
+                  order['rawStatus'] == 'en cours') ...[
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.local_shipping_outlined, size: 18),
+                    label: const Text('Remise au transporteur (bus/taxi)'),
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      _submitDispatchProof(context, order);
+                    },
+                  ),
+                ),
+                const SizedBox(height: 8),
+              ],
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Fermer'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ─────────────────────────────────────────────────────
+  // AFFECTATION D'UN LIVREUR À UNE COMMANDE
+  // ─────────────────────────────────────────────────────
+
+  Future<void> _showAssignAgentSheet(
+    BuildContext context,
+    Map<String, dynamic> order,
+  ) async {
+    final orderId = order['rawId']?.toString();
+    if (orderId == null || orderId.isEmpty) return;
+
+    Map<String, dynamic>? delivery;
+    try {
+      final res = await ApiService.instance.client.get(
+        '/api/v1/delivery/order/$orderId',
+      );
+      delivery = res.data is Map<String, dynamic>
+          ? res.data as Map<String, dynamic>
+          : null;
+    } on DioException catch (e) {
+      if (!context.mounted) return;
+      final msg = e.response?.statusCode == 404
+          ? 'Pas de fiche de livraison pour cette commande '
+            '(retrait en boutique, ou commande créée avant la mise à jour du serveur).'
+          : 'Impossible de récupérer la livraison de cette commande.';
+      AppToast.show(context, message: msg, type: ToastType.error);
+      return;
+    } catch (_) {
+      if (!context.mounted) return;
+      AppToast.show(context, message: 'Erreur réseau.', type: ToastType.error);
+      return;
+    }
+
+    if (delivery == null || !context.mounted) return;
+
+    final deliveryId = delivery['id']?.toString();
+    final status = delivery['status']?.toString();
+    final existingAgent = delivery['agent'] as Map<String, dynamic>?;
+
+    // Déjà affectée : afficher qui, pas de re-sélection ici
+    if (status != 'en attente' || existingAgent != null) {
+      final agentUser = existingAgent?['user'] as Map<String, dynamic>?;
+      final name = agentUser != null
+          ? '${agentUser['prenom'] ?? ''} ${agentUser['name'] ?? ''}'.trim()
+          : null;
+      showModalBottomSheet(
+        context: context,
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+        ),
+        builder: (ctx) => SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Livraison',
+                  style: GoogleFonts.outfit(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                _buildDetailRow('Statut', status ?? '-'),
+                if (name != null && name.isNotEmpty)
+                  _buildDetailRow('Livreur', name),
+                const SizedBox(height: 16),
+                // Actif uniquement une fois que le livreur a fourni sa
+                // preuve de ramassage (photo + état) — c'est cette
+                // preuve, pas ce bouton, qui fait passer la livraison à
+                // "récupéré". Le vendeur n'a la main que pour démarrer
+                // le trajet ensuite.
+                if (status == 'récupéré') ...[
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      icon: const Icon(Icons.play_arrow_rounded, size: 18, color: Colors.white),
+                      label: const Text('Démarrer la livraison'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppTheme.primary,
+                        foregroundColor: Colors.white,
+                      ),
+                      onPressed: () {
+                        Navigator.pop(ctx);
+                        _startTransit(context, deliveryId);
+                      },
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                ],
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    child: const Text('Fermer'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      return;
+    }
+
+    List<Map<String, dynamic>> agents = [];
+    try {
+      final res = await ApiService.instance.client.get(
+        '/api/v1/delivery-agents/available',
+      );
+      final data = res.data;
+      agents = data is List ? List<Map<String, dynamic>>.from(data) : [];
+    } catch (_) {
+      agents = [];
+    }
+
+    if (!context.mounted) return;
+
+    if (agents.isEmpty) {
+      AppToast.show(
+        context,
+        message: 'Aucun livreur disponible pour le moment.',
+        type: ToastType.error,
+      );
+      return;
+    }
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Choisir un livreur',
+                style: GoogleFonts.outfit(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 12),
+              ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxHeight: MediaQuery.of(ctx).size.height * 0.5,
+                ),
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  itemCount: agents.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (_, i) {
+                    final a = agents[i];
+                    final u = a['user'] as Map<String, dynamic>?;
+                    final name = u != null
+                        ? '${u['prenom'] ?? ''} ${u['name'] ?? ''}'.trim()
+                        : 'Livreur';
+                    final phone = u?['phone']?.toString() ?? '';
+                    final vehicle = a['vehicleType']?.toString() ?? '';
+                    return ListTile(
+                      title: Text(
+                        name.isEmpty ? 'Livreur' : name,
+                        style: GoogleFonts.outfit(fontWeight: FontWeight.w600),
+                      ),
+                      subtitle: Text('$vehicle · $phone'),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        _assignAgent(context, deliveryId, a['id']?.toString());
+                      },
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _assignAgent(
+    BuildContext context,
+    String? deliveryId,
+    String? agentId,
+  ) async {
+    if (deliveryId == null || agentId == null) return;
+    try {
+      await ApiService.instance.client.patch(
+        '/api/v1/delivery/$deliveryId/assign',
+        data: {'agentId': agentId},
+      );
+      if (mounted) {
+        AppToast.show(
+          context,
+          message: 'Livreur affecté avec succès.',
+          type: ToastType.success,
+        );
+        widget.onChanged();
+      }
+    } on DioException catch (e) {
+      // On affiche le vrai message du backend (ex: "la commande doit être
+      // en préparation avant d'affecter un livreur", "ce livreur n'est
+      // plus disponible"...) plutôt qu'un message générique qui masque la
+      // vraie raison et empêche de comprendre ce qui s'est passé.
+      if (mounted) {
+        final msg = (e.response?.data is Map)
+            ? (e.response?.data['message']?.toString() ??
+                'Impossible d\'affecter ce livreur.')
+            : 'Impossible d\'affecter ce livreur.';
+        AppToast.show(context, message: msg, type: ToastType.error);
+      }
+    } catch (_) {
+      if (mounted) {
+        AppToast.show(
+          context,
+          message: 'Impossible d\'affecter ce livreur '
+              '(peut-être déjà pris entre-temps).',
+          type: ToastType.error,
+        );
+      }
+    }
+  }
+
+  Future<void> _startTransit(BuildContext context, String? deliveryId) async {
+    if (deliveryId == null || deliveryId.isEmpty) return;
+    try {
+      await ApiService.instance.client.post(
+        '/api/v1/delivery/$deliveryId/start-transit',
+      );
+      if (mounted) {
+        AppToast.show(
+          context,
+          message: 'Livraison démarrée.',
+          type: ToastType.success,
+        );
+        widget.onChanged();
+      }
+    } on DioException catch (e) {
+      if (mounted) {
+        final msg = (e.response?.data is Map)
+            ? (e.response?.data['message']?.toString() ?? 'Impossible de démarrer cette livraison.')
+            : 'Impossible de démarrer cette livraison.';
+        AppToast.show(context, message: msg, type: ToastType.error);
+      }
+    } catch (_) {
+      if (mounted) {
+        AppToast.show(
+          context,
+          message: 'Impossible de démarrer cette livraison.',
+          type: ToastType.error,
+        );
+      }
+    }
+  }
+
+  // ─────────────────────────────────────────────────────
+  // CAS B — RETRAIT EN BOUTIQUE : scan du QR du client
+  // ─────────────────────────────────────────────────────
+  Future<void> _scanStorePickupProof(
+    BuildContext context,
+    Map<String, dynamic> order,
+  ) async {
+    final orderId = order['rawId']?.toString();
+    if (orderId == null || orderId.isEmpty) return;
+
+    MobileScannerController? controller;
+    String? scanned;
+
+    if (!kIsWeb) {
+      controller = MobileScannerController(
+        detectionSpeed: DetectionSpeed.normal,
+        facing: CameraFacing.back,
+      );
+      scanned = await showModalBottomSheet<String>(
+        context: context,
+        isScrollControlled: true,
+        builder: (ctx) => SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'Scanner le QR code du client',
+                  style: GoogleFonts.outfit(fontWeight: FontWeight.w700, fontSize: 15),
+                ),
+                const SizedBox(height: 12),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(12),
+                  child: SizedBox(
+                    height: 320,
+                    child: MobileScanner(
+                      controller: controller,
+                      onDetect: (capture) {
+                        if (capture.barcodes.isEmpty) return;
+                        final code = capture.barcodes.first.rawValue;
+                        if (code != null && code.isNotEmpty) {
+                          Navigator.pop(ctx, code);
+                        }
+                      },
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Annuler'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await controller.dispose();
+    } else {
+      // Pas de caméra fiable sur web dans ce contexte : saisie manuelle.
+      final textController = TextEditingController();
+      scanned = await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Code de remise du client'),
+          content: TextField(controller: textController, autofocus: true),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Annuler')),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, textController.text.trim()),
+              child: const Text('Valider'),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (scanned == null || scanned.isEmpty || !context.mounted) return;
+
+    try {
+      await ApiService.instance.client.post(
+        '/api/v1/orders/$orderId/store-pickup-proof',
+        data: {'qrScanValue': scanned},
+      );
+      if (mounted) {
+        AppToast.show(context, message: 'Retrait confirmé.', type: ToastType.success);
+        widget.onChanged();
+      }
+    } on DioException catch (e) {
+      if (mounted) {
+        final msg = (e.response?.data is Map)
+            ? (e.response?.data['message']?.toString() ?? 'Le QR code ne correspond pas à cette commande.')
+            : 'Le QR code ne correspond pas à cette commande.';
+        AppToast.show(context, message: msg, type: ToastType.error);
+      }
+    } catch (_) {
+      if (mounted) {
+        AppToast.show(context, message: 'Impossible de confirmer le retrait.', type: ToastType.error);
+      }
+    }
+  }
+
+  // ─────────────────────────────────────────────────────
+  // CAS C — BUS/TAXI : preuve de remise au transporteur
+  // ─────────────────────────────────────────────────────
+  Future<void> _submitDispatchProof(
+    BuildContext context,
+    Map<String, dynamic> order,
+  ) async {
+    final orderId = order['rawId']?.toString();
+    if (orderId == null || orderId.isEmpty) return;
+
+    const conditions = ['Bon état', 'Légèrement endommagé', 'Endommagé'];
+    String selectedCondition = conditions.first;
+    String? photoUrl;
+    bool uploading = false;
+
+    final confirmed = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setModalState) => SafeArea(
+          child: Padding(
+            padding: EdgeInsets.only(
+              left: 20, right: 20, top: 20,
+              bottom: MediaQuery.of(ctx).viewInsets.bottom + 20,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Remise au transporteur',
+                  style: GoogleFonts.outfit(fontWeight: FontWeight.w700, fontSize: 16),
+                ),
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  icon: Icon(photoUrl != null ? Icons.check_circle_rounded : Icons.camera_alt_outlined),
+                  label: Text(uploading
+                      ? 'Envoi de la photo...'
+                      : photoUrl != null
+                          ? 'Photo ajoutée'
+                          : 'Photo du colis / transporteur'),
+                  onPressed: uploading
+                      ? null
+                      : () async {
+                          final picked = await ImagePicker()
+                              .pickImage(source: ImageSource.camera, maxWidth: 1200, imageQuality: 80);
+                          if (picked == null) return;
+                          setModalState(() => uploading = true);
+                          try {
+                            final url = await UploadService.instance.uploadFile(picked, 'proofs');
+                            setModalState(() {
+                              photoUrl = url;
+                              uploading = false;
+                            });
+                          } catch (_) {
+                            setModalState(() => uploading = false);
+                            if (ctx.mounted) {
+                              AppToast.show(ctx, message: 'Échec de l\'upload.', type: ToastType.error);
+                            }
+                          }
+                        },
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  initialValue: selectedCondition,
+                  decoration: const InputDecoration(labelText: 'État du colis'),
+                  items: conditions
+                      .map((c) => DropdownMenuItem(value: c, child: Text(c)))
+                      .toList(),
+                  onChanged: (v) => setModalState(() => selectedCondition = v ?? selectedCondition),
+                ),
+                const SizedBox(height: 16),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    onPressed: (photoUrl != null && !uploading)
+                        ? () => Navigator.pop(ctx, true)
+                        : null,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppTheme.primary,
+                      foregroundColor: Colors.white,
+                    ),
+                    child: const Text('Confirmer la remise'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    if (confirmed != true || photoUrl == null || !context.mounted) return;
+
+    try {
+      await ApiService.instance.client.post(
+        '/api/v1/orders/$orderId/dispatch-proof',
+        data: {'photoUrl': photoUrl, 'etatColis': selectedCondition},
+      );
+      if (mounted) {
+        AppToast.show(
+          context,
+          message: 'Remise au transporteur enregistrée. Le client a 3 jours pour confirmer.',
+          type: ToastType.success,
+        );
+        widget.onChanged();
+      }
+    } on DioException catch (e) {
+      if (mounted) {
+        final msg = (e.response?.data is Map)
+            ? (e.response?.data['message']?.toString() ?? 'Impossible d\'enregistrer la remise.')
+            : 'Impossible d\'enregistrer la remise.';
+        AppToast.show(context, message: msg, type: ToastType.error);
+      }
+    } catch (_) {
+      if (mounted) {
+        AppToast.show(context, message: 'Impossible d\'enregistrer la remise.', type: ToastType.error);
+      }
+    }
+  }
+
+  Widget _buildDetailRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 90,
+            child: Text(
+              label,
+              style: GoogleFonts.outfit(fontSize: 13, color: AppTheme.muted),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              style: GoogleFonts.outfit(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1141,7 +2207,9 @@ class _CommandesTabState extends State<_CommandesTab> {
     return Container(
       color: AppTheme.surface,
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-      child: Row(
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
         children: ['Toutes', 'En cours', 'Terminées', 'Annulées'].map((f) {
           final isSelected = _filter == f;
           return Padding(
@@ -1173,33 +2241,347 @@ class _CommandesTabState extends State<_CommandesTab> {
             ),
           );
         }).toList(),
+        ),
       ),
     );
   }
 
+  // Extrait un message d'erreur lisible renvoyé par le backend
+  // (class-validator renvoie parfois un tableau de messages).
+  String _extractVendorOrderError(Object e) {
+    try {
+      final response = (e as dynamic).response;
+      final data = response?.data;
+      if (data is Map && data['message'] != null) {
+        final msg = data['message'];
+        if (msg is String) return msg;
+        if (msg is List && msg.isNotEmpty) return msg.first.toString();
+      }
+    } catch (_) {}
+    return 'La demande a échoué. Réessayez.';
+  }
+
+  // ⚠️ _confirmCodPayment() (le vendeur marquait lui-même une commande
+  // "payée en espèces" via PATCH /payments/:id/confirm-cod) a été
+  // retirée : cette route n'existe plus côté backend. Le client paie
+  // désormais via le bouton "Payer la commande" (Mobile Money normal).
+
   void _showInitiateOrderDialog(BuildContext context) {
-    final clientNameCtrl = TextEditingController();
     final phoneCtrl = TextEditingController();
-    final addressCtrl = TextEditingController();
-    final productCtrl = TextEditingController();
+    final newQuartierCtrl = TextEditingController();
+    final newVilleCtrl = TextEditingController();
     final amountCtrl = TextEditingController();
+    final List<Map<String, dynamic>> selectedProducts = [];
+    Map<String, dynamic>? foundClient;
+    List<Map<String, dynamic>> clientAddresses = [];
+    List<Map<String, dynamic>> searchResults = [];
+    String? selectedAddressId;
+    bool searchingClient = false;
+    // Message du serveur affiche en entier sous le champ de recherche (ex :
+    // « Aucun client trouvé parmi vos clients. Pour un nouveau client,
+    // saisissez son numéro complet… ») : un toast tronquerait ce texte long.
+    String? searchMessage;
+    bool submittingOrder = false;
+    // Meme logique commune/transport que le panier client (voir
+    // DeliverySelectorWidget) : mode livraison/retrait + bus/taxi pour les
+    // communes du Nord. 'newDeliverySelectionComplete' reprend
+    // DeliverySelection.isComplete pour bloquer la soumission tant que le
+    // vendeur n'a pas choisi le mode de transport sur une commune du Nord.
+    String deliveryMode = 'livraison';
+    String? transportMode;
+    bool newDeliverySelectionComplete = true;
+    // Incremente pour forcer DeliverySelectorWidget a se reconstruire avec
+    // un nouvel `initialCity` (changement de client, d'adresse selectionnee,
+    // ou retour vers "Nouvelle adresse") -- meme technique que
+    // cart_screen.dart (_deliverySelectorSeed), car `initialCity` n'est lu
+    // qu'une seule fois par le widget (dans son initState).
+    int deliverySelectorSeed = 0;
+
+    // Frais de livraison renvoye par DeliverySelectorWidget (0 si mode
+    // "retrait" ou commune pas encore choisie) -- utilise pour le recap
+    // "Total a payer" affiche juste avant le bouton "Creer la commande".
+    double deliveryFeePreview = 0;
+
+    // Extrait le montant numerique d'un prix deja formate ("5 000 FCFA").
+    int parsePrice(dynamic p) {
+      final digits = (p as String? ?? '').replaceAll(RegExp(r'[^0-9]'), '');
+      return int.tryParse(digits) ?? 0;
+    }
+
+    // Prix unitaire reel pour [qty] unites d'un produit, paliers degressifs
+    // inclus -- meme algorithme que _unitPriceForQty() dans
+    // product_detail_screen.dart : le palier avec la plus haute minQuantity
+    // <= qty, jamais plus cher que le prix de base.
+    int unitPriceForProduct(Map<String, dynamic> p, int qty) {
+      final base = (p['rawPrice'] as int?) ?? parsePrice(p['price']);
+      final tiers = p['tierPrices'];
+      if (tiers is! List) return base;
+      int? bestMin;
+      int? bestPrice;
+      for (final t in tiers) {
+        if (t is! Map) continue;
+        final minQty = int.tryParse('${t['minQuantity'] ?? ''}');
+        final tierPrice = double.tryParse('${t['price'] ?? ''}')?.round();
+        if (minQty == null || tierPrice == null || tierPrice <= 0) continue;
+        if (minQty <= qty && (bestMin == null || minQty > bestMin)) {
+          bestMin = minQty;
+          bestPrice = tierPrice;
+        }
+      }
+      if (bestPrice == null) return base;
+      return (base > 0 && base < bestPrice) ? base : bestPrice;
+    }
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
+      constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.92),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (ctx) => Padding(
-        padding: EdgeInsets.only(
-          left: 20,
-          right: 20,
-          top: 20,
-          bottom: MediaQuery.of(ctx).viewInsets.bottom + 20,
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) {
+          void recomputeAmount() {
+            final total = selectedProducts.fold<int>(
+              0,
+              (sum, p) {
+                final qty = (p['quantity'] as int?) ?? 1;
+                return sum + unitPriceForProduct(p, qty) * qty;
+              },
+            );
+            amountCtrl.text = total.toString();
+          }
+
+          // Determine si la commune de l'adresse existante selectionnee fait
+          // partie des communes du Nord (bus/taxi requis) — meme regle que
+          // OrdersService.getFraisLivraisonForCommune cote serveur.
+          Future<void> checkNordForAddress(String? addressId) async {
+            if (addressId == null) {
+              setSheetState(() {
+                transportMode = null;
+                newVilleCtrl.clear();
+                deliverySelectorSeed++;
+              });
+              return;
+            }
+            final addr = clientAddresses.firstWhere(
+              (a) => a['id']?.toString() == addressId,
+              orElse: () => <String, dynamic>{},
+            );
+            final ville = (addr['ville'] as String?) ?? '';
+            setSheetState(() {
+              transportMode = null;
+              // Prerempli DeliverySelectorWidget avec la commune reelle de
+              // l'adresse choisie (au lieu de la retaper) ; le vendeur reste
+              // libre de la changer, comme sur le panier client. Le widget
+              // determine lui-meme (via son propre initState) si c'est une
+              // commune du Nord et affiche alors le choix bus/taxi.
+              newVilleCtrl.text = ville;
+              deliverySelectorSeed++;
+            });
+          }
+
+          // Choisit un client (parmi les resultats de recherche, ou le
+          // resultat unique auto-selectionne) et recupere ses adresses.
+          Future<void> selectClient(Map<String, dynamic> client) async {
+            setSheetState(() => searchingClient = true);
+            try {
+              final res = await ApiService.instance.client.get(
+                '/api/v1/orders/vendor/client/${client['id']}/addresses',
+              );
+              final data = res.data is Map<String, dynamic>
+                  ? res.data as Map<String, dynamic>
+                  : <String, dynamic>{};
+              final addresses = (data['addresses'] as List?)
+                      ?.whereType<Map>()
+                      .map((e) => Map<String, dynamic>.from(e))
+                      .toList() ??
+                  [];
+              setSheetState(() {
+                foundClient = data;
+                clientAddresses = addresses;
+                searchResults = [];
+                selectedAddressId =
+                    addresses.isNotEmpty ? addresses.first['id']?.toString() : null;
+              });
+              await checkNordForAddress(selectedAddressId);
+            } catch (e) {
+              if (!ctx.mounted) return;
+              AppToast.show(ctx, message: _extractVendorOrderError(e), type: ToastType.error);
+            } finally {
+              if (ctx.mounted) setSheetState(() => searchingClient = false);
+            }
+          }
+
+          // Recherche large : telephone, prenom, nom ou email. Un seul
+          // resultat -> selectionne directement (comme avant, quand la
+          // recherche se faisait uniquement par telephone exact). Plusieurs
+          // resultats -> affiche une liste pour que le vendeur choisisse
+          // le bon client (ex: plusieurs "Marie").
+          Future<void> searchClient() async {
+            final query = phoneCtrl.text.trim();
+            if (query.length < 3) {
+              AppToast.show(
+                ctx,
+                message: 'Saisissez au moins 3 caractères (téléphone, nom ou email du client).',
+                type: ToastType.error,
+              );
+              return;
+            }
+            setSheetState(() {
+              searchingClient = true;
+              searchMessage = null;
+              foundClient = null;
+              clientAddresses = [];
+              selectedAddressId = null;
+              searchResults = [];
+            });
+            try {
+              final res = await ApiService.instance.client.get(
+                '/api/v1/orders/vendor/find-client',
+                queryParameters: {'query': query},
+              );
+              final list = (res.data is List ? res.data as List : [])
+                  .whereType<Map>()
+                  .map((e) => Map<String, dynamic>.from(e))
+                  .toList();
+              if (list.length == 1) {
+                await selectClient(list.first);
+                return;
+              }
+              setSheetState(() => searchResults = list);
+            } catch (e) {
+              if (!ctx.mounted) return;
+              // Message du serveur affiché tel quel (lisible en entier).
+              setSheetState(() => searchMessage = _extractVendorOrderError(e));
+            } finally {
+              if (ctx.mounted) setSheetState(() => searchingClient = false);
+            }
+          }
+
+          Future<void> pickProducts() async {
+            final chosen = Set<String>.from(
+              selectedProducts.map((p) => p['id'] as String),
+            );
+            await showModalBottomSheet(
+              context: ctx,
+              isScrollControlled: true,
+              shape: const RoundedRectangleBorder(
+                borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+              ),
+              builder: (pickerCtx) => StatefulBuilder(
+                builder: (pickerCtx, setPickerState) => Padding(
+                  padding: EdgeInsets.only(
+                    left: 20,
+                    right: 20,
+                    top: 20,
+                    bottom: MediaQuery.of(pickerCtx).viewInsets.bottom + 20,
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Choisir des produits',
+                        style: GoogleFonts.outfit(fontSize: 16, fontWeight: FontWeight.w700),
+                      ),
+                      const SizedBox(height: 12),
+                      if (_loadingSellerProducts)
+                        const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 24),
+                          child: Center(child: CircularProgressIndicator()),
+                        )
+                      else if (_sellerProducts.isEmpty)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 16),
+                          child: Text(
+                            'Aucun produit publié pour le moment.',
+                            style: GoogleFonts.outfit(color: AppTheme.muted),
+                          ),
+                        )
+                      else
+                        ConstrainedBox(
+                          constraints: const BoxConstraints(maxHeight: 360),
+                          child: ListView(
+                            shrinkWrap: true,
+                            children: _sellerProducts.map((p) {
+                              final id = p['id'] as String;
+                              final isChecked = chosen.contains(id);
+                              return CheckboxListTile(
+                                value: isChecked,
+                                onChanged: (v) {
+                                  setPickerState(() {
+                                    if (v == true) {
+                                      chosen.add(id);
+                                    } else {
+                                      chosen.remove(id);
+                                    }
+                                  });
+                                },
+                                title: Text(p['name'] as String? ?? 'Produit'),
+                                subtitle: Text(p['price'] as String? ?? ''),
+                                controlAffinity: ListTileControlAffinity.leading,
+                              );
+                            }).toList(),
+                          ),
+                        ),
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton(
+                          onPressed: () {
+                            final prevQty = <String, int>{
+                              for (final p in selectedProducts)
+                                p['id'] as String: (p['quantity'] as int?) ?? 1,
+                            };
+                            selectedProducts
+                              ..clear()
+                              ..addAll(
+                                _sellerProducts
+                                    .where((p) => chosen.contains(p['id']))
+                                    .map((p) => {
+                                          ...p,
+                                          'quantity': prevQty[p['id'] as String] ?? 1,
+                                        }),
+                              );
+                            recomputeAmount();
+                            setSheetState(() {});
+                            Navigator.pop(pickerCtx);
+                          },
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: AppTheme.primary,
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                          child: Text(
+                            'Valider (${chosen.length})',
+                            style: GoogleFonts.outfit(
+                              fontWeight: FontWeight.w600,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          }
+
+          return SingleChildScrollView(
+            padding: EdgeInsets.only(
+              left: 20,
+              right: 20,
+              top: 20,
+              bottom: MediaQuery.of(ctx).viewInsets.bottom + 20,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
             Center(
               child: Container(
                 width: 36,
@@ -1225,82 +2607,529 @@ class _CommandesTabState extends State<_CommandesTab> {
               style: GoogleFonts.outfit(fontSize: 13, color: AppTheme.muted),
             ),
             const SizedBox(height: 20),
-            TextField(
-              controller: clientNameCtrl,
-              decoration: InputDecoration(
-                labelText: 'Nom du client',
-                prefixIcon: const Icon(Icons.person_outline_rounded, size: 18),
-                border: OutlineInputBorder(
+            Text(
+              'Vos clients : cherchez par nom, téléphone ou e-mail. Nouveau client : '
+              'saisissez son numéro complet (ou son e-mail complet) — il doit déjà '
+              'avoir un compte sur l\'application.',
+              style: GoogleFonts.outfit(fontSize: 11.5, color: AppTheme.muted),
+            ),
+            const SizedBox(height: 6),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: phoneCtrl,
+                    enabled: foundClient == null,
+                    decoration: InputDecoration(
+                      labelText: 'Téléphone, nom ou email du client',
+                      prefixIcon: const Icon(Icons.search_rounded, size: 18),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                SizedBox(
+                  height: 48,
+                  child: ElevatedButton(
+                    onPressed: searchingClient
+                        ? null
+                        : (foundClient == null
+                            ? searchClient
+                            : () => setSheetState(() {
+                                  foundClient = null;
+                                  clientAddresses = [];
+                                  searchResults = [];
+                                  searchMessage = null;
+                                  selectedAddressId = null;
+                                  phoneCtrl.clear();
+                                })),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor:
+                          foundClient == null ? AppTheme.primary : AppTheme.surfaceVariant,
+                      foregroundColor:
+                          foundClient == null ? Colors.white : AppTheme.textPrimary,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                    child: searchingClient
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                          )
+                        : Text(foundClient == null ? 'Rechercher' : 'Changer'),
+                  ),
+                ),
+              ],
+            ),
+            if (searchMessage != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                searchMessage!,
+                style: GoogleFonts.outfit(fontSize: 12, color: AppTheme.error),
+              ),
+            ],
+            if (searchResults.length > 1) ...[
+              const SizedBox(height: 10),
+              Text(
+                '${searchResults.length} clients trouvés — choisissez :',
+                style: GoogleFonts.outfit(fontSize: 12, color: AppTheme.muted),
+              ),
+              const SizedBox(height: 4),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 220),
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  itemCount: searchResults.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (_, i) {
+                    final r = searchResults[i];
+                    return ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(
+                        '${r['prenom'] ?? ''} ${r['name'] ?? ''}',
+                        style: GoogleFonts.outfit(fontSize: 13, fontWeight: FontWeight.w600),
+                      ),
+                      // `linked` == false : client trouvé seulement par numéro
+                      // ou e-mail complet, coordonnées masquées par le serveur
+                      // (affichées telles quelles). Absent (ancien serveur) :
+                      // comportement inchangé.
+                      isThreeLine: r['linked'] == false,
+                      subtitle: Text(
+                        [r['phone'], r['email']].whereType<String>().join(' · ') +
+                            (r['linked'] == false
+                                ? '\nCoordonnées masquées par sécurité'
+                                : ''),
+                        style: GoogleFonts.outfit(fontSize: 11.5, color: AppTheme.muted),
+                      ),
+                      onTap: () => selectClient(r),
+                    );
+                  },
+                ),
+              ),
+            ],
+            if (foundClient != null) ...[
+              const SizedBox(height: 10),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: AppTheme.successContainer,
                   borderRadius: BorderRadius.circular(10),
                 ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.check_circle_rounded, size: 18, color: AppTheme.success),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Client : ${foundClient!['prenom'] ?? ''} ${foundClient!['name'] ?? ''}',
+                            style: GoogleFonts.outfit(fontWeight: FontWeight.w600, fontSize: 13),
+                          ),
+                          // Client non lié à la boutique : le serveur masque
+                          // téléphone et nom de famille (on les affiche tels
+                          // quels, jamais renvoyés dans la commande).
+                          if (foundClient!['linked'] == false) ...[
+                            if ('${foundClient!['phone'] ?? ''}'.isNotEmpty)
+                              Text(
+                                '${foundClient!['phone']}',
+                                style: GoogleFonts.outfit(fontSize: 12, color: AppTheme.muted),
+                              ),
+                            Text(
+                              'Client trouvé — coordonnées masquées par sécurité',
+                              style: GoogleFonts.outfit(fontSize: 11.5, color: AppTheme.muted),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'Adresse de livraison',
+                style: GoogleFonts.outfit(fontSize: 12.5, color: AppTheme.muted),
+              ),
+              if (foundClient!['linked'] == false && clientAddresses.isEmpty) ...[
+                const SizedBox(height: 4),
+                Text(
+                  'Les adresses de ce client ne sont pas visibles : saisissez la '
+                  'nouvelle adresse de livraison ci-dessous.',
+                  style: GoogleFonts.outfit(fontSize: 11.5, color: AppTheme.muted),
+                ),
+              ],
+              const SizedBox(height: 6),
+              ...clientAddresses.map((a) {
+                final id = a['id']?.toString();
+                return RadioListTile<String?>(
+                  value: id,
+                  groupValue: selectedAddressId,
+                  onChanged: (v) {
+                    setSheetState(() => selectedAddressId = v);
+                    checkNordForAddress(v);
+                  },
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  title: Text(
+                    '${a['label'] ?? 'Adresse'} — ${a['quartier'] ?? ''}, ${a['ville'] ?? ''}',
+                    style: GoogleFonts.outfit(fontSize: 13),
+                  ),
+                );
+              }),
+              RadioListTile<String?>(
+                value: null,
+                groupValue: selectedAddressId,
+                onChanged: (v) => setSheetState(() {
+                  selectedAddressId = null;
+                  // Sinon un mode bus/taxi choisi pour une adresse existante
+                  // du Nord pouvait survivre au passage vers "Nouvelle
+                  // adresse" : si la nouvelle commune tapee est aussi une
+                  // commune du Nord, DeliverySelectorWidget ne reinitialise
+                  // ce champ que quand la ville n'est PAS une commune du
+                  // Nord, donc la valeur perimee restait acceptee sans que
+                  // le vendeur ne confirme explicitement le transport pour
+                  // cette nouvelle adresse.
+                  transportMode = null;
+                  // Repart d'une commune vide (comme au premier affichage du
+                  // formulaire) au lieu de garder celle de l'adresse
+                  // existante precedemment selectionnee.
+                  newVilleCtrl.clear();
+                  deliverySelectorSeed++;
+                }),
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: Text('Nouvelle adresse', style: GoogleFonts.outfit(fontSize: 13)),
+              ),
+              const SizedBox(height: 8),
+              // Commune et mode livraison/retrait TOUJOURS visibles -- que
+              // l'adresse soit deja enregistree (preremplie avec sa commune
+              // reelle par checkNordForAddress ci-dessus) ou nouvelle (champ
+              // vide au depart) -- meme comportement que cart_screen.dart
+              // (_buildDeliverySection). DeliverySelectorWidget gere lui-meme
+              // l'affichage bus/taxi pour les communes du Nord, donc on ne
+              // duplique plus ce choix ici avec des RadioListTile a part.
+              DeliverySelectorWidget(
+                key: ValueKey(deliverySelectorSeed),
+                initialMode: deliveryMode,
+                initialCity: newVilleCtrl.text,
+                initialTransportMode: transportMode,
+                onChanged: (sel) {
+                  setSheetState(() {
+                    newVilleCtrl.text = sel.city;
+                    deliveryMode = sel.mode;
+                    transportMode = sel.transportMode;
+                    newDeliverySelectionComplete = sel.isComplete;
+                    deliveryFeePreview = sel.fee;
+                  });
+                },
+              ),
+              if (selectedAddressId == null) ...[
+                const SizedBox(height: 12),
+                TextField(
+                  controller: newQuartierCtrl,
+                  decoration: InputDecoration(
+                    labelText: 'Quartier',
+                    prefixIcon: const Icon(Icons.location_on_outlined, size: 18),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                  ),
+                ),
+              ],
+            ],
+            const SizedBox(height: 12),
+            Text(
+              'Produit(s) commandé(s)',
+              style: GoogleFonts.outfit(fontSize: 12.5, color: AppTheme.muted),
+            ),
+            const SizedBox(height: 6),
+            InkWell(
+              onTap: pickProducts,
+              borderRadius: BorderRadius.circular(10),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                decoration: BoxDecoration(
+                  border: Border.all(color: AppTheme.outline),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: selectedProducts.isEmpty
+                    ? Row(
+                        children: [
+                          const Icon(Icons.inventory_2_outlined, size: 18, color: AppTheme.muted),
+                          const SizedBox(width: 10),
+                          Text(
+                            'Choisir parmi mes produits publiés',
+                            style: GoogleFonts.outfit(color: AppTheme.muted),
+                          ),
+                        ],
+                      )
+                    : Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: selectedProducts.map((p) {
+                          final qty = (p['quantity'] as int?) ?? 1;
+                          final unitPrice = unitPriceForProduct(p, qty);
+                          return Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 4),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        p['name'] as String? ?? 'Produit',
+                                        style: GoogleFonts.outfit(
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                      Text(
+                                        '$unitPrice FCFA / unité',
+                                        style: GoogleFonts.outfit(
+                                          fontSize: 11.5,
+                                          color: AppTheme.muted,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                IconButton(
+                                  visualDensity: VisualDensity.compact,
+                                  icon: const Icon(Icons.remove_circle_outline, size: 20),
+                                  onPressed: qty > 1
+                                      ? () => setSheetState(() {
+                                            p['quantity'] = qty - 1;
+                                            recomputeAmount();
+                                          })
+                                      : null,
+                                ),
+                                Text(
+                                  '$qty',
+                                  style: GoogleFonts.outfit(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                                IconButton(
+                                  visualDensity: VisualDensity.compact,
+                                  icon: const Icon(Icons.add_circle_outline, size: 20),
+                                  onPressed: () => setSheetState(() {
+                                    p['quantity'] = qty + 1;
+                                    recomputeAmount();
+                                  }),
+                                ),
+                                IconButton(
+                                  visualDensity: VisualDensity.compact,
+                                  icon: const Icon(Icons.close_rounded,
+                                      size: 18, color: AppTheme.error),
+                                  onPressed: () => setSheetState(() {
+                                    selectedProducts.removeWhere((e) => e['id'] == p['id']);
+                                    recomputeAmount();
+                                  }),
+                                ),
+                              ],
+                            ),
+                          );
+                        }).toList(),
+                      ),
               ),
             ),
             const SizedBox(height: 12),
-            TextField(
-              controller: phoneCtrl,
-              keyboardType: TextInputType.phone,
-              decoration: InputDecoration(
-                labelText: 'Téléphone',
-                prefixIcon: const Icon(Icons.phone_outlined, size: 18),
-                border: OutlineInputBorder(
+            // Recap en lecture seule avant validation : sous-total produits
+            // (prix degressifs deja appliques par recomputeAmount via
+            // unitPriceForProduct) + frais de livraison (ou "Retrait en
+            // boutique" si deliveryMode == 'retrait') + total. Avant ce
+            // correctif, seul un TextField "Montant total" MODIFIABLE etait
+            // affiche -- or ce montant n'est meme pas envoye au serveur
+            // (payload['items'] seul determine le prix reel cote backend) :
+            // le vendeur pouvait croire a tort qu'il fixait le prix en le
+            // modifiant. Desormais purement informatif et fidele au calcul
+            // reellement applique.
+            Builder(builder: (_) {
+              final subtotal = int.tryParse(amountCtrl.text) ?? 0;
+              final isRetrait = deliveryMode == 'retrait';
+              final feeInt = isRetrait ? 0 : deliveryFeePreview.round();
+              final total = subtotal + feeInt;
+              Widget row(String label, String value, {bool bold = false}) {
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 3),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        label,
+                        style: GoogleFonts.outfit(
+                          fontSize: bold ? 14 : 13,
+                          fontWeight: bold ? FontWeight.w700 : FontWeight.w500,
+                          color: bold ? AppTheme.textPrimary : AppTheme.muted,
+                        ),
+                      ),
+                      Text(
+                        value,
+                        style: GoogleFonts.outfit(
+                          fontSize: bold ? 15 : 13,
+                          fontWeight: FontWeight.w700,
+                          color: bold ? AppTheme.primary : AppTheme.textPrimary,
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              }
+
+              return Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: AppTheme.surfaceVariant,
                   borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: AppTheme.outline),
                 ),
-              ),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: addressCtrl,
-              decoration: InputDecoration(
-                labelText: 'Adresse de livraison',
-                prefixIcon: const Icon(Icons.location_on_outlined, size: 18),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    row('Sous-total produits', '${_SellerDashboardScreenState._formatPrice(subtotal)} FCFA'),
+                    row(
+                      isRetrait ? 'Retrait en boutique' : 'Frais de livraison',
+                      isRetrait ? 'Gratuit' : '${_SellerDashboardScreenState._formatPrice(feeInt)} FCFA',
+                    ),
+                    const Divider(height: 16),
+                    row('Total à payer par le client', '${_SellerDashboardScreenState._formatPrice(total)} FCFA', bold: true),
+                  ],
                 ),
-              ),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: productCtrl,
-              decoration: InputDecoration(
-                labelText: 'Produit(s) commandé(s)',
-                prefixIcon: const Icon(Icons.inventory_2_outlined, size: 18),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: amountCtrl,
-              keyboardType: TextInputType.number,
-              decoration: InputDecoration(
-                labelText: 'Montant total (FCFA)',
-                prefixIcon: const Icon(Icons.payments_outlined, size: 18),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                ),
-              ),
-            ),
+              );
+            }),
             const SizedBox(height: 20),
             SizedBox(
               width: double.infinity,
               child: ElevatedButton(
-                onPressed: () {
-                  Navigator.pop(ctx);
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(
-                        'Commande créée pour ${clientNameCtrl.text}',
-                        style: GoogleFonts.outfit(color: Colors.white),
-                      ),
-                      backgroundColor: AppTheme.success,
-                      behavior: SnackBarBehavior.floating,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                    ),
-                  );
-                },
+                onPressed: submittingOrder
+                    ? null
+                    : () async {
+                        if (foundClient == null) {
+                          AppToast.show(
+                            ctx,
+                            message: 'Recherchez d\'abord le client par téléphone.',
+                            type: ToastType.error,
+                          );
+                          return;
+                        }
+                        if (selectedProducts.isEmpty) {
+                          AppToast.show(
+                            ctx,
+                            message: 'Choisissez au moins un produit.',
+                            type: ToastType.error,
+                          );
+                          return;
+                        }
+                        if (selectedAddressId == null &&
+                            (newQuartierCtrl.text.trim().isEmpty ||
+                                newVilleCtrl.text.trim().isEmpty)) {
+                          AppToast.show(
+                            ctx,
+                            message: 'Renseignez le quartier et la ville de livraison.',
+                            type: ToastType.error,
+                          );
+                          return;
+                        }
+                        if (!newDeliverySelectionComplete) {
+                          AppToast.show(
+                            ctx,
+                            message:
+                                'Choisissez le mode de transport (bus ou taxi) pour cette commune.',
+                            type: ToastType.error,
+                          );
+                          return;
+                        }
+
+                        setSheetState(() => submittingOrder = true);
+                        try {
+                          // Nouveau serveur (champ `linked` présent) : le client
+                          // est désigné par son id ; on n'envoie JAMAIS le
+                          // téléphone (masqué pour un client non lié -> 400
+                          // « Format de téléphone invalide »). Ancien serveur
+                          // (`linked` absent) : comportement d'avant, par
+                          // téléphone.
+                          final bool serveurAvecClientId =
+                              foundClient!['linked'] is bool &&
+                                  '${foundClient!['id'] ?? ''}'.isNotEmpty;
+                          final payload = <String, dynamic>{
+                            if (serveurAvecClientId)
+                              'clientId': '${foundClient!['id']}'
+                            else
+                              'clientPhone':
+                                  normaliserTelephone('${foundClient!['phone'] ?? ''}'),
+                            'items': selectedProducts
+                                .map((p) => {
+                                      'variantId': p['variantId'],
+                                      'quantity': (p['quantity'] as int?) ?? 1,
+                                    })
+                                .toList(),
+                          };
+                          if (selectedAddressId != null) {
+                            payload['addressId'] = selectedAddressId;
+                          } else {
+                            payload['newAddressQuartier'] = newQuartierCtrl.text.trim();
+                            payload['newAddressVille'] = newVilleCtrl.text.trim();
+                          }
+                          // Envoye desormais dans tous les cas (avant :
+                          // seulement pour une nouvelle adresse) -- sinon
+                          // "Retrait en boutique" choisi sur une adresse DEJA
+                          // enregistree du client n'etait jamais transmis au
+                          // serveur, qui retombait silencieusement sur
+                          // OrderDeliveryMode.LIVRAISON par defaut (voir
+                          // OrdersService.createVendorInitiated).
+                          payload['deliveryMode'] = deliveryMode;
+                          if (transportMode != null) {
+                            payload['transportMode'] = transportMode;
+                          }
+
+                          final res = await ApiService.instance.client.post(
+                            '/api/v1/orders/vendor-initiated',
+                            data: payload,
+                          );
+                          final orderNumber = (res.data is Map)
+                              ? ((res.data['order'] as Map?)?['orderNumber'] ?? '').toString()
+                              : '';
+
+                          if (!ctx.mounted) return;
+                          Navigator.pop(ctx);
+                          widget.onChanged();
+                          if (!context.mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(
+                                orderNumber.isNotEmpty
+                                    ? 'Commande $orderNumber créée — le client va recevoir la demande de paiement'
+                                    : 'Commande créée — le client va recevoir la demande de paiement',
+                                style: GoogleFonts.outfit(color: Colors.white),
+                              ),
+                              backgroundColor: AppTheme.success,
+                              behavior: SnackBarBehavior.floating,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                            ),
+                          );
+                        } catch (e) {
+                          if (!ctx.mounted) return;
+                          AppToast.show(
+                            ctx,
+                            message: _extractVendorOrderError(e),
+                            type: ToastType.error,
+                          );
+                        } finally {
+                          if (ctx.mounted) setSheetState(() => submittingOrder = false);
+                        }
+                      },
                 style: ElevatedButton.styleFrom(
                   backgroundColor: AppTheme.primary,
                   foregroundColor: Colors.white,
@@ -1309,17 +3138,25 @@ class _CommandesTabState extends State<_CommandesTab> {
                     borderRadius: BorderRadius.circular(12),
                   ),
                 ),
-                child: Text(
-                  'Créer la commande',
-                  style: GoogleFonts.outfit(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
+                child: submittingOrder
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                      )
+                    : Text(
+                        'Créer la commande',
+                        style: GoogleFonts.outfit(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
               ),
             ),
           ],
         ),
+          );
+        },
       ),
     );
   }
@@ -1369,11 +3206,29 @@ class _SummaryPill extends StatelessWidget {
 
 class _SellerOrderCard extends StatelessWidget {
   final Map<String, dynamic> order;
-  const _SellerOrderCard({required this.order});
+  final VoidCallback onConfirm;
+  final VoidCallback onDetails;
+  const _SellerOrderCard({
+    required this.order,
+    required this.onConfirm,
+    required this.onDetails,
+  });
 
   @override
   Widget build(BuildContext context) {
     final status = order['status'] as OrderStatus;
+
+    // « À confirmer avant JJ/MM HH:mm » : informatif seulement (rouge si la
+    // date est dépassée). Le vendeur garde le bouton Confirmer ; aucune
+    // annulation n'est possible côté vendeur.
+    final confirmByRaw = order['confirmBy'];
+    final confirmByDate =
+        (order['rawStatus'] == 'en attente' && confirmByRaw is String)
+            ? DateTime.tryParse(confirmByRaw)?.toLocal()
+            : null;
+    final confirmOverdue =
+        confirmByDate != null && confirmByDate.isBefore(DateTime.now());
+    String two(int n) => n.toString().padLeft(2, '0');
 
     return Container(
       decoration: BoxDecoration(
@@ -1398,16 +3253,31 @@ class _SellerOrderCard extends StatelessWidget {
           children: [
             Row(
               children: [
-                Text(
+                Expanded(
+                  child: Text(
                   order['id'],
                   style: GoogleFonts.outfit(
                     fontSize: 13,
                     fontWeight: FontWeight.w700,
                     color: AppTheme.textPrimary,
                   ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
-                const Spacer(),
-                StatusBadgeWidget.fromOrderStatus(status),
+                ),
+                const SizedBox(width: 8),
+                if (order['badgeAttente'] is String)
+                  StatusBadgeWidget.custom(
+                    label: order['badgeAttente'] as String,
+                    backgroundColor: order['badgeAttente'] == 'À confirmer'
+                        ? const Color(0xFFE3F2FD)
+                        : const Color(0xFFFEF3C7),
+                    textColor: order['badgeAttente'] == 'À confirmer'
+                        ? const Color(0xFF1565C0)
+                        : const Color(0xFFD97706),
+                  )
+                else
+                  StatusBadgeWidget.fromOrderStatus(status),
               ],
             ),
             const SizedBox(height: 10),
@@ -1458,6 +3328,31 @@ class _SellerOrderCard extends StatelessWidget {
                           color: AppTheme.muted,
                         ),
                       ),
+                      if (confirmByDate != null) ...[
+                        const SizedBox(height: 4),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 6,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: confirmOverdue
+                                ? AppTheme.errorContainer
+                                : AppTheme.primaryMuted,
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text(
+                            'À confirmer avant ${two(confirmByDate.day)}/${two(confirmByDate.month)} ${two(confirmByDate.hour)}:${two(confirmByDate.minute)}',
+                            style: GoogleFonts.outfit(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600,
+                              color: confirmOverdue
+                                  ? AppTheme.error
+                                  : AppTheme.primary,
+                            ),
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -1471,57 +3366,91 @@ class _SellerOrderCard extends StatelessWidget {
                 ),
               ],
             ),
+            // On garde ce bloc visible tant que la commande est active
+            // (pas seulement en attente/en cours) : une fois le livreur
+            // affecté ou la livraison en transit ("En livraison"), le
+            // vendeur doit toujours pouvoir rouvrir "Détails" pour accéder
+            // au bouton "Démarrer" / à la suite du suivi. Avant ce correctif,
+            // toute la ligne de boutons — y compris "Détails" — disparaissait
+            // dès que le statut quittait "en cours", rendant la commande
+            // totalement inaccessible depuis la carte.
             if (status == OrderStatus.received ||
-                status == OrderStatus.processing) ...[
+                status == OrderStatus.processing ||
+                status == OrderStatus.inDelivery) ...[
               const SizedBox(height: 12),
               const Divider(height: 1),
               const SizedBox(height: 10),
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: () {},
-                      style: OutlinedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 8),
-                        side: const BorderSide(color: AppTheme.outline),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(8),
-                        ),
+              if (status == OrderStatus.inDelivery)
+                // Plus de "Confirmer" direct possible à ce stade (la suite
+                // exige une preuve concrète) : seul "Détails" a un sens ici.
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton(
+                    onPressed: onDetails,
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      side: const BorderSide(color: AppTheme.outline),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
                       ),
-                      child: Text(
-                        'Détails',
-                        style: GoogleFonts.outfit(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w500,
-                          color: AppTheme.textSecondary,
-                        ),
+                    ),
+                    child: Text(
+                      'Détails',
+                      style: GoogleFonts.outfit(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                        color: AppTheme.textSecondary,
                       ),
                     ),
                   ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: ElevatedButton(
-                      onPressed: () {},
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: AppTheme.primary,
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(vertical: 8),
-                        elevation: 0,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(8),
+                )
+              else
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: onDetails,
+                        style: OutlinedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(vertical: 8),
+                          side: const BorderSide(color: AppTheme.outline),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8),
+                          ),
                         ),
-                      ),
-                      child: Text(
-                        'Confirmer',
-                        style: GoogleFonts.outfit(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
+                        child: Text(
+                          'Détails',
+                          style: GoogleFonts.outfit(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                            color: AppTheme.textSecondary,
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                ],
-              ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: ElevatedButton(
+                        onPressed: onConfirm,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: AppTheme.primary,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 8),
+                          elevation: 0,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                        ),
+                        child: Text(
+                          'Confirmer',
+                          style: GoogleFonts.outfit(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
             ],
           ],
         ),
@@ -1596,13 +3525,13 @@ class _DevisTabState extends State<_DevisTab> {
         _buildFilterChips(),
         Expanded(
           child: _filtered.isEmpty
-              ? EmptyStateWidget(
+              ? _ScrollableEmpty(child: EmptyStateWidget(
                   icon: Icons.description_outlined,
                   title: 'Aucun devis',
                   description: _filter == 'Tous'
                       ? 'Aucune demande de sourcing reçue pour l\'instant.'
                       : 'Aucun devis dans la catégorie "$_filter".',
-                )
+                ))
               : RefreshIndicator(
                   color: AppTheme.primary,
                   onRefresh: _loadRequests,
@@ -1655,7 +3584,9 @@ class _DevisTabState extends State<_DevisTab> {
     return Container(
       color: AppTheme.surface,
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-      child: Row(
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
         children: ['Tous', 'En attente', 'Approuvés', 'Rejetés'].map((f) {
           final isSelected = _filter == f;
           return Padding(
@@ -1687,6 +3618,7 @@ class _DevisTabState extends State<_DevisTab> {
             ),
           );
         }).toList(),
+        ),
       ),
     );
   }
@@ -1818,7 +3750,8 @@ class _DevisCardState extends State<_DevisCard> {
           color: AppTheme.surface,
           borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
         ),
-        child: Column(
+        child: SingleChildScrollView(
+          child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -1906,6 +3839,7 @@ class _DevisCardState extends State<_DevisCard> {
               ),
             ),
           ],
+        ),
         ),
       ),
     );
@@ -2081,7 +4015,8 @@ class _DevisCardState extends State<_DevisCard> {
                             : AppTheme.warning,
                       ),
                       const SizedBox(width: 8),
-                      Text(
+                      Expanded(
+                        child: Text(
                         'Dépôt ${depositAmount.toStringAsFixed(0)} FCFA: ${depositPaid ? 'Payé ✓' : 'En attente'}',
                         style: GoogleFonts.outfit(
                           fontSize: 12,
@@ -2090,6 +4025,7 @@ class _DevisCardState extends State<_DevisCard> {
                               ? AppTheme.success
                               : AppTheme.warning,
                         ),
+                      ),
                       ),
                     ],
                   ),
@@ -2103,6 +4039,14 @@ class _DevisCardState extends State<_DevisCard> {
                           color: AppTheme.primary,
                         ),
                         const SizedBox(width: 8),
+                        // Wrap : "Reste" reste a droite si ca tient, sinon
+                        // passe a la ligne (montants a 6-7 chiffres).
+                        Expanded(
+                          child: Wrap(
+                          alignment: WrapAlignment.spaceBetween,
+                          spacing: 8,
+                          runSpacing: 2,
+                          children: [
                         Text(
                           'Devis envoyé: ${devisAmount.toStringAsFixed(0)} FCFA',
                           style: GoogleFonts.outfit(
@@ -2111,12 +4055,14 @@ class _DevisCardState extends State<_DevisCard> {
                             color: AppTheme.primary,
                           ),
                         ),
-                        const Spacer(),
                         Text(
                           'Reste: ${(devisAmount - depositAmount).toStringAsFixed(0)} FCFA',
                           style: GoogleFonts.outfit(
                             fontSize: 11,
                             color: AppTheme.textSecondary,
+                          ),
+                        ),
+                          ],
                           ),
                         ),
                       ],
@@ -2240,10 +4186,103 @@ class _StockTab extends StatefulWidget {
 }
 
 class _StockTabState extends State<_StockTab> {
+  bool _isLoading = true;
   final List<Map<String, dynamic>> _items = [];
 
   @override
+  void initState() {
+    super.initState();
+    _loadStock();
+  }
+
+  // Le stock vit par variante cote serveur (pas par produit), et il n'y a
+  // pas d'ecran dedie pour ca : on aplati chaque variante de chaque produit
+  // du vendeur en une ligne editable.
+  Future<void> _loadStock() async {
+    setState(() => _isLoading = true);
+    try {
+      final r = await ApiService.instance.client.get('/api/v1/products/vendor/me');
+      final raw = r.data;
+      final list = raw is List
+          ? raw
+          : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) as List : []);
+      final items = <Map<String, dynamic>>[];
+      for (final p in list.whereType<Map>()) {
+        final product = Map<String, dynamic>.from(p);
+        final images = (product['images'] as List?)?.whereType<Map>().toList() ?? [];
+        final imageUrl = images.isNotEmpty ? (images.first['url'] as String? ?? '') : '';
+        final variants = (product['variants'] as List?)?.whereType<Map>().toList() ?? [];
+        for (final v in variants) {
+          final variant = Map<String, dynamic>.from(v);
+          final descriptor = [variant['size'], variant['color']]
+              .whereType<String>()
+              .where((s) => s.isNotEmpty)
+              .join(' / ');
+          items.add({
+            'productId': (product['id'] ?? '').toString(),
+            'variantId': (variant['id'] ?? '').toString(),
+            'name': descriptor.isNotEmpty
+                ? '${product['prod_name'] ?? 'Produit'} ($descriptor)'
+                : (product['prod_name']?.toString() ?? 'Produit'),
+            'sku': (variant['sku'] ?? '—').toString(),
+            'stock': (variant['stockQuantity'] as num?)?.toInt() ?? 0,
+            'minStock': (variant['lowStockAlert'] as num?)?.toInt() ?? 5,
+            'image': imageUrl,
+          });
+        }
+      }
+      if (mounted) {
+        setState(() {
+          _items
+            ..clear()
+            ..addAll(items);
+          _isLoading = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _updateStock(int index, int newQty) async {
+    final item = _items[index];
+    final previous = item['stock'] as int;
+    setState(() => _items[index]['stock'] = newQty);
+
+    try {
+      await ApiService.instance.client.put(
+        '/api/v1/products/${item['productId']}/variants/${item['variantId']}',
+        data: {'stockQuantity': newQty},
+      );
+    } catch (_) {
+      if (mounted) {
+        setState(() => _items[index]['stock'] = previous);
+        AppToast.show(
+          context,
+          message: 'Impossible de mettre à jour le stock.',
+          type: ToastType.error,
+        );
+      }
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
+    if (_isLoading) {
+      return const Center(
+        child: CircularProgressIndicator(color: AppTheme.primary),
+      );
+    }
+    if (_items.isEmpty) {
+      return const _ScrollableEmpty(
+        child: EmptyStateWidget(
+        icon: Icons.inventory_2_outlined,
+        title: 'Aucun stock à afficher',
+        description: 'Ajoute des produits pour suivre leur stock ici.',
+      ),
+      );
+    }
+
     final outOfStock = _items.where((i) => i['stock'] == 0).length;
     final lowStock = _items
         .where((i) => i['stock'] > 0 && i['stock'] <= i['minStock'])
@@ -2259,7 +4298,7 @@ class _StockTabState extends State<_StockTab> {
             separatorBuilder: (_, __) => const SizedBox(height: 10),
             itemBuilder: (_, i) => _StockItem(
               item: _items[i],
-              onUpdate: (newQty) => setState(() => _items[i]['stock'] = newQty),
+              onUpdate: (newQty) => _updateStock(i, newQty),
             ),
           ),
         ),
@@ -2319,13 +4358,15 @@ class _AlertBanner extends StatelessWidget {
         children: [
           Icon(icon, size: 16, color: color),
           const SizedBox(width: 8),
-          Text(
+          Expanded(
+            child: Text(
             message,
             style: GoogleFonts.outfit(
               fontSize: 12,
               fontWeight: FontWeight.w500,
               color: color,
             ),
+          ),
           ),
         ],
       ),
@@ -2509,388 +4550,15 @@ class _RevenusTab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _EarningsSummaryCard(),
-          const SizedBox(height: 16),
-          _MonthlyBreakdown(),
-          const SizedBox(height: 16),
-          _RecentTransactions(),
-        ],
-      ),
-    );
-  }
-}
-
-class _EarningsSummaryCard extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          colors: [Color(0xFFFF6210), Color(0xFFFF8C42)],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(20),
-      ),
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Text(
-                'Revenus du mois',
-                style: GoogleFonts.outfit(
-                  fontSize: 13,
-                  color: Colors.white.withAlpha(200),
-                ),
-              ),
-              const Spacer(),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 5,
-                ),
-                decoration: BoxDecoration(
-                  color: Colors.white.withAlpha(30),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  'Mars 2026',
-                  style: GoogleFonts.outfit(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                    color: Colors.white,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Text(
-            '342 500 FCFA',
-            style: GoogleFonts.outfit(
-              fontSize: 28,
-              fontWeight: FontWeight.w800,
-              color: Colors.white,
-            ),
-          ),
-          const SizedBox(height: 4),
-          Row(
-            children: [
-              const Icon(
-                Icons.trending_up_rounded,
-                size: 14,
-                color: Colors.white,
-              ),
-              const SizedBox(width: 4),
-              Text(
-                '+18% vs mois dernier',
-                style: GoogleFonts.outfit(
-                  fontSize: 12,
-                  color: Colors.white.withAlpha(200),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 20),
-          Row(
-            children: [
-              _EarningsStat(
-                label: 'Ventes',
-                value: '45',
-                icon: Icons.shopping_bag_outlined,
-              ),
-              _EarningsStat(
-                label: 'Commissions',
-                value: '-34 250 FCFA',
-                icon: Icons.percent_rounded,
-              ),
-              _EarningsStat(
-                label: 'Net',
-                value: '308 250 FCFA',
-                icon: Icons.account_balance_wallet_outlined,
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _EarningsStat extends StatelessWidget {
-  final String label;
-  final String value;
-  final IconData icon;
-  const _EarningsStat({
-    required this.label,
-    required this.value,
-    required this.icon,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Expanded(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(icon, size: 12, color: Colors.white.withAlpha(180)),
-              const SizedBox(width: 4),
-              Text(
-                label,
-                style: GoogleFonts.outfit(
-                  fontSize: 11,
-                  color: Colors.white.withAlpha(180),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 4),
-          Text(
-            value,
-            style: GoogleFonts.outfit(
-              fontSize: 12,
-              fontWeight: FontWeight.w700,
-              color: Colors.white,
-            ),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _MonthlyBreakdown extends StatelessWidget {
-  final List<Map<String, dynamic>> _months = const [
-    {'month': 'Jan', 'amount': 185000, 'max': 400000},
-    {'month': 'Fév', 'amount': 290000, 'max': 400000},
-    {'month': 'Mar', 'amount': 342500, 'max': 400000},
-  ];
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: AppTheme.surface,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withAlpha(8),
-            blurRadius: 12,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'Évolution mensuelle',
-            style: GoogleFonts.outfit(
-              fontSize: 15,
-              fontWeight: FontWeight.w700,
-              color: AppTheme.textPrimary,
-            ),
-          ),
-          const SizedBox(height: 16),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: _months.map((m) {
-              final ratio = (m['amount'] as int) / (m['max'] as int);
-              final isLatest = m['month'] == 'Mar';
-              return Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 6),
-                  child: Column(
-                    children: [
-                      Text(
-                        '${((m['amount'] as int) / 1000).toStringAsFixed(0)}k',
-                        style: GoogleFonts.outfit(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                          color: isLatest
-                              ? AppTheme.primary
-                              : AppTheme.textSecondary,
-                        ),
-                      ),
-                      const SizedBox(height: 6),
-                      Container(
-                        height: 80 * ratio,
-                        decoration: BoxDecoration(
-                          color: isLatest
-                              ? AppTheme.primary
-                              : AppTheme.primaryMuted,
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                      ),
-                      const SizedBox(height: 6),
-                      Text(
-                        m['month'],
-                        style: GoogleFonts.outfit(
-                          fontSize: 12,
-                          color: AppTheme.muted,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              );
-            }).toList(),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _RecentTransactions extends StatelessWidget {
-  final List<Map<String, dynamic>> _transactions = const [
-    {
-      'id': '#ASK-2024-103',
-      'product': 'Sac Raphia Tressé',
-      'amount': '+12 000 FCFA',
-      'date': '17 mars',
-      'type': 'credit',
-    },
-    {
-      'id': '#ASK-2024-102',
-      'product': 'Tissu Wax x2',
-      'amount': '+57 000 FCFA',
-      'date': '18 mars',
-      'type': 'credit',
-    },
-    {
-      'id': 'COM-MAR-001',
-      'product': 'Commission Asoukaa',
-      'amount': '-8 550 FCFA',
-      'date': '18 mars',
-      'type': 'debit',
-    },
-    {
-      'id': '#ASK-2024-101',
-      'product': 'Boubou Brodé Premium',
-      'amount': '+45 000 FCFA',
-      'date': '19 mars',
-      'type': 'credit',
-    },
-  ];
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: AppTheme.surface,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withAlpha(8),
-            blurRadius: 12,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'Transactions récentes',
-            style: GoogleFonts.outfit(
-              fontSize: 15,
-              fontWeight: FontWeight.w700,
-              color: AppTheme.textPrimary,
-            ),
-          ),
-          const SizedBox(height: 12),
-          ..._transactions.map((t) => _TransactionRow(transaction: t)),
-        ],
-      ),
-    );
-  }
-}
-
-class _TransactionRow extends StatelessWidget {
-  final Map<String, dynamic> transaction;
-  const _TransactionRow({required this.transaction});
-
-  @override
-  Widget build(BuildContext context) {
-    final isCredit = transaction['type'] == 'credit';
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      child: Row(
-        children: [
-          Container(
-            width: 36,
-            height: 36,
-            decoration: BoxDecoration(
-              color: isCredit
-                  ? AppTheme.successContainer
-                  : AppTheme.errorContainer,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Icon(
-              isCredit
-                  ? Icons.arrow_downward_rounded
-                  : Icons.arrow_upward_rounded,
-              size: 16,
-              color: isCredit ? AppTheme.success : AppTheme.error,
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  transaction['product'],
-                  style: GoogleFonts.outfit(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w500,
-                    color: AppTheme.textPrimary,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                Text(
-                  transaction['id'],
-                  style: GoogleFonts.outfit(
-                    fontSize: 11,
-                    color: AppTheme.muted,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              Text(
-                transaction['amount'],
-                style: GoogleFonts.outfit(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w700,
-                  color: isCredit ? AppTheme.success : AppTheme.error,
-                ),
-              ),
-              Text(
-                transaction['date'],
-                style: GoogleFonts.outfit(fontSize: 11, color: AppTheme.muted),
-              ),
-            ],
-          ),
-        ],
+    // Le calcul reel des revenus vendeur (ventes, commissions, net) n'existe
+    // pas encore cote serveur. On affiche un etat honnete plutot que des
+    // chiffres inventes, en attendant que cette fonctionnalite soit construite.
+    return const Center(
+      child: EmptyStateWidget(
+        icon: Icons.bar_chart_rounded,
+        title: 'Bientôt disponible',
+        description:
+            'Le suivi de tes revenus arrive bientot. On y travaille.',
       ),
     );
   }
@@ -2908,63 +4576,127 @@ class _RetraitTab extends StatefulWidget {
 }
 
 class _RetraitTabState extends State<_RetraitTab> {
-  final _amountController = TextEditingController();
-  final bool _isLoading = false;
-
-  static const String _feexpayToken = String.fromEnvironment('FEEXPAY_API_KEY');
-  static const String _feexpayShopId = String.fromEnvironment(
-    'FEEXPAY_SHOP_ID',
-  );
-
-  final List<Map<String, dynamic>> _history = [
-    {
-      'amount': '150 000 FCFA',
-      'method': 'FeeXPay',
-      'date': '10 mars 2026',
-      'status': 'completed',
-    },
-    {
-      'amount': '80 000 FCFA',
-      'method': 'FeeXPay',
-      'date': '25 fév 2026',
-      'status': 'completed',
-    },
-    {
-      'amount': '200 000 FCFA',
-      'method': 'FeeXPay',
-      'date': '5 fév 2026',
-      'status': 'completed',
-    },
-  ];
+  bool _isLoading = true;
+  bool _hasError = false;
+  num _soldeDisponible = 0;
+  num _totalRetire = 0;
+  List<Map<String, dynamic>> _history = [];
 
   @override
-  void dispose() {
-    _amountController.dispose();
-    super.dispose();
+  void initState() {
+    super.initState();
+    _loadEarnings();
+  }
+
+  Future<void> _loadEarnings() async {
+    setState(() {
+      _isLoading = true;
+      _hasError = false;
+    });
+    try {
+      final res =
+          await ApiService.instance.client.get('/api/v1/vendors/me/earnings');
+      final data = res.data as Map<String, dynamic>;
+      final historique = (data['historique'] as List?)
+              ?.whereType<Map>()
+              .map((h) => h.cast<String, dynamic>())
+              .toList() ??
+          [];
+      if (mounted) {
+        setState(() {
+          _soldeDisponible =
+              (double.tryParse(data['soldeDisponible']?.toString() ?? '') ?? 0);
+          _totalRetire =
+              (double.tryParse(data['totalRetire']?.toString() ?? '') ?? 0);
+          _history = historique;
+          _isLoading = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() { _isLoading = false; _hasError = true; });
+    }
+  }
+
+  static String _formatAmount(num amount) {
+    final s = amount.round().toString();
+    final buf = StringBuffer();
+    for (var i = 0; i < s.length; i++) {
+      if (i > 0 && (s.length - i) % 3 == 0) buf.write(' ');
+      buf.write(s[i]);
+    }
+    return '${buf.toString()} FCFA';
+  }
+
+  static String _formatHistoryDate(dynamic dateStr) {
+    if (dateStr == null) return '';
+    try {
+      final dt = DateTime.parse(dateStr.toString());
+      const mois = [
+        'jan', 'fév', 'mars', 'avr', 'mai', 'juin',
+        'juil', 'août', 'sept', 'oct', 'nov', 'déc',
+      ];
+      return '${dt.day} ${mois[dt.month - 1]} ${dt.year}';
+    } catch (_) {
+      return '';
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _buildBalanceCard(),
-          const SizedBox(height: 16),
-          _buildWithdrawForm(),
-          const SizedBox(height: 20),
-          Text(
-            'Historique des retraits',
-            style: GoogleFonts.outfit(
-              fontSize: 15,
-              fontWeight: FontWeight.w700,
-              color: AppTheme.textPrimary,
+    if (_isLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (_hasError) {
+      return ConnectionErrorScreen(
+        onRetry: _loadEarnings,
+        title: 'Impossible de charger vos gains',
+        message: 'Vérifiez votre connexion internet et réessayez.',
+      );
+    }
+    return RefreshIndicator(
+      onRefresh: _loadEarnings,
+      child: SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildBalanceCard(),
+            const SizedBox(height: 16),
+            _buildWithdrawInfoCard(),
+            const SizedBox(height: 20),
+            Text(
+              'Historique des reversements',
+              style: GoogleFonts.outfit(
+                fontSize: 15,
+                fontWeight: FontWeight.w700,
+                color: AppTheme.textPrimary,
+              ),
             ),
-          ),
-          const SizedBox(height: 12),
-          ..._history.map((h) => _WithdrawalHistoryItem(item: h)),
-        ],
+            const SizedBox(height: 12),
+            if (_history.isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                child: Text(
+                  'Aucun reversement pour le moment.',
+                  style: GoogleFonts.outfit(
+                    fontSize: 13,
+                    color: AppTheme.textSecondary,
+                  ),
+                ),
+              )
+            else
+              ..._history.map((h) => _WithdrawalHistoryItem(item: {
+                    'amount': _formatAmount(
+                      (double.tryParse(h['montant']?.toString() ?? '') ?? 0),
+                    ),
+                    'method': h['orderNumber'] ?? '—',
+                    'date': _formatHistoryDate(h['date']),
+                    'status':
+                        h['statut'] == 'payé' ? 'completed' : 'pending',
+                  })),
+          ],
+        ),
       ),
     );
   }
@@ -2980,7 +4712,7 @@ class _RetraitTabState extends State<_RetraitTab> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            'Solde disponible',
+            'Montant dû par Asoukaa (en attente de reversement)',
             style: GoogleFonts.outfit(
               fontSize: 13,
               color: Colors.white.withAlpha(160),
@@ -2988,7 +4720,7 @@ class _RetraitTabState extends State<_RetraitTab> {
           ),
           const SizedBox(height: 8),
           Text(
-            '308 250 FCFA',
+            _formatAmount(_soldeDisponible),
             style: GoogleFonts.outfit(
               fontSize: 30,
               fontWeight: FontWeight.w800,
@@ -2998,9 +4730,10 @@ class _RetraitTabState extends State<_RetraitTab> {
           const SizedBox(height: 16),
           Row(
             children: [
-              _BalanceStat(label: 'En attente', value: '45 000 FCFA'),
-              const SizedBox(width: 24),
-              _BalanceStat(label: 'Total retiré', value: '430 000 FCFA'),
+              _BalanceStat(
+                label: 'Total déjà reversé',
+                value: _formatAmount(_totalRetire),
+              ),
             ],
           ),
         ],
@@ -3008,7 +4741,12 @@ class _RetraitTabState extends State<_RetraitTab> {
     );
   }
 
-  Widget _buildWithdrawForm() {
+  // Le bouton "Retrait via FeeXPay" a été retiré : il ouvrait en réalité
+  // l'écran de PAIEMENT FeeXPay (le même composant que pour encaisser une
+  // commande), ce qui aurait DÉBITÉ le vendeur au lieu de le payer. Tant
+  // qu'un vrai circuit de reversement (paiement sortant) n'est pas mis en
+  // place, le reversement reste géré manuellement par l'équipe Asoukaa.
+  Widget _buildWithdrawInfoCard() {
     return Container(
       decoration: BoxDecoration(
         color: AppTheme.surface,
@@ -3022,233 +4760,55 @@ class _RetraitTabState extends State<_RetraitTab> {
         ],
       ),
       padding: const EdgeInsets.all(16),
-      child: Column(
+      child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'Nouveau retrait',
-            style: GoogleFonts.outfit(
-              fontSize: 15,
-              fontWeight: FontWeight.w700,
-              color: AppTheme.textPrimary,
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: AppTheme.warning.withAlpha(30),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: const Icon(
+              Icons.info_outline_rounded,
+              color: AppTheme.warning,
+              size: 22,
             ),
           ),
-          const SizedBox(height: 16),
-          // FeeXPay provider banner
-          Container(
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(
-              color: const Color(0xFF112C56).withAlpha(12),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: const Color(0xFF112C56).withAlpha(40)),
-            ),
-            child: Row(
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF112C56).withAlpha(20),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: const Icon(
-                    Icons.payment_rounded,
-                    color: Color(0xFF112C56),
-                    size: 22,
+                Text(
+                  'Reversement géré par Asoukaa',
+                  style: GoogleFonts.outfit(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    color: AppTheme.textPrimary,
                   ),
                 ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'FeeXPay',
-                        style: GoogleFonts.outfit(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w700,
-                          color: const Color(0xFF112C56),
-                        ),
-                      ),
-                      Text(
-                        'Orange Money · Wave · Moov · Carte',
-                        style: GoogleFonts.outfit(
-                          fontSize: 11,
-                          color: AppTheme.textSecondary,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 4,
-                  ),
-                  decoration: BoxDecoration(
-                    color: AppTheme.successContainer,
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(
-                        Icons.verified_rounded,
-                        size: 12,
-                        color: AppTheme.success,
-                      ),
-                      const SizedBox(width: 4),
-                      Text(
-                        'Actif',
-                        style: GoogleFonts.outfit(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                          color: AppTheme.success,
-                        ),
-                      ),
-                    ],
+                const SizedBox(height: 4),
+                Text(
+                  'Le retrait automatique n\'est pas encore disponible dans '
+                  'l\'application. L\'équipe Asoukaa vous reverse votre solde '
+                  'directement (virement / mobile money) selon vos '
+                  'coordonnées de paiement enregistrées.',
+                  style: GoogleFonts.outfit(
+                    fontSize: 12,
+                    color: AppTheme.textSecondary,
+                    height: 1.4,
                   ),
                 ),
               ],
-            ),
-          ),
-          const SizedBox(height: 16),
-          TextField(
-            controller: _amountController,
-            keyboardType: TextInputType.number,
-            style: GoogleFonts.outfit(
-              fontSize: 14,
-              color: AppTheme.textPrimary,
-            ),
-            decoration: InputDecoration(
-              labelText: 'Montant à retirer (FCFA)',
-              prefixIcon: const Icon(Icons.account_balance_wallet_outlined),
-              labelStyle: GoogleFonts.outfit(
-                fontSize: 13,
-                color: AppTheme.textSecondary,
-              ),
-              filled: true,
-              fillColor: AppTheme.surfaceVariant,
-              contentPadding: const EdgeInsets.symmetric(
-                horizontal: 12,
-                vertical: 14,
-              ),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: const BorderSide(color: AppTheme.outline),
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: const BorderSide(color: AppTheme.outline),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(
-                  color: const Color(0xFF112C56),
-                  width: 2,
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Montant minimum: 5 000 FCFA · Délai: 24-48h',
-            style: GoogleFonts.outfit(fontSize: 11, color: AppTheme.muted),
-          ),
-          const SizedBox(height: 16),
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton(
-              onPressed: _isLoading ? null : _handleWithdraw,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF112C56),
-                foregroundColor: Colors.white,
-                elevation: 0,
-                padding: const EdgeInsets.symmetric(vertical: 14),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                ),
-              ),
-              child: _isLoading
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: Colors.white,
-                      ),
-                    )
-                  : Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        const Icon(Icons.lock_rounded, size: 16),
-                        const SizedBox(width: 8),
-                        Text(
-                          'Retrait via FeeXPay',
-                          style: GoogleFonts.outfit(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ],
-                    ),
             ),
           ),
         ],
       ),
     );
   }
-
-  String _generateTransKey() {
-    final ts = DateTime.now().millisecondsSinceEpoch.toString();
-    return 'RET${ts.substring(ts.length - 12)}';
-  }
-
-  void _handleWithdraw() {
-    final text = _amountController.text.trim();
-    if (text.isEmpty) return;
-    final amount = int.tryParse(text.replaceAll(' ', ''));
-    if (amount == null || amount < 5000) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Montant minimum: 5 000 FCFA',
-            style: GoogleFonts.outfit(),
-          ),
-          backgroundColor: AppTheme.error,
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(10),
-          ),
-        ),
-      );
-      return;
-    }
-
-    final token = _feexpayToken.isNotEmpty
-        ? _feexpayToken
-        : 'fp_8Q22dR4r5omd6bBonmqjicDDzkuE3Vgg49bkWVuRvFKZbM4iG5BlcIa45lYocd2Y';
-    final shopId = _feexpayShopId.isNotEmpty
-        ? _feexpayShopId
-        : '6787b9c315c7bc2e9dbb906a';
-
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (context) => ChoicePage(
-          token: token,
-          id: shopId,
-          amount: amount.toString(),
-          redirecturl: AppRoutes.feexpaySuccess,
-          errorredirecturl: AppRoutes.feexpayError,
-          trans_key: _generateTransKey(),
-        ),
-      ),
-    );
-    _amountController.clear();
-  }
 }
-
 class _BalanceStat extends StatelessWidget {
   final String label;
   final String value;
@@ -3373,6 +4933,16 @@ class _SellerStatsTab extends StatelessWidget {
   final List<Map<String, dynamic>> products;
   const _SellerStatsTab({this.shop, required this.products});
 
+  // Auparavant "Mars 2026" figé en dur, quel que soit le mois réel.
+  static String _currentMonthLabel() {
+    const mois = [
+      'Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin',
+      'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre',
+    ];
+    final now = DateTime.now();
+    return '${mois[now.month - 1]} ${now.year}';
+  }
+
   @override
   Widget build(BuildContext context) {
     final totalViews = products.fold<int>(
@@ -3387,9 +4957,12 @@ class _SellerStatsTab extends StatelessWidget {
               (p['sold_count'] as num?)?.toInt() ??
               0),
     );
-    // Simulated shop visitor count (would come from analytics in production)
-    final shopVisitors =
-        (shop?['visitor_count'] as num?)?.toInt() ?? (totalViews * 3 ~/ 2);
+    // Vrai compteur de visites boutique (GET /vendors/me → visitCount),
+    // incrémenté à chaque ouverture de la page boutique par un acheteur.
+    // Avant : "visitor_count" (snake_case, une clé qui n'existe pas côté
+    // serveur) faisait toujours échouer la lecture, d'où le repli sur une
+    // estimation inventée (totalViews * 3 / 2).
+    final shopVisitors = (shop?['visitCount'] as num?)?.toInt() ?? 0;
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
@@ -3412,14 +4985,18 @@ class _SellerStatsTab extends StatelessWidget {
               children: [
                 Row(
                   children: [
-                    Text(
+                    Expanded(
+                      child: Text(
                       'Statistiques Boutique',
                       style: GoogleFonts.outfit(
                         fontSize: 15,
                         color: Colors.white.withAlpha(200),
                       ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
-                    const Spacer(),
+                    ),
+                    const SizedBox(width: 8),
                     Container(
                       padding: const EdgeInsets.symmetric(
                         horizontal: 10,
@@ -3430,7 +5007,7 @@ class _SellerStatsTab extends StatelessWidget {
                         borderRadius: BorderRadius.circular(8),
                       ),
                       child: Text(
-                        'Mars 2026',
+                        _currentMonthLabel(),
                         style: GoogleFonts.outfit(
                           fontSize: 12,
                           fontWeight: FontWeight.w500,
@@ -3619,13 +5196,17 @@ class _StatPill extends StatelessWidget {
           children: [
             Icon(icon, color: color, size: 18),
             const SizedBox(height: 6),
-            Text(
+            FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Text(
               value,
               style: GoogleFonts.outfit(
                 fontSize: 18,
                 fontWeight: FontWeight.w800,
                 color: Colors.white,
               ),
+            ),
             ),
             Text(
               label,
@@ -3637,6 +5218,26 @@ class _StatPill extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Etat vide qui devient defilable quand la hauteur disponible est trop
+/// petite (petits ecrans 360x640, police agrandie) au lieu d'afficher
+/// "BOTTOM OVERFLOWED". Reste centre verticalement sinon.
+class _ScrollableEmpty extends StatelessWidget {
+  final Widget child;
+  const _ScrollableEmpty({required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) => SingleChildScrollView(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(minHeight: constraints.maxHeight),
+          child: child,
         ),
       ),
     );

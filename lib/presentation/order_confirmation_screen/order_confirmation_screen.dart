@@ -16,6 +16,7 @@ class OrderConfirmationScreen extends StatelessWidget {
     final String orderNumber =
         args?['orderNumber'] as String? ??
         'ASK-${DateTime.now().millisecondsSinceEpoch.toString().substring(7)}';
+    final String? orderId = args?['orderId'] as String?;
     final String firstName = args?['firstName'] as String? ?? 'Aminata';
     final String lastName = args?['lastName'] as String? ?? 'Konaté';
     final String address =
@@ -56,7 +57,7 @@ class OrderConfirmationScreen extends StatelessWidget {
               ),
               SizedBox(height: 2.h),
               Text(
-                'Commande Confirmée !',
+                'Commande enregistrée !',
                 style: GoogleFonts.outfit(
                   fontSize: 20.sp > 22 ? 22 : 20.sp,
                   fontWeight: FontWeight.w800,
@@ -66,7 +67,7 @@ class OrderConfirmationScreen extends StatelessWidget {
               ),
               SizedBox(height: 0.8.h),
               Text(
-                'Merci pour votre commande. Nous la préparons avec soin.',
+                'Merci pour votre commande. Elle a été transmise au vendeur pour confirmation.',
                 style: GoogleFonts.outfit(
                   fontSize: 13.sp > 15 ? 15 : 13.sp,
                   color: AppTheme.textSecondary,
@@ -381,7 +382,11 @@ class OrderConfirmationScreen extends StatelessWidget {
                     Navigator.of(context).pushNamed(
                       AppRoutes.orderTracking,
                       arguments: {
+                        'orderId': orderId,
                         'orderNumber': orderNumber,
+                        // Cet écran n'est atteint qu'après un paiement réussi :
+                        // la commande attend maintenant le vendeur.
+                        'pendingLabel': 'En attente de confirmation du vendeur',
                         'firstName': firstName,
                         'lastName': lastName,
                         'address': address,

@@ -6,9 +6,12 @@ import '../../theme/app_theme.dart';
 import '../../routes/app_routes.dart';
 import '../../services/nest_auth_service.dart';
 import '../../services/api_service.dart';
+import '../../services/wishlist_service.dart';
 import '../../widgets/empty_state_widget.dart';
 import '../../widgets/custom_image_widget.dart';
 import '../../widgets/app_toast.dart';
+import '../../utils/price_range.dart';
+import '../../utils/lecture_json.dart';
 
 class WishlistScreen extends StatefulWidget {
   const WishlistScreen({super.key});
@@ -107,13 +110,23 @@ class _WishlistScreenState extends State<WishlistScreen> {
     final price = rawPrice != null
         ? (double.tryParse(rawPrice.toString()) ?? 0.0)
         : 0.0;
-    final originalPrice =
-        (nestProduct['original_price'] as num? ?? nestProduct['originalPrice'] as num?)
-            ?.toDouble();
-    final stockQty =
-        nestProduct['stock_quantity'] as int? ?? nestProduct['stockQuantity'] as int? ?? 0;
-    final addedPrice =
-        (item['addedPrice'] as num? ?? item['added_price'] as num?)?.toDouble();
+    final originalPrice = lireDoubleOuNull(
+      nestProduct['original_price'] ?? nestProduct['originalPrice'],
+    );
+    // Nouveau serveur : `stock` (entier), `defaultVariantId` (UUID ou null) et
+    // `variantCount` (entier) sont fournis. Ancien serveur : ces champs sont
+    // absents et on garde l'ancien comportement (stock lu sous les anciens
+    // noms, sinon 0 = bouton désactivé).
+    final stockQty = lireIntOuNull(nestProduct['stock']) ??
+        lireIntOuNull(
+          nestProduct['stock_quantity'] ?? nestProduct['stockQuantity'],
+        ) ??
+        0;
+    final defaultVariantId = nestProduct['defaultVariantId']?.toString();
+    final variantCount = lireIntOuNull(nestProduct['variantCount']);
+    final addedPrice = lireDoubleOuNull(
+      item['addedPrice'] ?? item['added_price'],
+    );
 
     return {
       'id': item['id'] ?? '',
@@ -123,9 +136,23 @@ class _WishlistScreenState extends State<WishlistScreen> {
         'id': nestProduct['id'] ?? '',
         'name': name,
         'price': price,
+        // Paliers dégressifs bruts, conservés pour que la carte affiche la
+        // fourchette « meilleur palier – prix normal » (priceRangeLabel).
+        'tierPrices': nestProduct['tierPrices'] ??
+            nestProduct['price_tiers'] ??
+            nestProduct['priceTiers'],
         'original_price': originalPrice,
         'images': imageUrl.isNotEmpty ? [imageUrl] : <String>[],
         'stock_quantity': stockQty,
+        // Ajoutés seulement si le serveur les fournit (sinon : ancien
+        // serveur, voir _doitChoisirVariante).
+        if (nestProduct.containsKey('defaultVariantId'))
+          'defaultVariantId':
+              (defaultVariantId == null || defaultVariantId.isEmpty)
+                  ? null
+                  : defaultVariantId,
+        if (nestProduct.containsKey('variantCount'))
+          'variantCount': variantCount,
         'shops': {'name': shopName},
       },
     };
@@ -136,6 +163,7 @@ class _WishlistScreenState extends State<WishlistScreen> {
     try {
       await ApiService.instance.client
           .delete('/api/v1/wishlist/$productId');
+      WishlistService.instance.refreshCount();
       if (mounted) {
         setState(() =>
             _wishlistItems.removeWhere((item) => item['id'] == wishlistId));
@@ -153,12 +181,27 @@ class _WishlistScreenState extends State<WishlistScreen> {
   }
 
   Future<void> _addToCart(Map<String, dynamic> product) async {
+    // Produit à plusieurs variantes (taille, couleur...) ou sans variante par
+    // défaut : le client doit choisir sur la fiche produit.
+    if (_doitChoisirVariante(product)) {
+      AppToast.show(
+        context,
+        message: 'Choisissez une variante sur la fiche produit',
+        type: ToastType.info,
+      );
+      Navigator.pushNamed(
+        context,
+        AppRoutes.productDetail,
+        arguments: product,
+      );
+      return;
+    }
     try {
       await ApiService.instance.client.post(
         '/api/v1/cart/items',
         data: {
           'quantity': 1,
-          if (product['variantId'] != null) 'variantId': product['variantId'],
+          'variantId': product['defaultVariantId'] ?? product['variantId'],
         },
       );
       if (mounted) AppToast.show(context, message: 'Ajouté au panier !');
@@ -262,6 +305,20 @@ class _WishlistScreenState extends State<WishlistScreen> {
   }
 }
 
+/// Vrai si l'ajout direct au panier est impossible : plusieurs variantes
+/// (`variantCount` > 1) ou aucune variante par défaut (`defaultVariantId`
+/// absent). Avec un ancien serveur (champs absents) : jamais d'obligation de
+/// choisir, on garde le comportement d'origine.
+bool _doitChoisirVariante(Map<String, dynamic> product) {
+  final variantCount = lireIntOuNull(product['variantCount']);
+  final defaultId = product['defaultVariantId']?.toString() ?? '';
+  final nouveauServeur =
+      product.containsKey('variantCount') || product.containsKey('defaultVariantId');
+  if (!nouveauServeur) return false;
+  if (variantCount != null && variantCount > 1) return true;
+  return defaultId.isEmpty;
+}
+
 class _WishlistCard extends StatelessWidget {
   final Map<String, dynamic> item;
   final Map<String, dynamic> product;
@@ -284,12 +341,13 @@ class _WishlistCard extends StatelessWidget {
     final images = product['images'] as List<dynamic>? ?? [];
     final imageUrl = images.isNotEmpty ? images.first as String : '';
     final name = product['name'] as String? ?? 'Produit';
-    final price = (product['price'] as num?)?.toDouble() ?? 0;
-    final originalPrice = (product['original_price'] as num?)?.toDouble();
-    final addedPrice = (item['added_price'] as num?)?.toDouble();
+    final price = lireDouble(product['price']);
+    final originalPrice = lireDoubleOuNull(product['original_price']);
+    final addedPrice = lireDoubleOuNull(item['added_price']);
     final shopName =
         (product['shops'] as Map<String, dynamic>?)?['name'] as String? ?? '';
-    final inStock = (product['stock_quantity'] as num?)?.toInt() ?? 0;
+    final inStock = lireInt(product['stock_quantity']);
+    final choisir = inStock > 0 && _doitChoisirVariante(product);
 
     final priceDrop = addedPrice != null && price < addedPrice;
 
@@ -394,14 +452,23 @@ class _WishlistCard extends StatelessWidget {
                     // Price row
                     Row(
                       children: [
-                        Text(
-                          '${price.toStringAsFixed(0)} F',
-                          style: GoogleFonts.outfit(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w700,
-                            color: priceDrop
-                                ? AppTheme.success
-                                : AppTheme.primary,
+                        Flexible(
+                          child: Text(
+                            // « 25 – 39 F » quand un palier dégressif existe,
+                            // sinon le prix normal seul.
+                            priceRangeLabel(
+                              product,
+                              currency: 'F',
+                            ),
+                            style: GoogleFonts.outfit(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700,
+                              color: priceDrop
+                                  ? AppTheme.success
+                                  : AppTheme.primary,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                           ),
                         ),
                         if (originalPrice != null && originalPrice > price) ...[
@@ -476,9 +543,11 @@ class _WishlistCard extends StatelessWidget {
                         onPressed: inStock > 0 ? onAddToCart : null,
                         icon: const Icon(Icons.shopping_cart_rounded, size: 14),
                         label: Text(
-                          inStock > 0
-                              ? 'Ajouter au panier'
-                              : 'Rupture de stock',
+                          inStock <= 0
+                              ? 'Rupture de stock'
+                              : (choisir
+                                    ? 'Choisir une variante'
+                                    : 'Ajouter au panier'),
                           style: GoogleFonts.outfit(
                             fontSize: 12,
                             fontWeight: FontWeight.w600,

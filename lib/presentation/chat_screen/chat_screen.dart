@@ -7,6 +7,9 @@ import '../../theme/app_theme.dart';
 import '../../widgets/empty_state_widget.dart';
 import '../../widgets/loading_skeleton_widget.dart';
 import '../../services/api_service.dart';
+import '../../services/unread_messages_notifier.dart';
+import '../../utils/last_seen_format.dart';
+import '../../utils/lecture_json.dart';
 
 // ─── Data Models ────────────────────────────────────────────────────────────
 
@@ -57,7 +60,7 @@ class _ChatMessage {
       productAttachment = _ProductAttachment(
         imageUrl: pd['image_url'] as String? ?? '',
         name: pd['name'] as String? ?? 'Produit',
-        price: (pd['price'] as num? ?? 0).toDouble(),
+        price: lireDouble(pd['price']),
         currency: 'FCFA',
         isPurchased: pd['is_purchased'] as bool? ?? false,
       );
@@ -72,9 +75,13 @@ class _ChatMessage {
       timestamp:
           DateTime.tryParse(data['createdAt'] as String? ?? '') ??
           DateTime.now(),
+      // Le backend n'envoie pas de champ messageType : un message est une
+      // image dès qu'il porte une imageUrl.
       type: msgType == 'product_attachment'
           ? MessageType.productAttachment
-          : msgType == 'image'
+          : (msgType == 'image' ||
+                (data['imageUrl'] is String &&
+                    (data['imageUrl'] as String).isNotEmpty))
           ? MessageType.imageAttachment
           : MessageType.text,
       product: productAttachment,
@@ -136,7 +143,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   final FocusNode _focusNode = FocusNode();
 
   List<_ChatMessage> _messages = [];
-  final bool _isOnline = true;
   bool _isTyping = false;
   bool _otherIsTyping = false;
   DateTime? _lastTypingPing;
@@ -146,12 +152,22 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   Timer? _typingTimer;
   Timer? _pollingTimer;
 
+  // Message d'erreur si la conversation n'a pas pu être créée/ouverte.
+  // Tant qu'il est non nul : aucune conversation n'est ouverte et aucun
+  // message ne peut partir (jamais de repli sur une autre conversation).
+  String? _erreurCreation;
+
   // Conversation data
   String? _conversationId;
   String? _otherUserId;
   String _otherUserName = 'Vendeur';
   String _otherUserAvatar = '';
-  late DateTime _lastSeen;
+
+  // Présence de l'interlocuteur, fournie par le serveur (otherUser).
+  // Tant qu'elle n'est pas connue, rien n'est affiché (pas de faux « Hors ligne »).
+  bool _otherPresenceKnown = false;
+  bool _otherIsOnline = false;
+  String? _otherLastSeenAt;
 
   // Product attachment from product page
   Map<String, dynamic>? _productAttachment;
@@ -162,7 +178,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
-    _lastSeen = DateTime.now().subtract(const Duration(minutes: 2));
     final args = widget.chatArgs;
     if (args != null && args['product_name'] != null) {
       _productAttachment = {
@@ -175,7 +190,10 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   }
 
   Future<void> _initChat() async {
-    setState(() => _isLoading = true);
+    setState(() {
+      _isLoading = true;
+      _erreurCreation = null;
+    });
 
     // Fetch current user ID
     try {
@@ -202,7 +220,12 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       vendorId = args['vendor_id'] as String? ?? args['vendorId'] as String?;
     }
 
-    if (_conversationId == null && vendorId != null && vendorId.isNotEmpty) {
+    // Une boutique précise est visée : si la conversation ne peut pas être
+    // créée, on N'OUVRE RIEN (avant, l'appli ouvrait la dernière conversation
+    // existante, avec un autre vendeur, et le message partait chez lui).
+    final boutiqueVisee = vendorId != null && vendorId.isNotEmpty;
+
+    if (_conversationId == null && boutiqueVisee) {
       try {
         final res = await ApiService.instance.client.post(
           '/api/v1/chat/conversations',
@@ -211,8 +234,23 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
             if (args?['product_id'] != null) 'productId': args!['product_id'],
           },
         );
-        _conversationId = res.data['id'] as String?;
-      } catch (_) {}
+        final data = res.data;
+        _conversationId = data is Map ? data['id'] as String? : null;
+        if (data is Map) _applyOtherPresence(data['otherUser']);
+      } catch (_) {
+        _conversationId = null;
+      }
+      if (_conversationId == null) {
+        if (mounted) {
+          setState(() {
+            _isLoading = false;
+            _erreurCreation = 'Impossible d\'ouvrir la conversation avec ce '
+                'vendeur pour le moment. Vérifiez votre connexion et '
+                'réessayez.';
+          });
+        }
+        return;
+      }
     }
 
     // Si on a un conversationId (venu des arguments, ex. depuis une
@@ -226,7 +264,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       }
       await _loadMessages();
       _startPolling();
-    } else {
+    } else if (!boutiqueVisee) {
       try {
         final res = await ApiService.instance.client.get('/api/v1/chat/conversations');
         final raw = res.data;
@@ -250,6 +288,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   //   vendor: {id, userId, shopName, ...}, ... }
   // (les clés snake_case buyer_id/seller/buyer n'existent pas côté backend)
   void _applyOtherParticipant(Map<String, dynamic> conv) {
+    _applyOtherPresence(conv['otherUser']);
     final isClient = conv['clientId'] == _currentUserId;
     if (isClient) {
       final vendor = conv['vendor'] as Map?;
@@ -269,6 +308,16 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       _otherUserName = fullName.isNotEmpty ? fullName : 'Client';
       _otherUserAvatar = client != null ? (client['avatarUrl'] as String? ?? '') : '';
     }
+  }
+
+  // Présence de l'autre participant : { id, lastSeenAt, isOnline } ou null.
+  // Ne fait pas de setState : l'appelant s'en charge si besoin.
+  void _applyOtherPresence(dynamic other) {
+    if (other is! Map) return;
+    _otherPresenceKnown = true;
+    _otherIsOnline = other['isOnline'] == true;
+    final seen = other['lastSeenAt'];
+    _otherLastSeenAt = seen is String ? seen : null;
   }
 
   Future<void> _resolveOtherParticipant(String conversationId) async {
@@ -297,6 +346,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       final otherIsTyping = raw is Map ? raw['otherIsTyping'] == true : false;
       if (mounted) {
         setState(() {
+          if (raw is Map) _applyOtherPresence(raw['otherUser']);
           _messages = (list as List)
               .map((m) => _ChatMessage.fromSupabase(
                     Map<String, dynamic>.from(m as Map),
@@ -306,10 +356,18 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
           _otherIsTyping = otherIsTyping;
         });
         _scrollToBottom(animated: false);
-        if (_messages.isEmpty && _productAttachment != null) {
-          _sendProductAttachment();
-        }
       }
+      // Le GET ci-dessus vient de marquer comme lus les messages reçus :
+      // si certains ne l'étaient pas encore, on met la pastille de l'onglet
+      // "Messages" à jour immédiatement.
+      final hadUnread = (list as List).any(
+        (m) =>
+            m is Map &&
+            m['isRead'] != true &&
+            m['senderId'] != null &&
+            m['senderId'] != _currentUserId,
+      );
+      if (hadUnread) UnreadMessagesNotifier.instance.refresh();
       // Pas d'appel "mark as read" séparé : le backend n'expose aucune
       // route /chat/conversations/:id/read (404 systématique observé en
       // QA) — GET .../messages marque déjà les messages non lus comme
@@ -331,7 +389,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       product: _ProductAttachment(
         imageUrl: product['image_url'] as String? ?? '',
         name: product['name'] as String? ?? 'Produit',
-        price: (product['price'] as num? ?? 0).toDouble(),
+        price: lireDouble(product['price']),
         currency: 'FCFA',
       ),
       status: MessageStatus.sending,
@@ -441,6 +499,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     _focusNode.dispose();
     _typingTimer?.cancel();
     _pollingTimer?.cancel();
+    UnreadMessagesNotifier.instance.refresh();
     super.dispose();
   }
 
@@ -484,12 +543,33 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     final text = _inputController.text.trim();
     if (text.isEmpty || _isSending) return;
 
+    // Pas de conversation ouverte : on ne poste rien (ni texte ni produit).
+    if (_conversationId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            _erreurCreation ?? 'Conversation indisponible. Réessayez.',
+            style: GoogleFonts.outfit(),
+          ),
+          backgroundColor: AppTheme.error,
+        ),
+      );
+      return;
+    }
+
     _inputController.clear();
     setState(() {
       _isTyping = false;
       _isSending = true;
     });
     _typingTimer?.cancel();
+
+    // Produit epingle (arrive via le bouton "Contacter" d'une fiche
+    // produit) : part avec ce premier message, comme une reponse a un
+    // statut WhatsApp — jamais envoye tout seul si le client n'ecrit rien.
+    if (_productAttachment != null) {
+      await _sendProductAttachment();
+    }
 
     final blockReason = _detectBlockedContent(text);
     if (blockReason != null) {
@@ -546,6 +626,18 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   }
 
   Future<void> _pickAndSendImage() async {
+    if (_conversationId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            _erreurCreation ?? 'Conversation indisponible. Réessayez.',
+            style: GoogleFonts.outfit(),
+          ),
+          backgroundColor: AppTheme.error,
+        ),
+      );
+      return;
+    }
     final picker = ImagePicker();
     final source = await _showImageSourceDialog();
     if (source == null) return;
@@ -562,12 +654,25 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
 
     try {
       final bytes = await picked.readAsBytes();
-      final fileName = 'chat_${DateTime.now().millisecondsSinceEpoch}.jpg';
+      // Extension et type annoncé d'après le vrai format du fichier (le
+      // serveur refuse tout type autre que JPG / PNG / WEBP).
+      final lower = picked.name.toLowerCase();
+      final String ext = lower.endsWith('.png')
+          ? 'png'
+          : (lower.endsWith('.webp') ? 'webp' : 'jpg');
+      final String mime = ext == 'png'
+          ? 'image/png'
+          : (ext == 'webp' ? 'image/webp' : 'image/jpeg');
+      final fileName = 'chat_${DateTime.now().millisecondsSinceEpoch}.$ext';
       final formData = FormData.fromMap({
-        'file': MultipartFile.fromBytes(bytes, filename: fileName),
+        'file': MultipartFile.fromBytes(
+          bytes,
+          filename: fileName,
+          contentType: DioMediaType.parse(mime),
+        ),
       });
-      final res = await ApiService.instance.client.post('/api/v1/uploads/image', data: formData);
-      final uploadedUrl = res.data['url'] as String?;
+      final res = await ApiService.instance.client.post('/api/v1/upload/chat', data: formData);
+      final uploadedUrl = res.data is Map ? res.data['url'] as String? : null;
 
       if (uploadedUrl != null && _conversationId != null) {
         final tempMsg = _ChatMessage(
@@ -586,8 +691,26 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
 
         await ApiService.instance.client.post(
           '/api/v1/chat/conversations/$_conversationId/messages',
-          data: {'content': '📷 Image', 'messageType': 'image', 'imageUrl': uploadedUrl},
+          data: {'content': '📷 Image', 'imageUrl': uploadedUrl},
         );
+        // Le message est bien parti : on le fait passer de "envoi" à "envoyé"
+        // sans attendre le prochain rafraîchissement.
+        if (mounted) {
+          setState(() {
+            final idx = _messages.indexWhere((m) => m.id == tempMsg.id);
+            if (idx != -1) {
+              _messages[idx] = _ChatMessage(
+                id: tempMsg.id,
+                text: tempMsg.text,
+                isMe: true,
+                timestamp: tempMsg.timestamp,
+                type: MessageType.imageAttachment,
+                imageUrl: uploadedUrl,
+                status: MessageStatus.sent,
+              );
+            }
+          });
+        }
       }
     } catch (e) {
       if (mounted) {
@@ -808,14 +931,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     return '$h:$m';
   }
 
-  String _formatLastSeen(DateTime dt) {
-    final diff = DateTime.now().difference(dt);
-    if (diff.inMinutes < 1) return 'à l\'instant';
-    if (diff.inMinutes < 60) return 'il y a ${diff.inMinutes} min';
-    if (diff.inHours < 24) return 'il y a ${diff.inHours}h';
-    return 'hier';
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -827,6 +942,36 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
           Expanded(
             child: _isLoading
                 ? const ChatListSkeleton()
+                : _erreurCreation != null
+                ? Center(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 32),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(
+                            Icons.error_outline_rounded,
+                            size: 44,
+                            color: AppTheme.error,
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            _erreurCreation!,
+                            textAlign: TextAlign.center,
+                            style: GoogleFonts.outfit(
+                              fontSize: 14,
+                              color: AppTheme.textSecondary,
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          ElevatedButton(
+                            onPressed: _initChat,
+                            child: const Text('Réessayer'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  )
                 : _messages.isEmpty
                 ? EmptyStateWidget(
                     icon: Icons.chat_bubble_outline_rounded,
@@ -943,7 +1088,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                       )
                     : null,
               ),
-              if (_isOnline)
+              if (_otherIsOnline)
                 Positioned(
                   right: 0,
                   bottom: 0,
@@ -973,16 +1118,17 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                   ),
                   overflow: TextOverflow.ellipsis,
                 ),
-                Text(
-                  _isOnline ? 'En ligne' : 'Vu ${_formatLastSeen(_lastSeen)}',
-                  style: GoogleFonts.outfit(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w400,
-                    color: _isOnline
-                        ? const Color(0xFF16A34A)
-                        : const Color(0xFF9E9E9E),
+                if (_otherPresenceKnown)
+                  Text(
+                    formatLastSeen(_otherLastSeenAt, isOnline: _otherIsOnline),
+                    style: GoogleFonts.outfit(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w400,
+                      color: _otherIsOnline
+                          ? const Color(0xFF16A34A)
+                          : const Color(0xFF9E9E9E),
+                    ),
                   ),
-                ),
               ],
             ),
           ),
@@ -997,8 +1143,87 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     );
   }
 
-  Widget _buildInputBar() {
+  // Apercu du produit "epingle" au-dessus du champ de saisie, tant que le
+  // client n'a pas encore envoye son premier message depuis la fiche
+  // produit (voir _sendMessage). Le bouton "x" annule sans rien envoyer.
+  Widget _buildPinnedProductPreview() {
+    if (_productAttachment == null) return const SizedBox.shrink();
+    final product = _productAttachment!;
+    final imageUrl = product['image_url'] as String? ?? '';
+    final name = product['name'] as String? ?? 'Produit';
+    final price = product['price'];
+
     return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: const BoxDecoration(
+        color: Color(0xFFF5F5F5),
+        border: Border(top: BorderSide(color: AppTheme.outline, width: 1)),
+      ),
+      child: Row(
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(6),
+            child: imageUrl.isNotEmpty
+                ? Image.network(
+                    imageUrl,
+                    width: 36,
+                    height: 36,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => Container(
+                      width: 36,
+                      height: 36,
+                      color: const Color(0xFFEAE6E1),
+                      child: const Icon(Icons.image_outlined, size: 16, color: Color(0xFF9E9E9E)),
+                    ),
+                  )
+                : Container(
+                    width: 36,
+                    height: 36,
+                    color: const Color(0xFFEAE6E1),
+                    child: const Icon(Icons.shopping_bag_outlined, size: 16, color: Color(0xFF9E9E9E)),
+                  ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'À propos de ce produit',
+                  style: GoogleFonts.outfit(fontSize: 10, color: AppTheme.muted),
+                ),
+                Text(
+                  price != null ? '$name — $price FCFA' : name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.outfit(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: AppTheme.textPrimary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          GestureDetector(
+            onTap: () => setState(() => _productAttachment = null),
+            child: const Padding(
+              padding: EdgeInsets.all(4),
+              child: Icon(Icons.close_rounded, size: 18, color: AppTheme.muted),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInputBar() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _buildPinnedProductPreview(),
+        Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
         color: Colors.white,
@@ -1089,6 +1314,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
           ],
         ),
       ),
+    ),
+      ],
     );
   }
 }

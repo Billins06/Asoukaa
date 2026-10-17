@@ -3,6 +3,7 @@ import 'package:google_fonts/google_fonts.dart';
 import '../../../widgets/custom_image_widget.dart';
 import '../../../services/api_service.dart';
 import '../../../routes/app_routes.dart';
+import '../../../utils/lecture_json.dart';
 
 class ProductTabsWidget extends StatefulWidget {
   final Map<String, dynamic> product;
@@ -52,8 +53,8 @@ class _ProductTabsWidgetState extends State<ProductTabsWidget>
       if (mounted) {
         setState(() {
           _reviews = list;
-          _avgRating = (data['avgRating'] as num? ?? 0).toDouble();
-          _reviewCount = (data['reviewCount'] as num? ?? list.length).toInt();
+          _avgRating = lireDouble(data['avgRating']);
+          _reviewCount = lireInt(data['reviewCount'], list.length);
           _isLoadingReviews = false;
         });
       }
@@ -288,7 +289,7 @@ class _ProductTabsWidgetState extends State<ProductTabsWidget>
     // Rating breakdown calculé à partir des avis chargés
     final ratingCounts = [0, 0, 0, 0, 0, 0]; // index = stars (1..5)
     for (final r in _reviews) {
-      final n = (r['notation'] as num?)?.toInt() ?? 0;
+      final n = lireInt(r['notation']);
       if (n >= 1 && n <= 5) ratingCounts[n]++;
     }
     final total = ratingCounts.reduce((a, b) => a + b).toDouble();
@@ -453,7 +454,7 @@ class _ProductTabsWidgetState extends State<ProductTabsWidget>
           final name = p['prod_name'] as String? ?? 'Produit';
           final price = (double.tryParse(p['basePrice']?.toString() ?? '') ?? 0)
               .toInt();
-          final rating = (p['noteMoyenne'] as num?)?.toDouble() ?? 0;
+          final rating = lireDouble(p['noteMoyenne']);
           final images = p['images'];
           String imageUrl = '';
           if (images is List && images.isNotEmpty) {
@@ -581,7 +582,7 @@ class _ReviewItem extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final rating = (review['notation'] as num?)?.toInt() ?? 0;
+    final rating = lireInt(review['notation']);
     final comment = review['comment'] as String? ?? '';
     final date = _formatDate(review['createdAt']);
     final user = review['user'];

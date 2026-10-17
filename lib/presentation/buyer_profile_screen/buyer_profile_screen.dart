@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:dio/dio.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -9,9 +11,13 @@ import '../../theme/app_theme.dart';
 import '../../routes/app_routes.dart';
 import '../../widgets/app_toast.dart';
 import '../../widgets/loading_skeleton_widget.dart';
+import '../../services/api_service.dart';
 import '../../services/nest_auth_service.dart';
 import '../../services/user_service.dart';
 import '../../services/delivery_zone_service.dart';
+import '../../services/mode_service.dart';
+import '../../services/upload_service.dart';
+import '../../services/notification_preferences_service.dart';
 
 class BuyerProfileScreen extends StatefulWidget {
   const BuyerProfileScreen({super.key});
@@ -24,6 +30,14 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
   bool _notifOrders = true;
   bool _notifPromos = true;
   bool _notifMessages = false;
+  // Les 3 interrupteurs de notifications reflètent les valeurs RÉELLES du
+  // serveur : _notifLoaded passe à vrai une fois la lecture réussie.
+  bool _notifLoading = true;
+  bool _notifLoaded = false;
+
+  // Langue d'affichage choisie par l'utilisateur, persistee dans
+  // SharedPreferences sous la cle 'app_language'.
+  String _selectedLanguage = 'Français';
 
   bool _isLoading = true;
   String? _loadError;
@@ -31,6 +45,35 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
   UserProfile? _profile;
   List<UserAddress> _addresses = [];
   final List<Map<String, dynamic>> _paymentMethods = [];
+
+  // Demande vendeur/livreur en cours ou refusée pour ce compte.
+  //
+  // Avant : tant qu'une demande vendeur/livreur n'est pas APPROUVÉE, le
+  // rôle du compte reste "client" (voir AuthService.register — CLIENT est
+  // attribué à l'inscription, VENDOR/DELIVERY_AGENT seulement à
+  // l'approbation admin dans reviewVendor/reviewAgent). AuthGate route donc
+  // ces comptes vers l'accueil acheteur normal, PAS vers le tableau de bord
+  // vendeur/livreur — qui est le seul endroit d'où VendorReapplyScreen /
+  // AgentReapplyScreen étaient accessibles. Un vendeur ou livreur refusé
+  // n'avait donc AUCUN moyen d'atteindre la page de correction : elle
+  // existait, mais nulle part où un compte "client" pouvait cliquer pour
+  // y arriver. Cette section corrige ça en affichant le statut ici, dans
+  // le profil que ces comptes voient réellement.
+  Map<String, dynamic>? _vendorApplication;
+  Map<String, dynamic>? _agentApplication;
+
+  // Vrai seulement quand le serveur a répondu 404 à GET /vendors/me : le
+  // compte n'a aucun profil vendeur et peut en demander un. Reste faux en
+  // cas d'erreur réseau (on n'affiche pas « Devenir vendeur » à tort).
+  bool _canBecomeVendor = false;
+
+  // Le profil chargé indique le rôle 'vendor' : permet d'afficher « Passer en
+  // mode vendeur » même si GET /vendors/me a échoué (réseau, 5xx).
+  bool _hasVendorRole = false;
+
+  // Photo de profil : envoi en cours + sélecteur d'image.
+  bool _isUploadingAvatar = false;
+  final ImagePicker _picker = ImagePicker();
 
   // Raccourcis lisibles
   String get _fullName => _profile?.fullName ?? '';
@@ -63,6 +106,7 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
       );
     }
     _loadPreferences();
+    _loadNotificationPreferences();
   }
 
   Future<void> _loadPreferences() async {
@@ -77,6 +121,22 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
       final addressResult = await UserService.instance.getAddresses();
       debugPrint('[Profile] Adresses: success=${addressResult.success} count=${addressResult.data?.length}');
 
+      // Silencieux si absent (404) : la grande majorité des acheteurs n'ont
+      // jamais soumis de demande vendeur/livreur, ce n'est pas une erreur.
+      Map<String, dynamic>? vendorApp;
+      bool vendorAbsent = false;
+      try {
+        final r = await ApiService.instance.client.get('/api/v1/vendors/me');
+        if (r.data is Map) vendorApp = Map<String, dynamic>.from(r.data as Map);
+      } on DioException catch (e) {
+        if (e.response?.statusCode == 404) vendorAbsent = true;
+      } catch (_) {}
+      Map<String, dynamic>? agentApp;
+      try {
+        final r = await ApiService.instance.client.get('/api/v1/delivery-agents/me');
+        if (r.data is Map) agentApp = Map<String, dynamic>.from(r.data as Map);
+      } catch (_) {}
+
       if (!mounted) return;
       setState(() {
         if (profileResult.success && profileResult.data != null) {
@@ -86,14 +146,86 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
           _loadError = profileResult.error ?? 'Profil introuvable. Reconnectez-vous.';
         }
         if (addressResult.success) _addresses = addressResult.data ?? [];
-        _notifOrders = prefs.getBool('notif_orders') ?? true;
-        _notifPromos = prefs.getBool('notif_promos') ?? true;
-        _notifMessages = prefs.getBool('notif_messages') ?? false;
+        _vendorApplication = vendorApp;
+        _agentApplication = agentApp;
+        _hasVendorRole = profileResult.data?.roles.contains('vendor') ?? false;
+        // Pas de « Devenir vendeur » pour un compte livreur (ou en cours de
+        // demande livreur) : devenir vendeur changerait son espace de travail.
+        _canBecomeVendor = vendorAbsent &&
+            agentApp == null &&
+            !(profileResult.data?.roles.contains('delivery_agent') ?? false);
+        _selectedLanguage = prefs.getString('app_language') ?? 'Français';
         _isLoading = false;
       });
     } catch (e, stack) {
       debugPrint('[Profile] Exception: $e\n$stack');
       if (mounted) setState(() { _isLoading = false; _loadError = e.toString(); });
+    }
+  }
+
+  // Lit les vraies preferences de notification (GET
+  // /users/me/notification-preferences).
+  Future<void> _loadNotificationPreferences() async {
+    try {
+      final prefs = await NotificationPreferencesService.instance.load();
+      if (!mounted) return;
+      setState(() {
+        _notifOrders =
+            prefs[NotificationPreferencesService.orders] ?? _notifOrders;
+        _notifPromos =
+            prefs[NotificationPreferencesService.promotions] ?? _notifPromos;
+        _notifMessages =
+            prefs[NotificationPreferencesService.messages] ?? _notifMessages;
+        _notifLoaded = true;
+        _notifLoading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _notifLoading = false);
+    }
+  }
+
+  // Numéro de la dernière demande par réglage : une réponse (succès ou échec)
+  // d'une demande plus ancienne ne doit pas écraser un basculement plus récent.
+  final Map<String, int> _notifSeq = <String, int>{};
+
+  // Change UNE preference cote serveur (PUT avec la seule cle concernee) :
+  // mise a jour optimiste, retour en arriere + message en cas d'echec.
+  Future<void> _changeNotificationPreference(
+    String key,
+    bool value,
+    void Function(bool) apply,
+  ) async {
+    if (!_notifLoaded) {
+      if (!_notifLoading) {
+        setState(() => _notifLoading = true);
+        _loadNotificationPreferences();
+      }
+      AppToast.show(
+        context,
+        message: 'Chargement de vos réglages en cours…',
+        type: ToastType.info,
+      );
+      return;
+    }
+    final seq = (_notifSeq[key] ?? 0) + 1;
+    _notifSeq[key] = seq;
+    setState(() => apply(value));
+    try {
+      final saved =
+          await NotificationPreferencesService.instance.update(key, value);
+      if (!mounted || _notifSeq[key] != seq) return;
+      final confirmed = saved[key];
+      if (confirmed != null && confirmed != value) {
+        setState(() => apply(confirmed));
+      }
+    } catch (_) {
+      if (!mounted || _notifSeq[key] != seq) return;
+      setState(() => apply(!value));
+      AppToast.show(
+        context,
+        message: 'Impossible de modifier ce réglage. Vérifiez votre connexion.',
+        type: ToastType.error,
+      );
     }
   }
 
@@ -127,6 +259,35 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
                       children: [
                         const SizedBox(height: 20),
                         _buildAccountSection(),
+                        if (_vendorApplication != null &&
+                            _vendorApplication!['status'] != 'approuvé') ...[
+                          const SizedBox(height: 16),
+                          _buildProfessionalApplicationSection(
+                            title: 'Ma demande vendeur',
+                            application: _vendorApplication!,
+                            reapplyRoute: AppRoutes.vendorReapply,
+                          ),
+                        ],
+                        if ((_vendorApplication != null &&
+                                _vendorApplication!['status'] == 'approuvé') ||
+                            (_vendorApplication == null && _hasVendorRole)) ...[
+                          const SizedBox(height: 16),
+                          _buildVendorModeCard(),
+                        ] else if (_canBecomeVendor) ...[
+                          const SizedBox(height: 16),
+                          _buildBecomeVendorCard(),
+                        ],
+                        if (_agentApplication != null &&
+                            _agentApplication!['status'] != 'approuvé') ...[
+                          const SizedBox(height: 16),
+                          _buildProfessionalApplicationSection(
+                            title: 'Ma demande livreur',
+                            application: _agentApplication!,
+                            reapplyRoute: AppRoutes.agentReapply,
+                          ),
+                        ],
+                        const SizedBox(height: 16),
+                        _buildFollowedShopsSection(),
                         const SizedBox(height: 16),
                         _buildAddressSection(),
                         const SizedBox(height: 16),
@@ -209,25 +370,7 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 const SizedBox(height: 20),
-                Container(
-                  width: 72,
-                  height: 72,
-                  decoration: BoxDecoration(
-                    color: Colors.white.withAlpha(40),
-                    shape: BoxShape.circle,
-                    border: Border.all(color: Colors.white, width: 2),
-                  ),
-                  child: Center(
-                    child: Text(
-                      initials,
-                      style: GoogleFonts.outfit(
-                        fontSize: 26,
-                        fontWeight: FontWeight.w700,
-                        color: Colors.white,
-                      ),
-                    ),
-                  ),
-                ),
+                _buildAvatar(initials),
                 const SizedBox(height: 10),
                 Text(
                   _fullName,
@@ -280,7 +423,8 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
                 icon: Icons.email_outlined,
                 label: 'Email',
                 value: _email,
-                onTap: null, // L'email n'est pas modifiable
+                // Changement en 3 étapes (code reçu sur la nouvelle adresse).
+                onTap: _openChangeEmail,
               ),
               _buildDivider(),
               _buildInfoRow(
@@ -417,6 +561,14 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
                                   AppToast.show(context, message: result.error ?? 'Erreur.', type: ToastType.error, actionLabel: 'OK');
                                 }
                               } else if (value == 'delete') {
+                                // Action irreversible : confirmation obligatoire.
+                                final confirmed = await _confirmDialog(
+                                  title: 'Supprimer cette adresse',
+                                  message: "Voulez-vous vraiment supprimer l'adresse « ${addr.label} » ? Cette action est irréversible.",
+                                  confirmLabel: 'Supprimer',
+                                  danger: true,
+                                );
+                                if (!confirmed || !mounted) return;
                                 final result = await UserService.instance.deleteAddress(addr.id);
                                 if (!mounted) return;
                                 if (result.success) {
@@ -667,38 +819,13 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
         _buildCard(
           child: Column(
             children: [
-              // Language
-              Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 14,
-                ),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 36,
-                      height: 36,
-                      decoration: BoxDecoration(
-                        color: AppTheme.surfaceVariant,
-                        borderRadius: BorderRadius.circular(10.0),
-                      ),
-                      child: const Icon(
-                        Icons.language_rounded,
-                        color: AppTheme.textSecondary,
-                        size: 18,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      'Langue',
-                      style: GoogleFonts.outfit(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w700,
-                        color: AppTheme.textPrimary,
-                      ),
-                    ),
-                  ],
-                ),
+              // Langue : la ligne etait un simple Padding, donc muette
+              // au clic. Elle ouvre maintenant un selecteur de langue.
+              _buildInfoRow(
+                icon: Icons.language_rounded,
+                label: 'Langue',
+                value: _selectedLanguage,
+                onTap: _showLanguagePicker,
               ),
               _buildDivider(),
               // Notifications header
@@ -731,32 +858,46 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
                         color: AppTheme.textPrimary,
                       ),
                     ),
+                    if (_notifLoading) ...[
+                      const SizedBox(width: 8),
+                      const SizedBox(
+                        width: 12,
+                        height: 12,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: AppTheme.primary,
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
               _buildNotifToggle(
                 label: 'Commandes & livraisons',
                 value: _notifOrders,
-                onChanged: (v) {
-                  setState(() => _notifOrders = v);
-                  _savePreference('notif_orders', v);
-                },
+                onChanged: (v) => _changeNotificationPreference(
+                  NotificationPreferencesService.orders,
+                  v,
+                  (x) => _notifOrders = x,
+                ),
               ),
               _buildNotifToggle(
                 label: 'Promotions & offres',
                 value: _notifPromos,
-                onChanged: (v) {
-                  setState(() => _notifPromos = v);
-                  _savePreference('notif_promos', v);
-                },
+                onChanged: (v) => _changeNotificationPreference(
+                  NotificationPreferencesService.promotions,
+                  v,
+                  (x) => _notifPromos = x,
+                ),
               ),
               _buildNotifToggle(
                 label: 'Messages',
                 value: _notifMessages,
-                onChanged: (v) {
-                  setState(() => _notifMessages = v);
-                  _savePreference('notif_messages', v);
-                },
+                onChanged: (v) => _changeNotificationPreference(
+                  NotificationPreferencesService.messages,
+                  v,
+                  (x) => _notifMessages = x,
+                ),
                 isLast: true,
               ),
             ],
@@ -850,6 +991,121 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildProfessionalApplicationSection({
+    required String title,
+    required Map<String, dynamic> application,
+    required String reapplyRoute,
+  }) {
+    final status = application['status'] as String?;
+    final motif = application['motifRefus'] as String?;
+
+    late final String statusLabel;
+    late final Color statusColor;
+    late final Color statusBg;
+    switch (status) {
+      case 'en attente':
+        statusLabel = 'En attente de validation';
+        statusColor = AppTheme.warning;
+        statusBg = AppTheme.warningContainer;
+        break;
+      case 'rejeté':
+        statusLabel = 'Refusée';
+        statusColor = AppTheme.error;
+        statusBg = AppTheme.errorContainer;
+        break;
+      case 'bloqué':
+        statusLabel = 'Bloquée';
+        statusColor = AppTheme.error;
+        statusBg = AppTheme.errorContainer;
+        break;
+      default:
+        statusLabel = status ?? 'Inconnu';
+        statusColor = AppTheme.muted;
+        statusBg = AppTheme.surfaceVariant;
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: AppTheme.surface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppTheme.outline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  title,
+                  style: GoogleFonts.outfit(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    color: AppTheme.textPrimary,
+                  ),
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  color: statusBg,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(
+                  statusLabel,
+                  style: GoogleFonts.outfit(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                    color: statusColor,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (status == 'rejeté') ...[
+            if (motif != null && motif.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Text(
+                'Motif : $motif',
+                style: GoogleFonts.outfit(fontSize: 12.5, color: AppTheme.textSecondary),
+              ),
+            ],
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                icon: const Icon(Icons.edit_note_rounded, size: 18),
+                label: const Text('Corriger et renvoyer ma demande'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppTheme.primary,
+                  side: const BorderSide(color: AppTheme.primary),
+                ),
+                onPressed: () async {
+                  final resubmitted = await Navigator.pushNamed(context, reapplyRoute);
+                  if (resubmitted == true) _loadPreferences();
+                },
+              ),
+            ),
+          ] else if (status == 'en attente') ...[
+            const SizedBox(height: 8),
+            Text(
+              'Votre dossier est en cours d\'examen par notre équipe. '
+              'Vous serez notifié par email dès qu\'une décision sera prise.',
+              style: GoogleFonts.outfit(fontSize: 12.5, color: AppTheme.textSecondary),
+            ),
+          ] else if (status == 'bloqué') ...[
+            const SizedBox(height: 8),
+            Text(
+              'Votre compte a été bloqué. Contactez le support pour plus d\'informations.',
+              style: GoogleFonts.outfit(fontSize: 12.5, color: AppTheme.textSecondary),
+            ),
+          ],
+        ],
       ),
     );
   }
@@ -1375,13 +1631,47 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
                   Icons.chevron_right_rounded,
                   color: AppTheme.muted,
                 ),
-                onTap: () => Navigator.pop(ctx),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  // Aucun endpoint serveur n'enregistre encore les moyens
+                  // de paiement d'un acheteur : on le dit honnetement au
+                  // lieu de refermer la feuille sans rien faire.
+                  AppToast.show(
+                    context,
+                    message: "Enregistrer $method arrive bientôt. En attendant, vous choisissez votre moyen de paiement au moment de régler votre commande.",
+                    type: ToastType.info,
+                    actionLabel: 'OK',
+                  );
+                },
               ),
             ),
             const SizedBox(height: 8),
           ],
         ),
       ),
+    );
+  }
+
+  // Boutiques que l'utilisateur suit (abonnements réels, table
+  // shop_follows côté serveur — GET /vendors/me/following).
+  Widget _buildFollowedShopsSection() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildSectionHeader('Mes abonnements', Icons.storefront_rounded),
+        _buildCard(
+          child: Column(
+            children: [
+              _buildNavRow(
+                icon: Icons.favorite_border_rounded,
+                label: 'Boutiques suivies',
+                onTap: () =>
+                    Navigator.pushNamed(context, AppRoutes.followedShops),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 
@@ -1405,13 +1695,6 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
                 label: 'Demander un remboursement',
                 onTap: () =>
                     Navigator.pushNamed(context, AppRoutes.refundRequest),
-              ),
-              _buildDivider(),
-              _buildNavRow(
-                icon: Icons.chat_outlined,
-                label: 'Chat avec le support',
-                onTap: () =>
-                    Navigator.pushNamed(context, AppRoutes.supportHelp),
               ),
               _buildDivider(),
               _buildNavRow(
@@ -1502,6 +1785,544 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
               color: AppTheme.muted,
               size: 18,
             ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Boite de confirmation generique pour les actions irreversibles.
+  Future<bool> _confirmDialog({
+    required String title,
+    required String message,
+    required String confirmLabel,
+    bool danger = false,
+  }) async {
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16.0),
+        ),
+        title: Text(
+          title,
+          style: GoogleFonts.outfit(fontSize: 16, fontWeight: FontWeight.w700),
+        ),
+        content: Text(
+          message,
+          style: GoogleFonts.outfit(
+            fontSize: 14,
+            color: AppTheme.textSecondary,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text(
+              'Annuler',
+              style: GoogleFonts.outfit(
+                color: AppTheme.muted,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: danger ? AppTheme.error : AppTheme.primary,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10.0),
+              ),
+            ),
+            child: Text(
+              confirmLabel,
+              style: GoogleFonts.outfit(
+                color: Colors.white,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    return result ?? false;
+  }
+
+  // ── Changement d'e-mail ─────────────────────────────────────────────────────
+  Future<void> _openChangeEmail() async {
+    final result = await Navigator.pushNamed(
+      context,
+      AppRoutes.changeEmail,
+      arguments: _email,
+    );
+    if (!mounted) return;
+    if (result is String && result.isNotEmpty) {
+      await _loadPreferences();
+    }
+  }
+
+  // ── Photo de profil ─────────────────────────────────────────────────────────
+  Widget _buildAvatar(String initials) {
+    final url = _profile?.avatarUrl;
+    final hasPhoto = url != null && url.isNotEmpty;
+
+    Widget initialsWidget() => Center(
+          child: Text(
+            initials,
+            style: GoogleFonts.outfit(
+              fontSize: 26,
+              fontWeight: FontWeight.w700,
+              color: AppTheme.primary,
+            ),
+          ),
+        );
+
+    return GestureDetector(
+      onTap: _isUploadingAvatar ? null : _showAvatarSheet,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Container(
+            width: 72,
+            height: 72,
+            decoration: BoxDecoration(
+              color: AppTheme.primaryMuted,
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.white, width: 2),
+            ),
+            child: ClipOval(
+              child: _isUploadingAvatar
+                  ? const Center(
+                      child: SizedBox(
+                        width: 24,
+                        height: 24,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2.5,
+                          color: AppTheme.primary,
+                        ),
+                      ),
+                    )
+                  : hasPhoto
+                      ? Image.network(
+                          url!,
+                          width: 68,
+                          height: 68,
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) => initialsWidget(),
+                        )
+                      : initialsWidget(),
+            ),
+          ),
+          Positioned(
+            right: -2,
+            bottom: -2,
+            child: Container(
+              width: 26,
+              height: 26,
+              decoration: BoxDecoration(
+                color: Colors.white,
+                shape: BoxShape.circle,
+                border: Border.all(color: AppTheme.primary, width: 1.5),
+              ),
+              child: const Icon(
+                Icons.photo_camera_rounded,
+                size: 14,
+                color: AppTheme.primary,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showAvatarSheet() {
+    final hasPhoto = (_profile?.avatarUrl ?? '').isNotEmpty;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppTheme.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 8),
+            ListTile(
+              leading: const Icon(Icons.photo_camera_outlined,
+                  color: AppTheme.primary),
+              title: Text('Prendre une photo', style: GoogleFonts.outfit()),
+              onTap: () {
+                Navigator.pop(ctx);
+                _pickAndUploadAvatar(ImageSource.camera);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_library_outlined,
+                  color: AppTheme.primary),
+              title: Text('Choisir dans la galerie', style: GoogleFonts.outfit()),
+              onTap: () {
+                Navigator.pop(ctx);
+                _pickAndUploadAvatar(ImageSource.gallery);
+              },
+            ),
+            if (hasPhoto)
+              ListTile(
+                leading: const Icon(Icons.delete_outline_rounded,
+                    color: AppTheme.error),
+                title: Text(
+                  'Supprimer la photo',
+                  style: GoogleFonts.outfit(color: AppTheme.error),
+                ),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _removeAvatar();
+                },
+              ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _avatarErrorMessage(Object e) {
+    if (e is DioException) {
+      final data = e.response?.data;
+      if (data is Map) {
+        final msg = data['message'];
+        if (msg is String && msg.isNotEmpty) return msg;
+        if (msg is List && msg.isNotEmpty) return msg.first.toString();
+      }
+      if (e.type == DioExceptionType.connectionError ||
+          e.type == DioExceptionType.connectionTimeout ||
+          e.type == DioExceptionType.receiveTimeout ||
+          e.type == DioExceptionType.sendTimeout) {
+        return 'Connexion impossible. Vérifiez votre réseau.';
+      }
+    }
+    return 'Impossible de mettre à jour la photo. Réessayez.';
+  }
+
+  Future<void> _pickAndUploadAvatar(ImageSource source) async {
+    XFile? file;
+    try {
+      file = await _picker.pickImage(
+        source: source,
+        imageQuality: 80,
+        maxWidth: 800,
+        maxHeight: 800,
+      );
+    } catch (_) {
+      if (mounted) {
+        AppToast.show(
+          context,
+          message: 'Impossible d\'accéder à la photo.',
+          type: ToastType.error,
+        );
+      }
+      return;
+    }
+    if (file == null || !mounted) return;
+
+    setState(() => _isUploadingAvatar = true);
+    try {
+      final url = await UploadService.instance.uploadFile(file, 'avatars');
+      final result = await UserService.instance.updateProfile(avatarUrl: url);
+      if (!mounted) return;
+      if (result.success && result.data != null) {
+        setState(() => _profile = result.data);
+        AppToast.show(
+          context,
+          message: 'Photo de profil mise à jour.',
+          type: ToastType.success,
+        );
+      } else {
+        AppToast.show(
+          context,
+          message: result.error ?? 'Impossible de mettre à jour la photo.',
+          type: ToastType.error,
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        AppToast.show(
+          context,
+          message: _avatarErrorMessage(e),
+          type: ToastType.error,
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isUploadingAvatar = false);
+    }
+  }
+
+  Future<void> _removeAvatar() async {
+    setState(() => _isUploadingAvatar = true);
+    try {
+      // UserService.updateProfile n'envoie pas de valeur nulle : on appelle
+      // directement l'API avec avatarUrl = null (suppression côté serveur).
+      await ApiService.instance.client
+          .put('/api/v1/users/me', data: {'avatarUrl': null});
+      final refreshed = await UserService.instance.getMyProfile();
+      if (!mounted) return;
+      if (refreshed.success && refreshed.data != null) {
+        setState(() => _profile = refreshed.data);
+      }
+      AppToast.show(
+        context,
+        message: 'Photo de profil supprimée.',
+        type: ToastType.success,
+      );
+    } catch (e) {
+      if (mounted) {
+        AppToast.show(
+          context,
+          message: _avatarErrorMessage(e),
+          type: ToastType.error,
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isUploadingAvatar = false);
+    }
+  }
+
+  // ── Devenir vendeur / mode vendeur ──────────────────────────────────────────
+  Widget _buildBecomeVendorCard() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFFFF6210), Color(0xFFFF8C42)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.storefront_rounded, color: Colors.white, size: 22),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Vendez sur Asoukaa',
+                  style: GoogleFonts.outfit(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'Ouvrez votre boutique avec ce même compte. Votre demande est '
+            'examinée par notre équipe, puis vous êtes prévenu par e-mail.',
+            style: GoogleFonts.outfit(
+              fontSize: 12.5,
+              height: 1.4,
+              color: Colors.white.withAlpha(235),
+            ),
+          ),
+          const SizedBox(height: 14),
+          SizedBox(
+            width: double.infinity,
+            height: 46,
+            child: ElevatedButton.icon(
+              icon: const Icon(Icons.add_business_rounded, size: 18),
+              label: Text(
+                'Devenir vendeur',
+                style: GoogleFonts.outfit(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.white,
+                foregroundColor: AppTheme.primary,
+                elevation: 0,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+              onPressed: () async {
+                final sent =
+                    await Navigator.pushNamed(context, AppRoutes.becomeVendor);
+                if (sent == true && mounted) _loadPreferences();
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildVendorModeCard() {
+    final shopName = (_vendorApplication?['shopName'] as String?) ?? '';
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: AppTheme.primaryMuted,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppTheme.primary.withAlpha(70)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.storefront_rounded,
+                  color: AppTheme.primary, size: 22),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  shopName.isNotEmpty
+                      ? 'Ma boutique : $shopName'
+                      : 'Ma boutique',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.outfit(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                    color: AppTheme.textPrimary,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            width: double.infinity,
+            height: 46,
+            child: ElevatedButton.icon(
+              icon: const Icon(Icons.swap_horiz_rounded, size: 18),
+              label: Text(
+                'Passer en mode vendeur',
+                style: GoogleFonts.outfit(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppTheme.primary,
+                foregroundColor: Colors.white,
+                elevation: 0,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+              onPressed: _switchToVendorMode,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _switchToVendorMode() async {
+    await ModeService.instance.promoteStoredRoleToVendor();
+    await ModeService.instance.setLastMode(ModeService.vendeur);
+    if (!mounted) return;
+    Navigator.pushNamedAndRemoveUntil(
+      context,
+      AppRoutes.sellerDashboard,
+      (route) => false,
+    );
+  }
+
+  // Selecteur de langue. L'application n'embarque encore aucune
+  // traduction (pas de flutter_localizations ni de dossier l10n) : les
+  // autres langues sont annoncees comme a venir plutot qu'appliquees en
+  // silence. Le choix est persiste sous la cle 'app_language'.
+  void _showLanguagePicker() {
+    const languages = ['Français', 'English', 'Fon', 'Yoruba'];
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Container(
+        padding: const EdgeInsets.fromLTRB(20, 20, 20, 24),
+        decoration: const BoxDecoration(
+          color: AppTheme.surface,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 36,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: AppTheme.outline,
+                  borderRadius: BorderRadius.circular(2.0),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              "Langue de l'application",
+              style: GoogleFonts.outfit(
+                fontSize: 17,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 8),
+            ...languages.map(
+              (lang) => ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text(
+                  lang,
+                  style: GoogleFonts.outfit(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                subtitle: lang == 'Français'
+                    ? null
+                    : Text(
+                        'Bientôt disponible',
+                        style: GoogleFonts.outfit(
+                          fontSize: 12,
+                          color: AppTheme.muted,
+                        ),
+                      ),
+                trailing: _selectedLanguage == lang
+                    ? const Icon(
+                        Icons.check_rounded,
+                        color: AppTheme.primary,
+                        size: 20,
+                      )
+                    : null,
+                onTap: () {
+                  Navigator.pop(ctx);
+                  if (lang != 'Français') {
+                    AppToast.show(
+                      context,
+                      message:
+                          "L'application n'est pour l'instant disponible qu'en français. La traduction en $lang arrive bientôt.",
+                      type: ToastType.info,
+                      actionLabel: 'OK',
+                    );
+                    return;
+                  }
+                  setState(() => _selectedLanguage = lang);
+                  _savePreference('app_language', lang);
+                  AppToast.show(
+                    context,
+                    message: 'Langue : $lang.',
+                    type: ToastType.success,
+                    actionLabel: 'OK',
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 8),
           ],
         ),
       ),

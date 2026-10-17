@@ -9,6 +9,8 @@ import '../../widgets/empty_state_widget.dart';
 import '../../widgets/connection_error_widget.dart';
 import '../../widgets/loading_skeleton_widget.dart';
 import '../../services/product_service.dart';
+import '../../utils/price_range.dart';
+import '../../utils/lecture_json.dart';
 
 class SearchResultsScreen extends StatefulWidget {
   final String? initialQuery;
@@ -242,9 +244,13 @@ class _SearchResultsScreenState extends State<SearchResultsScreen>
       'shop_id': shopId,
       'seller_id': p['seller_id'] ?? p['vendeurId'] ?? '',
       'price': price,
+      // Paliers dégressifs bruts, conservés pour que la carte affiche la
+      // fourchette « meilleur palier – prix normal » (priceRangeLabel).
+      'tierPrices':
+          p['tierPrices'] ?? p['price_tiers'] ?? p['priceTiers'],
       'originalPrice': originalPrice,
       'discount': discount,
-      'rating': (p['rating'] as num? ?? p['averageRating'] as num? ?? 4.5).toDouble(),
+      'rating': lireDouble(p['rating'] ?? p['averageRating'], 4.5),
       'reviewCount': p['review_count'] as int? ?? p['reviewCount'] as int? ?? 0,
       'category': category,
       'brand': p['brand'] ?? 'Autre',
@@ -870,12 +876,16 @@ class _SearchResultsScreenState extends State<SearchResultsScreen>
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    '${_formatPrice(price)} FCFA',
+                    // « 25 – 39 FCFA » quand un palier dégressif existe,
+                    // sinon le prix normal seul.
+                    priceRangeLabel(product),
                     style: GoogleFonts.outfit(
                       fontSize: 14,
                       fontWeight: FontWeight.w700,
                       color: AppTheme.primary,
                     ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
                   if (originalPrice > price)
                     Text(

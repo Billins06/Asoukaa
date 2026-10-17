@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -16,8 +17,11 @@ import '../import_assiste_screen/import_assiste_screen.dart';
 import '../notifications_screen/notifications_screen.dart';
 import '../../services/nest_auth_service.dart';
 import '../../services/api_service.dart';
+import '../../services/wishlist_service.dart';
 import '../../routes/app_routes.dart';
 import '../../widgets/app_toast.dart';
+import '../../utils/telephone.dart';
+import '../../utils/paiement_annulation.dart';
 
 class BuyerDashboardScreen extends StatefulWidget {
   const BuyerDashboardScreen({super.key});
@@ -43,7 +47,7 @@ class _BuyerDashboardScreenState extends State<BuyerDashboardScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 4, vsync: this);
+    _tabController = TabController(length: 3, vsync: this);
     if (!kIsWeb) {
       SystemChrome.setSystemUIOverlayStyle(
         const SystemUiOverlayStyle(
@@ -93,7 +97,17 @@ class _BuyerDashboardScreenState extends State<BuyerDashboardScreen>
       final isLoggedIn = await NestAuthService.instance.isLoggedIn()
           .timeout(const Duration(seconds: 5));
       if (!isLoggedIn) {
-        if (mounted) setState(() => _isLoading = false);
+        // Session perdue : ne pas afficher un faux « 0 » (voir
+        // NestAuthService.gererSessionPerdue).
+        final etat = await NestAuthService.instance.gererSessionPerdue();
+        if (mounted) {
+          setState(() {
+            _isLoading = false;
+            if (etat == EtatSessionPerdue.temporaire) {
+              _hasConnectionError = true;
+            }
+          });
+        }
         return;
       }
 
@@ -196,7 +210,14 @@ class _BuyerDashboardScreenState extends State<BuyerDashboardScreen>
     switch (statusStr) {
       case 'en cours':
         status = OrderStatus.processing;
+      // "Livreur affecté" et "En transit" manquaient ici : la commande
+      // retombait sur le cas par défaut ("Reçue"), ce qui faisait
+      // reculer le statut affiché à l'acheteur en pleine livraison
+      // (Cas A) — incohérent avec le tableau de bord vendeur, qui lui
+      // gère déjà correctement ces deux valeurs.
+      case 'livreur affecté':
       case 'expedié':
+      case 'en transit':
         status = OrderStatus.inDelivery;
       case 'livré':
         status = OrderStatus.completed;
@@ -208,8 +229,10 @@ class _BuyerDashboardScreenState extends State<BuyerDashboardScreen>
 
     final steps = [
       true,
-      ['en cours', 'expedié', 'livré'].contains(statusStr),
-      ['expedié', 'livré'].contains(statusStr),
+      ['en cours', 'livreur affecté', 'expedié', 'en transit', 'livré']
+          .contains(statusStr),
+      ['livreur affecté', 'expedié', 'en transit', 'livré']
+          .contains(statusStr),
       statusStr == 'livré',
       statusStr == 'livré',
     ];
@@ -234,6 +257,12 @@ class _BuyerDashboardScreenState extends State<BuyerDashboardScreen>
 
     final rawId = (o['id'] ?? '').toString();
     final shortId = rawId.length >= 8 ? rawId.substring(0, 8).toUpperCase() : rawId.toUpperCase();
+    // Numéro de commande officiel (même généré par le backend que sur
+    // l'écran de suivi et le tableau de bord vendeur — voir orders.service.ts
+    // generateOrderNumber). Avant : on reconstruisait toujours un faux code
+    // à partir de l'UUID de la commande (ex "#ASK-BBD66C9F"), différent du
+    // vrai numéro affiché ailleurs ("#ASK-2026-00007") pour la même commande.
+    final realOrderNumber = (o['orderNumber'] as String?) ?? '';
 
     // Les images sont une liste (relation "images"), avec un booléen
     // "isPrimary" — pas un champ "imageUrl"/"image_url" direct.
@@ -278,8 +307,39 @@ class _BuyerDashboardScreenState extends State<BuyerDashboardScreen>
         .where((e) => (e['variantId'] as String).isNotEmpty)
         .toList();
 
+    // Paiement rattaché manuellement par le backend (getMyOrders) —
+    // pas de relation directe Order -> Payment. Permet de savoir si
+    // cette commande (notamment une commande initiée par le vendeur,
+    // sans paiement créé à la création) attend encore d'être payée par
+    // le client, pour afficher le bouton "Payer la commande".
+    final payment = o['payment'] as Map<String, dynamic>?;
+    final paymentStatus = payment?['status'] as String?;
+    final paymentPending = statusStr == 'en attente'
+        && (payment == null || paymentStatus == 'échoué');
+
+    // Libellé d'une commande « en attente ». Depuis le nouveau flux, une
+    // commande payée par Mobile Money RESTE « en attente » jusqu'au bouton
+    // « Confirmer » du vendeur : l'ancien libellé « Reçue » ne disait pas si
+    // c'est le client ou le vendeur qui doit agir. Même règle que le serveur
+    // (computeConfirmBy) : paiement réussi, ou paiement à la livraison en
+    // attente = c'est au vendeur de confirmer. Si la réponse ne contient pas
+    // du tout l'information de paiement, on reste neutre (« En attente »).
+    String? pendingLabel;
+    if (statusStr == 'en attente') {
+      if (!o.containsKey('payment')) {
+        pendingLabel = 'En attente';
+      } else {
+        final payMethod = payment?['method'] as String?;
+        final auVendeur = paymentStatus == 'success' ||
+            (payMethod == 'cash_on_delivery' && paymentStatus == 'en attente');
+        pendingLabel = auVendeur
+            ? 'En attente de confirmation du vendeur'
+            : 'En attente de paiement';
+      }
+    }
+
     return {
-      'id': '#ASK-$shortId',
+      'id': realOrderNumber.isNotEmpty ? '#$realOrderNumber' : '#ASK-$shortId',
       // UUID réel de la commande — nécessaire pour le suivi en direct
       // (GET /orders/{id}) et pour la navigation vers l'écran de suivi.
       'orderId': rawId,
@@ -294,6 +354,11 @@ class _BuyerDashboardScreenState extends State<BuyerDashboardScreen>
       // Statut brut ('en attente', 'en cours', 'expedié', 'livré', 'annulé')
       // tel que renvoyé par le backend, pour l'écran de suivi.
       'rawStatus': statusStr,
+      // Commande en attente sans paiement réussi ni tentative en cours :
+      // affiche le bouton "Payer la commande" (voir _OrderCard).
+      'paymentPending': paymentPending,
+      // Libellé de la pastille pour une commande « en attente » (null sinon).
+      'pendingLabel': pendingLabel,
       'steps': steps,
       'date': shortDate,
       'canReorder': status == OrderStatus.completed,
@@ -315,33 +380,39 @@ class _BuyerDashboardScreenState extends State<BuyerDashboardScreen>
 
   @override
   Widget build(BuildContext context) {
-    final isTablet = MediaQuery.of(context).size.width >= 600;
-
     return Scaffold(
       backgroundColor: AppTheme.background,
       appBar: _buildAppBar(),
-      body: isTablet ? _buildTabletLayout() : _buildPhoneLayout(),
-      bottomNavigationBar: isTablet
-          ? null
-          : AsoukaaBottomNav(
+      body: _buildPhoneLayout(),
+      bottomNavigationBar: AsoukaaBottomNav(
               currentIndex: _currentNavIndex,
-              onTap: (i) {
-                setState(() => _currentNavIndex = i);
+              onTap: (i) async {
+                // Cet écran EST l'onglet "Commandes" (index 3) : les autres
+                // onglets poussent un nouvel écran par-dessus (pushNamed) et
+                // laissent ce tableau de bord vivant en dessous. Sans le
+                // remettre à 3 au retour, l'indicateur restait bloqué sur le
+                // dernier onglet tapé (ex: "Profil") même une fois revenu ici.
                 switch (i) {
                   case 0:
                     Navigator.pushReplacementNamed(context, '/home-screen');
                     break;
                   case 1:
-                    Navigator.pushNamed(context, '/categories-screen');
+                    setState(() => _currentNavIndex = i);
+                    await Navigator.pushNamed(context, '/categories-screen');
+                    if (mounted) setState(() => _currentNavIndex = 3);
                     break;
                   case 2:
-                    Navigator.pushNamed(context, '/chat-screen');
+                    setState(() => _currentNavIndex = i);
+                    await Navigator.pushNamed(context, AppRoutes.conversationsInbox);
+                    if (mounted) setState(() => _currentNavIndex = 3);
                     break;
                   case 3:
-                    // Already on buyer dashboard
+                    setState(() => _currentNavIndex = i);
                     break;
                   case 4:
-                    Navigator.pushNamed(context, '/buyer-profile-screen');
+                    setState(() => _currentNavIndex = i);
+                    await Navigator.pushNamed(context, '/buyer-profile-screen');
+                    if (mounted) setState(() => _currentNavIndex = 3);
                     break;
                 }
               },
@@ -485,23 +556,6 @@ class _BuyerDashboardScreenState extends State<BuyerDashboardScreen>
                         ),
                       ),
                     ),
-                    GestureDetector(
-                      onTap: () =>
-                          Navigator.pushNamed(context, '/buyer-profile-screen'),
-                      child: Container(
-                        width: 38,
-                        height: 38,
-                        decoration: BoxDecoration(
-                          color: AppTheme.primaryMuted,
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: const Icon(
-                          Icons.person_rounded,
-                          color: AppTheme.primary,
-                          size: 20,
-                        ),
-                      ),
-                    ),
                   ],
                 ),
               ),
@@ -542,7 +596,6 @@ class _BuyerDashboardScreenState extends State<BuyerDashboardScreen>
           Tab(text: 'Commandes'),
           Tab(text: 'Favoris'),
           Tab(text: 'Historique'),
-          Tab(text: 'Notifications'),
         ],
       ),
     );
@@ -570,10 +623,9 @@ class _BuyerDashboardScreenState extends State<BuyerDashboardScreen>
           child: TabBarView(
             controller: _tabController,
             children: [
-              _OrdersTab(orders: _orders),
+              _OrdersTab(orders: _orders, onRefresh: _loadData),
               _FavoritesTab(favorites: _favorites),
               _OrderHistoryTab(history: _orders),
-              _NotificationsTab(),
             ],
           ),
         ),
@@ -581,18 +633,6 @@ class _BuyerDashboardScreenState extends State<BuyerDashboardScreen>
     );
   }
 
-  Widget _buildTabletLayout() {
-    return Row(
-      children: [
-        AsoukaaNavigationRail(
-          currentIndex: _currentNavIndex,
-          onTap: (i) => setState(() => _currentNavIndex = i),
-        ),
-        const VerticalDivider(width: 1),
-        Expanded(child: _buildPhoneLayout()),
-      ],
-    );
-  }
 }
 
 // ─────────────────────────────────────────────
@@ -601,8 +641,9 @@ class _BuyerDashboardScreenState extends State<BuyerDashboardScreen>
 
 class _OrdersTab extends StatelessWidget {
   final List<Map<String, dynamic>> orders;
+  final VoidCallback onRefresh;
 
-  const _OrdersTab({required this.orders});
+  const _OrdersTab({required this.orders, required this.onRefresh});
 
   @override
   Widget build(BuildContext context) {
@@ -625,7 +666,7 @@ class _OrdersTab extends StatelessWidget {
           return _ImportAssisteCard();
         }
         final order = orders[index - 1];
-        return _OrderCard(order: order);
+        return _OrderCard(order: order, onRefresh: onRefresh);
       },
     );
   }
@@ -719,10 +760,27 @@ class _ImportAssisteCard extends StatelessWidget {
   }
 }
 
+/// Pastille de statut d'une commande côté client : le libellé précis d'une
+/// commande « en attente » (voir `pendingLabel`) remplace « Reçue » ; tous
+/// les autres statuts gardent la pastille habituelle.
+Widget _pastilleStatutCommande(Map<String, dynamic> order, OrderStatus status) {
+  final libelle = order['pendingLabel'] as String?;
+  if (libelle != null && libelle.isNotEmpty) {
+    return StatusBadgeWidget.custom(
+      label: libelle,
+      backgroundColor: const Color(0xFFE3F2FD),
+      textColor: const Color(0xFF1565C0),
+    );
+  }
+  return StatusBadgeWidget.fromOrderStatus(status);
+}
+
 class _OrderCard extends StatelessWidget {
   final Map<String, dynamic> order;
 
-  const _OrderCard({required this.order});
+  final VoidCallback onRefresh;
+
+  const _OrderCard({required this.order, required this.onRefresh});
 
   @override
   Widget build(BuildContext context) {
@@ -735,6 +793,10 @@ class _OrderCard extends StatelessWidget {
       onTap: () {
         final orderId = order['orderId'] as String?;
         if (orderId == null || orderId.isEmpty) return;
+        // On rafraîchit la liste au retour de l'écran de suivi : sans ça,
+        // la carte gardait le statut chargé AVANT l'ouverture du suivi
+        // (ex: encore "En livraison" alors que la livraison venait
+        // d'être confirmée sur l'écran de suivi lui-même).
         Navigator.pushNamed(
           context,
           AppRoutes.orderTracking,
@@ -742,6 +804,10 @@ class _OrderCard extends StatelessWidget {
             'orderId': orderId,
             'productId': order['productId'],
             'status': order['rawStatus'],
+            // On transmet le libellé déjà calculé par la liste. Le détail d'une
+            // commande (GET /orders/me/:id) renvoie aussi `payment`, et l'écran
+            // de suivi s'en sert pour déduire ce libellé s'il n'est pas transmis.
+            'pendingLabel': order['pendingLabel'],
             'orderNumber': order['orderNumber'],
             'firstName': order['firstName'],
             'lastName': order['lastName'],
@@ -750,7 +816,7 @@ class _OrderCard extends StatelessWidget {
             'country': order['country'],
             'phone': order['phone'],
           },
-        );
+        ).then((_) => onRefresh());
       },
       child: Container(
       decoration: BoxDecoration(
@@ -780,8 +846,15 @@ class _OrderCard extends StatelessWidget {
                     color: AppTheme.primary,
                   ),
                 ),
-                const Spacer(),
-                StatusBadgeWidget.fromOrderStatus(status),
+                const SizedBox(width: 8),
+                // Expanded + Align : le libellé « En attente de confirmation
+                // du vendeur » est long et peut passer sur deux lignes.
+                Expanded(
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: _pastilleStatutCommande(order, status),
+                  ),
+                ),
               ],
             ),
           ),
@@ -847,6 +920,38 @@ class _OrderCard extends StatelessWidget {
               ],
             ),
           ),
+          // Commande en attente de paiement (notamment une commande
+          // initiée par le vendeur pour ce client : voir
+          // OrdersService.createVendorInitiated côté backend, qui ne crée
+          // plus de paiement à la création) : c'est au client de payer,
+          // via le même flux Mobile Money qu'une commande normale.
+          if (order['paymentPending'] == true) ...[
+            const Divider(height: 1, color: AppTheme.outlineVariant),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 10, 14, 14),
+              child: SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  icon: const Icon(Icons.payments_outlined, size: 18, color: Colors.white),
+                  label: Text(
+                    'Payer la commande',
+                    style: GoogleFonts.outfit(
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppTheme.primary,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                  onPressed: () => _payOrder(context, order, onRefresh),
+                ),
+              ),
+            ),
+          ],
           // Tracking stepper (only for non-cancelled)
           if (!isCancelled) ...[
             const Divider(height: 1, color: AppTheme.outlineVariant),
@@ -885,6 +990,515 @@ class _OrderCard extends StatelessWidget {
       ),
     );
   }
+}
+
+// ─────────────────────────────────────────────────────
+// CLIENT — PAYER UNE COMMANDE EN ATTENTE (Mobile Money)
+// Meme flux que le paiement normal au checkout (checkout_screen.dart) :
+// POST /api/v1/payments/initiate avec method 'mobile_money' + operator +
+// phoneNumber, puis polling GET /api/v1/payments/{id}/status. Le montant
+// (frais de livraison inclus, deja calcules selon la commune a la
+// creation de la commande) est determine cote serveur a partir de
+// order.total -- le client n'a rien a ressaisir.
+// ─────────────────────────────────────────────────────
+Future<void> _payOrder(
+  BuildContext context,
+  Map<String, dynamic> order,
+  VoidCallback onRefresh,
+) async {
+  final orderId = order['orderId'] as String?;
+  if (orderId == null || orderId.isEmpty) return;
+
+  // Un paiement de cette commande est « en cours de verification » : on
+  // n'ouvre pas la feuille de paiement (pas de second paiement immediat).
+  if (PaiementsEnVerification.estEnVerification(<String>[orderId])) {
+    await _afficherVerificationEnCours(
+      context,
+      messagePaiementEnVerification,
+    );
+    return;
+  }
+
+  String selectedOperator = 'MTN';
+  final phoneCtrl =
+      TextEditingController(text: (order['phone'] as String?) ?? '');
+  bool submitting = false;
+
+  await showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+    ),
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setSheetState) {
+        return Padding(
+          padding: EdgeInsets.only(
+            left: 20,
+            right: 20,
+            top: 20,
+            bottom: MediaQuery.of(ctx).viewInsets.bottom + 20,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Payer la commande ${order['id'] ?? ''}',
+                style: GoogleFonts.outfit(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Montant : ${order['price'] ?? ''}',
+                style: GoogleFonts.outfit(
+                  fontSize: 14,
+                  color: AppTheme.textSecondary,
+                ),
+              ),
+              const SizedBox(height: 16),
+              DropdownButtonFormField<String>(
+                initialValue: selectedOperator,
+                isExpanded: true,
+                onChanged: (v) =>
+                    setSheetState(() => selectedOperator = v ?? 'MTN'),
+                style: GoogleFonts.outfit(
+                  fontSize: 14,
+                  color: AppTheme.textPrimary,
+                ),
+                decoration: InputDecoration(
+                  labelText: 'Operateur Mobile Money',
+                  prefixIcon: const Icon(
+                    Icons.sim_card_outlined,
+                    size: 18,
+                    color: AppTheme.muted,
+                  ),
+                  filled: true,
+                  fillColor: AppTheme.surfaceVariant,
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 14,
+                  ),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                items: const ['MTN', 'Moov']
+                    .map((o) => DropdownMenuItem(value: o, child: Text(o)))
+                    .toList(),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: phoneCtrl,
+                keyboardType: TextInputType.phone,
+                decoration: InputDecoration(
+                  labelText: 'Numero Mobile Money',
+                  prefixIcon: const Icon(
+                    Icons.phone_outlined,
+                    size: 18,
+                    color: AppTheme.muted,
+                  ),
+                  filled: true,
+                  fillColor: AppTheme.surfaceVariant,
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 14,
+                  ),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: submitting
+                      ? null
+                      : () async {
+                          if (phoneCtrl.text.trim().isEmpty) {
+                            AppToast.show(
+                              ctx,
+                              message:
+                                  'Renseignez le numero Mobile Money.',
+                              type: ToastType.error,
+                            );
+                            return;
+                          }
+                          setSheetState(() => submitting = true);
+                          try {
+                            final payResp =
+                                await ApiService.instance.client.post(
+                              '/api/v1/payments/initiate',
+                              data: {
+                                'orderId': orderId,
+                                'method': 'mobile_money',
+                                'operator': selectedOperator,
+                                'phoneNumber': normaliserTelephone(phoneCtrl.text),
+                              },
+                            );
+                            final payData = payResp.data;
+                            final paymentId = payData is Map
+                                ? payData['paymentId'] as String?
+                                : null;
+                            final payMessage = payData is Map
+                                ? payData['message'] as String?
+                                : null;
+                            if (!ctx.mounted) return;
+                            Navigator.pop(ctx);
+                            if (!context.mounted) return;
+                            AppToast.show(
+                              context,
+                              message: payMessage ??
+                                  'Demande de paiement envoyee.',
+                              type: ToastType.success,
+                            );
+                            if (paymentId != null) {
+                              _pollOrderPaymentStatus(
+                                context,
+                                paymentId,
+                                onRefresh,
+                                orderId: orderId,
+                              );
+                            }
+                          } on DioException catch (e) {
+                            final errData = e.response?.data;
+                            final backendMessage =
+                                errData is Map ? errData['message'] : null;
+                            final texteServeur = backendMessage is String
+                                ? backendMessage
+                                : (backendMessage is List &&
+                                        backendMessage.isNotEmpty
+                                    ? backendMessage.first.toString()
+                                    : '');
+                            if (estMessageVerificationEnCours(texteServeur)) {
+                              // Le serveur refuse un second paiement : le
+                              // premier est encore en cours de verification.
+                              // Message du serveur affiche tel quel.
+                              PaiementsEnVerification.marquer(
+                                <String>[orderId],
+                              );
+                              if (ctx.mounted) Navigator.pop(ctx);
+                              if (!context.mounted) return;
+                              await _afficherVerificationEnCours(
+                                context,
+                                texteServeur,
+                              );
+                              if (context.mounted) onRefresh();
+                              return;
+                            }
+                            if (!ctx.mounted) return;
+                            AppToast.show(
+                              ctx,
+                              message: backendMessage is String
+                                  ? backendMessage
+                                  : (backendMessage is List &&
+                                          backendMessage.isNotEmpty
+                                      ? backendMessage.first.toString()
+                                      : 'Le paiement a echoue. Reessayez.'),
+                              type: ToastType.error,
+                            );
+                            setSheetState(() => submitting = false);
+                          } catch (_) {
+                            if (!ctx.mounted) return;
+                            AppToast.show(
+                              ctx,
+                              message:
+                                  'Une erreur est survenue. Reessayez.',
+                              type: ToastType.error,
+                            );
+                            setSheetState(() => submitting = false);
+                          }
+                        },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppTheme.primary,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  child: submitting
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : Text(
+                          'Valider le paiement',
+                          style: GoogleFonts.outfit(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    ),
+  );
+}
+
+// Boite d'information : le paiement est « en cours de verification »
+// (non confirme mais NON annule). On ne parle pas d'echec et on ne propose
+// pas de repayer.
+Future<void> _afficherVerificationEnCours(
+  BuildContext context,
+  String message,
+) async {
+  if (!context.mounted) return;
+  await showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (dialogContext) {
+      return PopScope(
+        canPop: false,
+        child: AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+          ),
+          title: Text(
+            'Vérification en cours',
+            style: GoogleFonts.outfit(
+              fontSize: 17,
+              fontWeight: FontWeight.w700,
+              color: AppTheme.textPrimary,
+            ),
+          ),
+          content: Text(
+            message,
+            style: GoogleFonts.outfit(
+              fontSize: 14,
+              color: AppTheme.textSecondary,
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: Text(
+                'Compris',
+                style: GoogleFonts.outfit(
+                  fontWeight: FontWeight.w600,
+                  color: AppTheme.primary,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    },
+  );
+}
+
+// Interroge GET /payments/{id}/status jusqu'a confirmation, echec ou
+// delai depasse -- meme logique que _pollPaymentStatus dans
+// checkout_screen.dart, reutilisee ici pour le paiement d'une commande
+// deja creee (notamment une commande initiee par le vendeur).
+// A l'abandon de l'attente, PATCH /payments/{id}/cancel peut repondre :
+// 'success' (le paiement etait confirme), 'en attente' + verificationEnCours
+// (non confirme mais non annule : on previent le client, pas de nouveau
+// paiement immediat) ou 'echoue' / ancien serveur (comportement d'avant).
+Future<void> _pollOrderPaymentStatus(
+  BuildContext context,
+  String paymentId,
+  VoidCallback onRefresh, {
+  String? orderId,
+}) async {
+  const maxAttempts = 40;
+  const pollInterval = Duration(seconds: 3);
+  var dialogOpen = true;
+  // Vrai des que l'issue est connue (confirme, ou en verification) : evite
+  // un double message quand le polling et le bouton « Annuler l'attente » se
+  // croisent.
+  var resolu = false;
+  // Passe a true apres ~90 s : le texte de la boite d'attente change.
+  final attenteLongue = ValueNotifier<bool>(false);
+  final idsCommande = <String>[if (orderId != null) orderId];
+
+  if (!context.mounted) return;
+
+  Future<void> paiementConfirme() async {
+    if (resolu) return;
+    resolu = true;
+    PaiementsEnVerification.oublier(idsCommande);
+    if (!context.mounted) return;
+    AppToast.show(
+      context,
+      message: 'Paiement confirmé. Votre commande a été transmise au vendeur pour confirmation.',
+      type: ToastType.success,
+    );
+    onRefresh();
+  }
+
+  Future<void> annuler({required bool apresDelai}) async {
+    ReponseAnnulationPaiement? reponseBrute;
+    try {
+      final resp = await ApiService.instance.client
+          .patch('/api/v1/payments/$paymentId/cancel');
+      reponseBrute = lireReponseAnnulation(resp.data);
+    } catch (_) {
+      // best-effort : si ca echoue (reseau coupe...), on ne sait pas ce
+      // qu'a fait le serveur ; on garde le comportement d'avant.
+      reponseBrute = null;
+    }
+    final reponse = reponseBrute;
+
+    if (reponse != null && reponse.issue == IssueAnnulation.reussi) {
+      await paiementConfirme();
+      return;
+    }
+
+    if (reponse != null &&
+        reponse.issue == IssueAnnulation.verificationEnCours) {
+      if (resolu) return;
+      resolu = true;
+      PaiementsEnVerification.marquer(idsCommande);
+      await _afficherVerificationEnCours(
+        context,
+        reponse.messageVerification,
+      );
+      if (context.mounted) onRefresh();
+      return;
+    }
+
+    // Echec confirme / ancien serveur / appel impossible : comportement d'avant.
+    if (reponse != null) PaiementsEnVerification.oublier(idsCommande);
+    if (!context.mounted) return;
+    if (apresDelai) {
+      AppToast.show(
+        context,
+        message: (reponse != null && reponse.echecConfirme)
+            ? reponse.messageEchec
+            : 'Delai depasse. Verifiez le statut de votre commande plus tard.',
+        type: ToastType.error,
+      );
+    }
+    onRefresh();
+  }
+
+  showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (dialogContext) {
+      return PopScope(
+        canPop: false,
+        child: AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const CircularProgressIndicator(color: AppTheme.primary),
+              const SizedBox(height: 16),
+              Text(
+                'Confirmez le paiement sur votre telephone',
+                textAlign: TextAlign.center,
+                style: GoogleFonts.outfit(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                  color: AppTheme.textPrimary,
+                ),
+              ),
+              const SizedBox(height: 8),
+              ValueListenableBuilder<bool>(
+                valueListenable: attenteLongue,
+                builder: (builderContext, longue, _) {
+                  return Text(
+                    longue
+                        ? 'Toujours en attente de votre validation sur le '
+                            'téléphone… Ne fermez pas l\'application et ne '
+                            'payez pas une seconde fois.'
+                        : 'Validez la demande de paiement mobile money recue '
+                            'sur votre telephone. Ne fermez pas '
+                            'l\'application.',
+                    textAlign: TextAlign.center,
+                    style: GoogleFonts.outfit(
+                      fontSize: 13,
+                      color: AppTheme.textSecondary,
+                    ),
+                  );
+                },
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () async {
+                Navigator.of(dialogContext).pop();
+                await annuler(apresDelai: false);
+              },
+              child: Text(
+                'Annuler l\'attente',
+                style: GoogleFonts.outfit(color: AppTheme.textSecondary),
+              ),
+            ),
+          ],
+        ),
+      );
+    },
+  ).then((_) => dialogOpen = false);
+
+  void closeDialog() {
+    if (dialogOpen && context.mounted) {
+      Navigator.of(context, rootNavigator: true).pop();
+    }
+    dialogOpen = false;
+  }
+
+  for (var attempt = 0; attempt < maxAttempts; attempt++) {
+    await Future.delayed(pollInterval);
+    if (!dialogOpen || !context.mounted) return;
+
+    // ~90 s ecoulees (30 interrogations x 3 s) : message plus rassurant.
+    if (attempt == 29) attenteLongue.value = true;
+
+    try {
+      final statusResp = await ApiService.instance.client
+          .get('/api/v1/payments/$paymentId/status');
+      final statusData = statusResp.data;
+      final status =
+          statusData is Map ? statusData['status']?.toString() : null;
+
+      if (status == 'success') {
+        closeDialog();
+        await paiementConfirme();
+        return;
+      }
+
+      if (status == 'echoue' || status == 'échoué') {
+        closeDialog();
+        PaiementsEnVerification.oublier(idsCommande);
+        if (!context.mounted) return;
+        AppToast.show(
+          context,
+          message:
+              'Le paiement a echoue ou a ete annule. Vous pouvez reessayer.',
+          type: ToastType.error,
+        );
+        return;
+      }
+      // Sinon toujours "en attente" -- on continue le polling.
+    } catch (_) {
+      // Erreur reseau ponctuelle pendant le polling -- on retente au
+      // prochain cycle plutot que d'abandonner tout de suite.
+    }
+  }
+
+  // Delai depasse sans confirmation ni echec explicite : on demande au
+  // serveur d'annuler, mais il peut repondre « deja confirme » ou
+  // « en cours de verification » (voir annuler ci-dessus).
+  final etaitOuverte = dialogOpen;
+  closeDialog();
+  if (!etaitOuverte) return;
+  await annuler(apresDelai: true);
 }
 
 class _OrderTracker extends StatelessWidget {
@@ -1025,6 +1639,7 @@ class _FavoritesTabState extends State<_FavoritesTab> {
     if (productId.isEmpty) return;
     try {
       await ApiService.instance.client.delete('/api/v1/wishlist/$productId');
+      WishlistService.instance.refreshCount();
       if (mounted) {
         setState(() => _favorites.removeAt(index));
         AppToast.show(context, message: 'Retiré de la liste de souhaits');
@@ -1083,7 +1698,13 @@ class _FavoriteCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final inStock = item['inStock'] as bool;
 
-    return Container(
+    return GestureDetector(
+      onTap: () => Navigator.pushNamed(
+        context,
+        AppRoutes.productDetail,
+        arguments: item,
+      ),
+      child: Container(
       decoration: BoxDecoration(
         color: AppTheme.surface,
         borderRadius: BorderRadius.circular(14),
@@ -1221,6 +1842,7 @@ class _FavoriteCard extends StatelessWidget {
             ),
           ),
         ],
+      ),
       ),
     );
   }
@@ -1365,7 +1987,8 @@ class _HistoryCard extends StatelessWidget {
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
-                    StatusBadgeWidget.fromOrderStatus(status),
+                    const SizedBox(width: 6),
+                    Flexible(child: _pastilleStatutCommande(item, status)),
                   ],
                 ),
                 const SizedBox(height: 4),

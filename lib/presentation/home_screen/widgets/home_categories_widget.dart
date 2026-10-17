@@ -1,10 +1,19 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../../routes/app_routes.dart';
+import '../../../services/api_service.dart';
+import './home_image_circle.dart';
 
-class HomeCategoriesWidget extends StatelessWidget {
+class HomeCategoriesWidget extends StatefulWidget {
   const HomeCategoriesWidget({super.key});
 
+  @override
+  State<HomeCategoriesWidget> createState() => _HomeCategoriesWidgetState();
+}
+
+class _HomeCategoriesWidgetState extends State<HomeCategoriesWidget> {
+  // Liste d'origine (icônes) : « Tous » en tête, et repli si les catégories
+  // du serveur ne peuvent pas être chargées.
   static const List<_Category> _categories = [
     _Category(
       label: 'Tous',
@@ -48,11 +57,83 @@ class HomeCategoriesWidget extends StatelessWidget {
     ),
   ];
 
-  void _onCategoryTap(BuildContext context, int index) {
+  // Catégories racines actives du serveur (avec leur image). Vide tant que
+  // rien n'est chargé ou si l'appel échoue : on affiche alors la liste
+  // d'origine, sans aucun message d'erreur.
+  List<_Category> _remote = const [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadCategories();
+  }
+
+  static String _textOf(dynamic value) => (value ?? '').toString().trim();
+
+  static int _sortOrderOf(Map<String, dynamic> c) =>
+      int.tryParse(_textOf(c['sortOrder'])) ?? 0;
+
+  /// GET /api/v1/categories/tree : entités complètes (imageUrl, sortOrder,
+  /// isActive), racines au premier niveau. Les inactives sont écartées.
+  Future<void> _loadCategories() async {
+    final loaded = <_Category>[];
+    try {
+      final res =
+          await ApiService.instance.client.get('/api/v1/categories/tree');
+      final data = res.data;
+      if (data is List) {
+        final roots = <Map<String, dynamic>>[
+          for (final node in data)
+            if (node is Map && node['isActive'] != false)
+              Map<String, dynamic>.from(node),
+        ];
+        roots.sort((a, b) {
+          final byOrder = _sortOrderOf(a).compareTo(_sortOrderOf(b));
+          if (byOrder != 0) return byOrder;
+          return _textOf(a['name'])
+              .toLowerCase()
+              .compareTo(_textOf(b['name']).toLowerCase());
+        });
+        for (final c in roots) {
+          final label = _textOf(c['name']);
+          if (label.isEmpty) continue;
+          final image = _textOf(c['imageUrl']);
+          loaded.add(
+            _Category(
+              label: label,
+              color: const Color(0xFFFF6210),
+              id: _textOf(c['id']),
+              imageUrl: (image.startsWith('http://') ||
+                      image.startsWith('https://'))
+                  ? image
+                  : '',
+            ),
+          );
+        }
+      }
+    } catch (_) {
+      // Repli silencieux sur la liste d'origine.
+    }
+    if (!mounted) return;
+    setState(() {
+      _remote = loaded;
+      _loading = false;
+    });
+  }
+
+  List<_Category> get _items =>
+      _remote.isEmpty ? _categories : [_categories.first, ..._remote];
+
+  void _onCategoryTap(_Category cat, int index) {
+    // L'écran Catégories accepte un nom, un slug ou un id : l'id est le plus
+    // exact pour une catégorie du serveur.
     Navigator.pushNamed(
       context,
       AppRoutes.categories,
-      arguments: index == 0 ? 'Tous' : _categories[index].label,
+      arguments: index == 0
+          ? 'Tous'
+          : (cat.id.isNotEmpty ? cat.id : cat.label),
     );
   }
 
@@ -91,63 +172,108 @@ class HomeCategoriesWidget extends StatelessWidget {
         const SizedBox(height: 14),
         SizedBox(
           height: 80,
-          child: ListView.builder(
-            scrollDirection: Axis.horizontal,
-            physics: const BouncingScrollPhysics(),
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            itemCount: _categories.length,
-            itemBuilder: (context, index) {
-              final cat = _categories[index];
-              return GestureDetector(
-                onTap: () => _onCategoryTap(context, index),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 4),
-                  child: Column(
-                    children: [
-                      Container(
-                        width: 54,
-                        height: 54,
-                        decoration: BoxDecoration(
-                          color: cat.color.withAlpha(20),
-                          borderRadius: BorderRadius.circular(16),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withAlpha(10),
-                              blurRadius: 8,
-                              offset: const Offset(0, 3),
-                            ),
-                          ],
-                        ),
-                        child: Icon(cat.icon, size: 24, color: cat.color),
-                      ),
-                      const SizedBox(height: 6),
-                      Text(
-                        cat.label,
-                        style: GoogleFonts.outfit(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w500,
-                          color: const Color(0xFF616161),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              );
-            },
-          ),
+          child: _loading ? _buildSkeleton() : _buildList(),
         ),
       ],
+    );
+  }
+
+  // Cercles gris pendant le chargement (évite un clignotement d'icônes).
+  Widget _buildSkeleton() {
+    return ListView.builder(
+      scrollDirection: Axis.horizontal,
+      physics: const NeverScrollableScrollPhysics(),
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      itemCount: 6,
+      itemBuilder: (context, index) {
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          child: SizedBox(
+            width: 68,
+            child: Column(
+              children: [
+                Container(
+                  width: 54,
+                  height: 54,
+                  decoration: const BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Color(0xFFEDE8E3),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Container(
+                  width: 40,
+                  height: 9,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFEDE8E3),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildList() {
+    final items = _items;
+    return ListView.builder(
+      scrollDirection: Axis.horizontal,
+      physics: const BouncingScrollPhysics(),
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      itemCount: items.length,
+      itemBuilder: (context, index) {
+        final cat = items[index];
+        return GestureDetector(
+          onTap: () => _onCategoryTap(cat, index),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: SizedBox(
+              width: 68,
+              child: Column(
+                children: [
+                  HomeImageCircle(
+                    imageUrl: cat.imageUrl,
+                    label: cat.label,
+                    size: 54,
+                    icon: cat.icon,
+                    accent: cat.color,
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    cat.label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.center,
+                    style: GoogleFonts.outfit(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w500,
+                      color: const Color(0xFF616161),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }
 
 class _Category {
   final String label;
-  final IconData icon;
+  final IconData? icon;
   final Color color;
+  final String imageUrl;
+  final String id;
   const _Category({
     required this.label,
-    required this.icon,
+    this.icon,
     required this.color,
+    this.imageUrl = '',
+    this.id = '',
   });
 }
