@@ -30,6 +30,12 @@ import {
   LogAction,
 } from '../../common/entities/activity-log.entity';
 
+// Stock « technique » de la variante unique d'un livre numérique : un livre
+// ne s'épuise jamais. Les contrôles de stock existants (panier, commande,
+// paiement) passent donc sans modification, et la décrémentation est ignorée
+// pour les livres (voir PaymentsService.confirmPayment).
+export const DIGITAL_BOOK_STOCK = 999999;
+
 @Injectable()
 export class ProductsService {
 
@@ -105,6 +111,38 @@ export class ProductsService {
       );
     }
 
+    // 3 bis. Nature du produit : livre numérique (PDF) ou produit physique.
+    const isDigital = dto.isDigital === true;
+    let fileSizeBytes: number | null = null;
+    if (isDigital) {
+      if (!dto.author?.trim())   throw new BadRequestException('L\'auteur du livre est obligatoire');
+      if (dto.pageCount === undefined) throw new BadRequestException('Le nombre de pages est obligatoire');
+      if (!dto.language?.trim()) throw new BadRequestException('La langue du livre est obligatoire');
+      if (!dto.filePath)         throw new BadRequestException('Le fichier PDF du livre est obligatoire');
+      if (categories.some(c => !c.isDigital)) {
+        throw new BadRequestException(
+          'Un livre numérique doit être rangé dans une catégorie « numérique »'
+        );
+      }
+      // Taille relevée dans le stockage (jamais fournie par le client) ; refuse
+      // un chemin invalide ou un fichier qui n'a pas été envoyé.
+      fileSizeBytes = await this.uploadService.getEbookSize(dto.filePath);
+    } else {
+      if (!(dto.basePrice > 0)) {
+        throw new BadRequestException('Le prix doit être positif');
+      }
+      if (dto.author || dto.pageCount !== undefined || dto.language || dto.filePath) {
+        throw new BadRequestException(
+          'Auteur, pages, langue et fichier PDF sont réservés aux livres numériques'
+        );
+      }
+      if (categories.some(c => c.isDigital)) {
+        throw new BadRequestException(
+          'Une catégorie numérique est réservée aux livres numériques'
+        );
+      }
+    }
+
     // 4. Générer le slug unique
     const slug = await this.generateUniqueSlug(dto.prod_name);
 
@@ -115,12 +153,43 @@ export class ProductsService {
     product.slug      = slug;
     product.description = dto.description;
     product.basePrice = dto.basePrice;
-    product.weight    = dto.weight    ?? null;
-    product.dimensions = dto.dimensions ?? null;
+    product.weight    = isDigital ? null : (dto.weight    ?? null);
+    product.dimensions = isDigital ? null : (dto.dimensions ?? null);
     product.status    = dto.status    ?? ProductStatus.DRAFT;
     product.categories = categories;
+    product.isDigital = isDigital;
+    if (isDigital) {
+      product.author        = dto.author!.trim();
+      product.pageCount     = dto.pageCount!;
+      product.language      = dto.language!.trim();
+      product.filePath      = dto.filePath!;
+      product.fileSizeBytes = fileSizeBytes;
+    }
 
     await this.productRepo.save(product);
+
+    // Livre : une variante unique « technique » créée côté serveur (le panier
+    // et les commandes reposent sur une variante). Pas de couleur/taille,
+    // stock fictif jamais décrémenté. Si elle échoue, on annule le produit.
+    if (isDigital) {
+      try {
+        const variant         = this.variantRepo.create();
+        variant.productId     = product.id;
+        variant.sku           = `BOOK-${product.id}`;
+        variant.color         = null;
+        variant.size          = null;
+        variant.model         = null;
+        variant.price         = dto.basePrice;
+        variant.stockQuantity = DIGITAL_BOOK_STOCK;
+        variant.lowStockAlert = 0;
+        variant.imageUrl      = null;
+        variant.isActive      = true;
+        await this.variantRepo.save(variant);
+      } catch (e) {
+        await this.productRepo.delete({ id: product.id });
+        throw e;
+      }
+    }
 
     // 6. Créer les tags si fournis
     if (dto.tags?.length) {
@@ -139,7 +208,7 @@ export class ProductsService {
       action:     LogAction.PRODUCT_CREATED,
       entityType: 'product',
       entityId:   product.id,
-      newValue:   { name: product.prod_name, status: product.status },
+      newValue:   { name: product.prod_name, status: product.status, isDigital },
       ipAddress:  ip,
     });
 
@@ -155,6 +224,7 @@ export class ProductsService {
     search?:     string;
     categoryId?: string;
     vendorId?:   string;
+    onlyDigital?: boolean;
     minPrice?:   number;
     maxPrice?:   number;
     status?:     ProductStatus;
@@ -165,6 +235,7 @@ export class ProductsService {
       search,
       categoryId,
       vendorId,
+      onlyDigital,
       minPrice,
       maxPrice,
       status     = ProductStatus.ACTIVE,
@@ -209,6 +280,11 @@ export class ProductsService {
 
     if (vendorId) {
       query.andWhere('product.vendorId = :vendorId', { vendorId });
+    }
+
+    // « Livres numériques » de la page Catégories : tous les produits numériques.
+    if (onlyDigital) {
+      query.andWhere('product.isDigital = true');
     }
 
     if (minPrice !== undefined) {
@@ -492,6 +568,37 @@ export class ProductsService {
       price:  product.basePrice,
     };
 
+    // `null` explicite (accepté par @IsOptional) : refusé, ces champs ne se vident pas.
+    const rawDto = dto as unknown as Record<string, unknown>;
+    for (const k of ['author', 'pageCount', 'language', 'filePath', 'isDigital']) {
+      if (rawDto[k] === null) {
+        throw new BadRequestException(`Le champ « ${k} » ne peut pas être vide.`);
+      }
+    }
+    // La nature (livre / produit physique) est définitive.
+    if (dto.isDigital !== undefined && dto.isDigital !== product.isDigital) {
+      throw new BadRequestException(
+        'La nature d\'un produit (livre numérique ou physique) ne peut pas être modifiée'
+      );
+    }
+    if (!product.isDigital) {
+      if (dto.basePrice !== undefined && !(dto.basePrice > 0)) {
+        throw new BadRequestException('Le prix doit être positif');
+      }
+      if (dto.author !== undefined || dto.pageCount !== undefined || dto.language !== undefined || dto.filePath !== undefined) {
+        throw new BadRequestException(
+          'Auteur, pages, langue et fichier PDF sont réservés aux livres numériques'
+        );
+      }
+    } else {
+      if (dto.author !== undefined && !dto.author.trim()) {
+        throw new BadRequestException('L\'auteur du livre est obligatoire');
+      }
+      if (dto.language !== undefined && !dto.language.trim()) {
+        throw new BadRequestException('La langue du livre est obligatoire');
+      }
+    }
+
     if (dto.prod_name)   {
       product.prod_name = dto.prod_name;
       product.slug      = await this.generateUniqueSlug(
@@ -501,15 +608,50 @@ export class ProductsService {
     }
     if (dto.description !== undefined) product.description = dto.description;
     if (dto.basePrice   !== undefined) product.basePrice   = dto.basePrice;
-    if (dto.weight      !== undefined) product.weight      = dto.weight;
-    if (dto.dimensions  !== undefined) product.dimensions  = dto.dimensions;
-    if (dto.status      !== undefined) product.status      = dto.status;
+    if (!product.isDigital) {
+      if (dto.weight      !== undefined) product.weight      = dto.weight;
+      if (dto.dimensions  !== undefined) product.dimensions  = dto.dimensions;
+    }
+    if (dto.status      !== undefined) {
+      // Produit désactivé par l'administration : le vendeur ne peut pas le
+      // remettre en vente (ni changer son statut).
+      if (product.isBlockedByAdmin && dto.status !== product.status) {
+        throw new ForbiddenException(
+          'Ce produit a été désactivé par l\'administration'
+          + (product.adminBlockReason ? ` (motif : ${product.adminBlockReason})` : '')
+          + '. Contactez le support pour le réactiver.',
+        );
+      }
+      product.status = dto.status;
+    }
+
+    // Fiche du livre numérique
+    if (product.isDigital) {
+      if (dto.author    !== undefined) product.author    = dto.author.trim();
+      if (dto.pageCount !== undefined) product.pageCount = dto.pageCount;
+      if (dto.language  !== undefined) product.language  = dto.language.trim();
+      if (dto.filePath  !== undefined) {
+        product.fileSizeBytes = await this.uploadService.getEbookSize(dto.filePath);
+        product.filePath      = dto.filePath;
+      }
+    }
 
     // Mettre à jour les catégories si fournies
     if (dto.categoryIds?.length) {
       const categories = await this.categoryRepo.find({
         where: { id: In(dto.categoryIds) },
       });
+      if (categories.length !== dto.categoryIds.length) {
+        throw new BadRequestException('Une ou plusieurs catégories sont introuvables');
+      }
+      // Nature des catégories = nature du produit (livre ↔ catégorie numérique).
+      if (categories.some(c => c.isDigital !== product.isDigital)) {
+        throw new BadRequestException(
+          product.isDigital
+            ? 'Un livre numérique doit être rangé dans une catégorie « numérique »'
+            : 'Une catégorie numérique est réservée aux livres numériques'
+        );
+      }
       product.categories = categories;
     }
 
@@ -531,6 +673,11 @@ export class ProductsService {
     }
 
     await this.productRepo.save(product);
+
+    // Livre : le prix de la variante technique suit le prix du livre.
+    if (product.isDigital && dto.basePrice !== undefined) {
+      await this.variantRepo.update({ productId }, { price: dto.basePrice });
+    }
 
     await this.logService.log({
       actorId:    userId,
@@ -571,6 +718,11 @@ export class ProductsService {
     // Ce check sera renforcé dans le module orders
     // On passe le produit en INACTIVE plutôt que supprimer
     product.status = ProductStatus.INACTIVE;
+    // Produit bloqué par l'admin puis supprimé par le vendeur : à la
+    // réactivation par l'admin, il ne doit PAS repasser en vente.
+    if (product.isBlockedByAdmin) {
+      product.adminBlockedFromStatus = ProductStatus.INACTIVE;
+    }
     await this.productRepo.save(product);
 
     await this.logService.log({
@@ -602,6 +754,7 @@ export class ProductsService {
     if (!product) throw new NotFoundException('Produit introuvable');
 
     await this.checkOwnership(product, userId);
+    this.assertNotDigital(product, 'ajouter une variante');
 
     // Image de variante : doit être un fichier de NOTRE stockage (type
     // « products »), pas une URL quelconque.
@@ -649,6 +802,7 @@ export class ProductsService {
     if (!product) throw new NotFoundException('Produit introuvable');
 
     await this.checkOwnership(product, userId);
+    this.assertNotDigital(product, 'modifier une variante');
 
     const variant = await this.variantRepo.findOne({
       where: { id: variantId, productId },
@@ -779,6 +933,7 @@ export class ProductsService {
     if (!product) throw new NotFoundException('Produit introuvable');
 
     await this.checkOwnership(product, userId);
+    this.assertNotDigital(product, 'définir des prix par quantité');
 
     // ⚠️ Le corps est un TABLEAU : le ValidationPipe global ne valide pas
     // les éléments d'un tableau (CreateTierPriceDto n'est donc pas appliqué)
@@ -924,6 +1079,16 @@ export class ProductsService {
   // ─────────────────────────────────────────────────────
 
   // Vérifie que le produit appartient bien au vendeur connecté
+  // Un livre numérique n'a ni variantes ni prix par quantité (une seule variante
+  // technique, créée par le serveur).
+  private assertNotDigital(product: Product, action: string): void {
+    if (product.isDigital) {
+      throw new BadRequestException(
+        `Un livre numérique ne permet pas de ${action}`
+      );
+    }
+  }
+
   private async checkOwnership(
     product: Product,
     userId:  string,

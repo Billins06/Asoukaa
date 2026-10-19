@@ -1,5 +1,5 @@
 import { toPublicVendor } from '../products/public-vendor.util';
-import { toPublicDelivery, toPublicRequester } from './public-delivery.util';
+import { toPublicDelivery } from './public-delivery.util';
 import { stripSecrets } from '../../common/utils/strip-secrets.util';
 import {
   Injectable,
@@ -9,7 +9,7 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, IsNull } from 'typeorm';
+import { Repository, IsNull, In } from 'typeorm';
 import { MailService }      from '../mail/mail.service';
 
 import { Delivery, DeliveryStatus }                        from './entities/delivery.entity';
@@ -28,7 +28,6 @@ import { NotificationType }                                from '../notification
 
 import { AssignDeliveryAgentDto }        from './dto/assign-agent.dto';
 import { UpdateDeliveryStatusDto }       from './dto/update-delivery-status.dto';
-import { CreateIndependentDeliveryDto }  from './dto/create-independent-delivery.dto';
 import { SubmitPickupProofDto }          from './dto/submit-pickup-proof.dto';
 import { SubmitHandoffProofDto }         from './dto/submit-handoff-proof.dto';
 import { ActivityLogService }            from '../../common/services/activity-log.service';
@@ -44,7 +43,14 @@ import {
 // Pourcentage par défaut du livreur quand DeliveryAgentProfile.earningsRate
 // n'est pas encore fixé par l'admin pour ce livreur précis (voir 80/20
 // convenu avec Collins — ajustable par livreur depuis l'admin plus tard).
-const DEFAULT_AGENT_EARNINGS_RATE = 80; // 80% pour le livreur, 20% pour la plateforme
+export const DEFAULT_AGENT_EARNINGS_RATE = 80; // 80% pour le livreur, 20% pour la plateforme
+
+
+// Un livreur qui a une course express « occupante » (réservation, payée ou en
+// route) ne doit pas être remis « disponible » par une livraison classique.
+const NO_BUSY_EXPRESS_SQL =
+  `NOT EXISTS (SELECT 1 FROM independent_deliveries i WHERE i."agentId" = "delivery_agent_profiles"."id" `
+  + `AND i.status IN ('contre-proposition','paiement en attente','accepté','en cours de livraison'))`;
 
 @Injectable()
 export class DeliveryService {
@@ -314,11 +320,15 @@ export class DeliveryService {
       }
 
       // Le livreur doit toujours être approuvé ET disponible à cet instant.
-      const a = await manager.update(
-        DeliveryAgentProfile,
-        { id: dto.agentId, status: AgentStatus.APPROVED, isAvailableNow: true },
-        { isAvailableNow: false },
-      );
+      const a = await manager
+        .createQueryBuilder()
+        .update(DeliveryAgentProfile)
+        .set({ isAvailableNow: false })
+        .where('id = :id AND status = :st AND "isAvailableNow" = true', {
+          id: dto.agentId, st: AgentStatus.APPROVED,
+        })
+        .andWhere(NO_BUSY_EXPRESS_SQL)
+        .execute();
       if (!a.affected) {
         throw new BadRequestException(
           'Ce livreur n\'est plus disponible actuellement'
@@ -456,11 +466,13 @@ export class DeliveryService {
           'Cette livraison n\'est plus en cours : actualisez la page.'
         );
       }
-      await manager.update(
-        DeliveryAgentProfile,
-        { id: agent.id },
-        { isAvailableNow: true },
-      );
+      await manager
+        .createQueryBuilder()
+        .update(DeliveryAgentProfile)
+        .set({ isAvailableNow: true })
+        .where('id = :id', { id: agent.id })
+        .andWhere(NO_BUSY_EXPRESS_SQL)
+        .execute();
     });
     delivery.status = dto.status;
 
@@ -735,11 +747,13 @@ export class DeliveryService {
       }));
 
       // Remettre le livreur disponible, +1 livraison réussie.
-      await manager.update(
-        DeliveryAgentProfile,
-        { id: agent.id },
-        { isAvailableNow: true },
-      );
+      await manager
+        .createQueryBuilder()
+        .update(DeliveryAgentProfile)
+        .set({ isAvailableNow: true })
+        .where('id = :id', { id: agent.id })
+        .andWhere(NO_BUSY_EXPRESS_SQL)
+        .execute();
       await manager.increment(DeliveryAgentProfile, { id: agent.id }, 'totalLivraisons', 1);
     });
 
@@ -842,248 +856,6 @@ export class DeliveryService {
   }
 
   // ─────────────────────────────────────────────────────
-  // TYPE B — CRÉER UNE LIVRAISON INDÉPENDANTE
-  // ─────────────────────────────────────────────────────
-  async createIndependent(
-    userId: string,
-    dto:    CreateIndependentDeliveryDto,
-    ip:     string,
-  ) {
-    const delivery                    = this.indepDeliveryRepo.create();
-    delivery.requesterId              = userId;
-    delivery.agentId                  = null;
-    delivery.pickupAddress            = dto.pickupAddress;
-    delivery.adresseLivraison         = dto.adresseLivraison;
-    delivery.packageDescription       = dto.packageDescription ?? null;
-    delivery.status                   = IndependentDeliveryStatus.PENDING;
-    delivery.tarifConvenu             = null;
-
-    await this.indepDeliveryRepo.save(delivery);
-
-    // Le message de retour ci-dessous promet depuis toujours que "les
-    // livreurs disponibles seront notifiés" — c'est fait ici. Best-effort :
-    // la demande doit être créée même si aucune notification ne part.
-    try {
-      const availableAgents = await this.agentRepo.find({
-        where: {
-          status:         AgentStatus.APPROVED,
-          isAvailableNow: true,
-        },
-      });
-
-      for (const availableAgent of availableAgents) {
-        try {
-          await this.notificationsService.notifyNewIndependentDelivery(
-            availableAgent.userId,
-            delivery.id,
-          );
-        } catch (error) {
-          this.logger.error(`Échec notification course express → livreur ${availableAgent.id}`, error?.message);
-        }
-      }
-    } catch (error) {
-      this.logger.error(`Échec notification des livreurs pour la course express ${delivery.id}`, error?.message);
-    }
-
-    return {
-      message:    'Demande de livraison créée. '
-                + 'Les livreurs disponibles seront notifiés.',
-      deliveryId: delivery.id,
-    };
-  }
-
-  // ─────────────────────────────────────────────────────
-  // TYPE B — ACCEPTER UNE LIVRAISON (livreur)
-  // ─────────────────────────────────────────────────────
-  async acceptIndependent(
-    deliveryId: string,
-    userId:     string,
-    ip:         string,
-  ) {
-    const delivery = await this.indepDeliveryRepo.findOne({
-      where:     { id: deliveryId },
-      relations: ['requester'],
-    });
-
-    if (!delivery) throw new NotFoundException('Livraison introuvable');
-
-    if (delivery.status !== IndependentDeliveryStatus.PENDING) {
-      throw new BadRequestException(
-        'Cette livraison n\'est plus disponible'
-      );
-    }
-
-    const agent = await this.agentRepo.findOne({
-      where: { userId },
-    });
-
-    if (!agent) throw new NotFoundException('Profil livreur introuvable');
-
-    if (agent.status !== AgentStatus.APPROVED) {
-      throw new ForbiddenException('Votre profil livreur n\'est pas approuvé');
-    }
-
-    if (!agent.isAvailableNow) {
-      throw new BadRequestException('Vous n\'êtes pas disponible actuellement');
-    }
-
-    delivery.agentId         = agent.id;
-    delivery.status          = IndependentDeliveryStatus.ACCEPTED;
-    agent.isAvailableNow     = false;
-
-    await this.agentRepo.save(agent);
-    await this.indepDeliveryRepo.save(delivery);
-
-    // Notifier le demandeur (best-effort)
-    try {
-      await this.mailService.sendIndependentDeliveryAccepted(
-        delivery.requester.email,
-        delivery.requester.prenom,
-      );
-    } catch (error) {
-      this.logger.error(`Échec envoi mail acceptation livraison → ${delivery.requester.email}`, error?.message);
-    }
-
-    await this.logService.log({
-      actorId:    userId,
-      actorType:  ActorType.DELIVERY_AGENT,
-      action:     LogAction.DELIVERY_ASSIGNED,
-      entityType: 'independent_delivery',
-      entityId:   deliveryId,
-      newValue:   { agentId: agent.id },
-      ipAddress:  ip,
-    });
-
-    // Le livreur ne reçoit du demandeur que son id, son prénom et son
-    // téléphone (jamais le compte complet : hash du mot de passe, e-mail...).
-    const { requester, ...deliveryRest } = delivery as any;
-    return {
-      message:  'Livraison acceptée avec succès',
-      delivery: { ...deliveryRest, requester: toPublicRequester(requester) },
-    };
-  }
-
-  // ─────────────────────────────────────────────────────
-  // TYPE B — METTRE À JOUR LE STATUT (livreur)
-  // ─────────────────────────────────────────────────────
-  async updateIndependentStatus(
-    deliveryId: string,
-    userId:     string,
-    status:     IndependentDeliveryStatus,
-    ip:         string,
-  ) {
-    const delivery = await this.indepDeliveryRepo.findOne({
-      where:     { id: deliveryId },
-      relations: ['requester', 'agent', 'agent.user'],
-    });
-
-    if (!delivery) throw new NotFoundException('Livraison introuvable');
-
-    const agent = await this.agentRepo.findOne({ where: { userId } });
-
-    if (!agent || delivery.agentId !== agent.id) {
-      throw new ForbiddenException(
-        'Vous n\'êtes pas le livreur assigné à cette livraison'
-      );
-    }
-
-    const oldStatus  = delivery.status;
-    delivery.status  = status;
-
-    if (status === IndependentDeliveryStatus.DELIVERED) {
-      agent.isAvailableNow   = true;
-      agent.totalLivraisons += 1;
-      await this.agentRepo.save(agent);
-      await this.recalculateSuccessRate(agent.id);
-    }
-
-    await this.indepDeliveryRepo.save(delivery);
-
-    await this.logService.log({
-      actorId:    userId,
-      actorType:  ActorType.DELIVERY_AGENT,
-      action:     LogAction.DELIVERY_STATUS_CHANGED,
-      entityType: 'independent_delivery',
-      entityId:   deliveryId,
-      oldValue:   { status: oldStatus },
-      newValue:   { status },
-      ipAddress:  ip,
-    });
-
-    return {
-      message: 'Statut mis à jour',
-      status:  delivery.status,
-    };
-  }
-
-  // ─────────────────────────────────────────────────────
-  // TYPE B — LISTE DES DEMANDES EN ATTENTE (pour livreurs)
-  // ─────────────────────────────────────────────────────
-  async getPendingIndependentDeliveries(userId: string) {
-    // ⚠️ Cette route n'était protégée que par JwtAuthGuard : n'importe quel
-    // utilisateur connecté (un simple client) pouvait lister TOUTES les
-    // demandes en attente, avec adresses d'enlèvement, de livraison et
-    // numéros de téléphone des demandeurs.
-    // On exige désormais un profil livreur APPROUVÉ — cohérent avec
-    // acceptIndependent(), qui le vérifie déjà.
-    const agent = await this.agentRepo.findOne({ where: { userId } });
-
-    if (!agent || agent.status !== AgentStatus.APPROVED) {
-      throw new ForbiddenException(
-        'Seuls les livreurs approuves peuvent consulter les demandes de livraison',
-      );
-    }
-
-    return this.indepDeliveryRepo
-      .createQueryBuilder('delivery')
-      .leftJoinAndSelect('delivery.requester', 'requester')
-      .select([
-        'delivery.id',
-        'delivery.pickupAddress',
-        'delivery.adresseLivraison',
-        'delivery.packageDescription',
-        'delivery.createdAt',
-        'requester.id',
-        'requester.prenom',
-        'requester.phone',
-      ])
-      .where('delivery.status = :status', {
-        status: IndependentDeliveryStatus.PENDING,
-      })
-      .orderBy('delivery.createdAt', 'ASC')
-      .getMany();
-  }
-
-  // ─────────────────────────────────────────────────────
-  // TYPE B — MES COURSES EXPRESS (livreur)
-  // Les courses independantes que ce livreur a acceptees.
-  // ─────────────────────────────────────────────────────
-  async getMyIndependentDeliveries(userId: string) {
-    const agent = await this.agentRepo.findOne({ where: { userId } });
-
-    if (!agent) throw new NotFoundException('Profil livreur introuvable');
-
-    return this.indepDeliveryRepo
-      .createQueryBuilder('delivery')
-      .leftJoinAndSelect('delivery.requester', 'requester')
-      .select([
-        'delivery.id',
-        'delivery.pickupAddress',
-        'delivery.adresseLivraison',
-        'delivery.packageDescription',
-        'delivery.status',
-        'delivery.tarifConvenu',
-        'delivery.createdAt',
-        'requester.id',
-        'requester.prenom',
-        'requester.phone',
-      ])
-      .where('delivery.agentId = :agentId', { agentId: agent.id })
-      .orderBy('delivery.createdAt', 'DESC')
-      .getMany();
-  }
-
-  // ─────────────────────────────────────────────────────
   // ADMIN — TOUTES LES LIVRAISONS TYPE A
   // ─────────────────────────────────────────────────────
   async getAllDeliveries(
@@ -1176,7 +948,7 @@ export class DeliveryService {
   }
 
   // Recalcule le taux de réussite du livreur
-  private async recalculateSuccessRate(agentId: string): Promise<void> {
+  async recalculateSuccessRate(agentId: string): Promise<void> {
     const total = await this.deliveryRepo.count({
       where: { agentId },
     });
@@ -1186,8 +958,17 @@ export class DeliveryService {
     });
 
     // Compter aussi les livraisons indépendantes
+    // Seules les courses réellement prises en charge comptent (pas les
+    // contre-propositions, réservations non payées ou annulations du client).
     const totalIndep = await this.indepDeliveryRepo.count({
-      where: { agentId },
+      where: {
+        agentId,
+        status: In([
+          IndependentDeliveryStatus.ACCEPTED,
+          IndependentDeliveryStatus.IN_TRANSIT,
+          IndependentDeliveryStatus.DELIVERED,
+        ]),
+      },
     });
 
     const deliveredIndep = await this.indepDeliveryRepo.count({

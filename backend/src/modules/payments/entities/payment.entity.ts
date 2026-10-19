@@ -13,6 +13,8 @@ export enum PaymentMethod {
   MOBILE_MONEY     = 'mobile_money',
   CARD             = 'card',
   CASH_ON_DELIVERY = 'cash_on_delivery',
+  // Livre numérique à 0 F : aucun paiement réel (jamais proposé au client).
+  FREE             = 'free',
 }
 
 export enum PaymentOperator {

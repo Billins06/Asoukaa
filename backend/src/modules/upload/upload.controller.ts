@@ -71,7 +71,7 @@ export class UploadController {
   @Throttle(UPLOAD_BURST_THROTTLE)
   @UseInterceptors(UploadParseInterceptor('single'))
   @HttpCode(HttpStatus.CREATED)
-  uploadFile(
+  async uploadFile(
     @Param('type') type: string,
     @UploadedFile() file: Express.Multer.File,
     @Req() req: Request,
@@ -83,6 +83,7 @@ export class UploadController {
       );
     }
     this.assertAllowedForUser(type, req);
+    await this.assertEbookSenderAllowed(type, req);
 
     return this.uploadService.uploadFile(file, type as UploadType);
   }
@@ -117,8 +118,21 @@ export class UploadController {
       );
     }
     this.assertAllowedForUser(type, req);
+    if (this.uploadService.isEbookType(type)) {
+      throw new BadRequestException('Un livre s\'envoie un fichier à la fois');
+    }
 
     return this.uploadService.uploadMultiple(files, type as UploadType);
+  }
+
+  // Livres numériques (PDF) : réservés aux VENDEURS APPROUVÉS (un vendeur
+  // bloqué/en attente ne peut plus déposer de fichier de 50 Mo).
+  private async assertEbookSenderAllowed(type: string, req: Request): Promise<void> {
+    if (!this.uploadService.isEbookType(type)) return;
+    const ok = await this.uploadService.isApprovedVendor((req as any).user?.id);
+    if (!ok) {
+      throw new ForbiddenException('Seul un vendeur approuvé peut envoyer un livre numérique');
+    }
   }
 
   // Types réservés au back-office (vitrine, catégories) : refusés à tout

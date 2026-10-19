@@ -49,6 +49,7 @@ export class CategoriesService {
 
     // 2. Vérifier le niveau si parentId fourni
     let level = 1;
+    let isDigital = dto.isDigital ?? false;
     if (dto.parentId) {
       const parent = await this.categoryRepo.findOne({
         where: { id: dto.parentId },
@@ -67,6 +68,15 @@ export class CategoriesService {
       }
 
       level = parent.level + 1;
+
+      // Une sous-catégorie suit la nature (physique / numérique) de son parent.
+      if (dto.isDigital !== undefined && dto.isDigital !== parent.isDigital) {
+        throw new BadRequestException(
+          'Une sous-catégorie suit la nature de sa catégorie parente '
+          + '(numérique ou physique) : elle ne peut pas être différente.'
+        );
+      }
+      isDigital = parent.isDigital;
     }
 
     // 2 bis. Image : OBLIGATOIRE pour une catégorie de premier niveau (les
@@ -91,6 +101,7 @@ category.imageUrl  = dto.imageUrl ?? null;
 category.level     = level;
 category.sortOrder = dto.sortOrder ?? 0;
 category.isActive  = dto.isActive ?? true;
+category.isDigital = isDigital;
 
     await this.categoryRepo.save(category);
 
@@ -129,7 +140,7 @@ category.isActive  = dto.isActive ?? true;
 
     return this.categoryRepo.find({
       where,
-      select: ['id', 'name', 'slug', 'parentId', 'level', 'isActive', 'imageUrl'],
+      select: ['id', 'name', 'slug', 'parentId', 'level', 'isActive', 'imageUrl', 'isDigital'],
       order:  { level: 'ASC', sortOrder: 'ASC', name: 'ASC' },
     });
   }
@@ -224,7 +235,43 @@ category.isActive  = dto.isActive ?? true;
     if (dto.sortOrder !== undefined) category.sortOrder = dto.sortOrder;
     if (dto.isActive  !== undefined) category.isActive  = dto.isActive;
 
+    // Nature numérique / physique : seulement sur une catégorie PRINCIPALE
+    // (les sous-catégories la suivent), et seulement si aucun produit n'y est
+    // déjà rangé (sinon un livre se retrouverait dans une catégorie physique,
+    // ou l'inverse). Le changement descend sur toutes les sous-catégories.
+    let digitalChanged = false;
+    if (dto.isDigital !== undefined && dto.isDigital !== category.isDigital) {
+      if (category.parentId) {
+        throw new BadRequestException(
+          'Une sous-catégorie suit la nature de sa catégorie parente : '
+          + 'modifiez la catégorie principale.'
+        );
+      }
+      const ids = await this.collectBranchIds(category.id);
+      const used = await this.categoryRepo.query(
+        `SELECT 1 FROM "product_categories" WHERE "categoryId" = ANY($1::uuid[]) LIMIT 1`,
+        [ids],
+      );
+      if (Array.isArray(used) && used.length > 0) {
+        throw new BadRequestException(
+          'Cette catégorie (ou une de ses sous-catégories) contient déjà des produits : '
+          + 'sa nature ne peut plus être changée.'
+        );
+      }
+      category.isDigital = dto.isDigital;
+      digitalChanged = true;
+    }
+
     await this.categoryRepo.save(category);
+
+    if (digitalChanged) {
+      await this.categoryRepo
+        .createQueryBuilder()
+        .update(Category)
+        .set({ isDigital: category.isDigital })
+        .where('id = ANY(:ids::uuid[])', { ids: (await this.collectBranchIds(category.id)).filter(i => i !== category.id) })
+        .execute();
+    }
 
     await this.logService.log({
       actorId:    adminId,
@@ -373,6 +420,21 @@ category.isActive  = dto.isActive ?? true;
     });
 
     return roots;
+  }
+
+  // Identifiants d'une catégorie ET de toutes ses sous-catégories (3 niveaux max).
+  private async collectBranchIds(rootId: string): Promise<string[]> {
+    const ids = [rootId];
+    let frontier = [rootId];
+    for (let depth = 0; depth < 3 && frontier.length > 0; depth++) {
+      const rows: Array<{ id: string }> = await this.categoryRepo.query(
+        `SELECT "id" FROM "categories" WHERE "parentId" = ANY($1::uuid[])`,
+        [frontier],
+      );
+      frontier = rows.map(r => r.id).filter(i => !ids.includes(i));
+      ids.push(...frontier);
+    }
+    return ids;
   }
 
   // Désactive récursivement toutes les sous-catégories

@@ -10,9 +10,12 @@ import { OrderDeliveryMode, OrderTransportMode } from '../entities/order.entity'
 
 export class CreateOrderDto {
 
-  @IsNotEmpty({ message: 'L\'adresse de livraison est obligatoire' })
+  // Obligatoire dès qu'il y a au moins un produit PHYSIQUE dans le panier
+  // (contrôlé dans OrdersService.createFromCart) ; inutile pour un panier
+  // composé uniquement de livres numériques.
+  @IsOptional()
   @IsUUID('4', { message: 'ID adresse invalide' })
-  addressId: string;
+  addressId?: string;
 
   // Le client choisit d'etre livre (defaut) ou de venir retirer en boutique
   @IsOptional()

@@ -611,6 +611,14 @@ export class VendorsService {
       }
     }
     const round2 = (n: number) => Math.round(n * 100) / 100;
+    // Gains de livres numériques encore RETENUS (retirables 24 h après le
+    // paiement) : affichés à part, non retirables pour l'instant.
+    const nowMs = Date.now();
+    const gainsEnRetenue = round2(
+      commissions
+        .filter((c) => c.availableAt && new Date(c.availableAt).getTime() > nowMs)
+        .reduce((sum, c) => sum + Number(c.commissionVendor), 0),
+    );
     const soldeInterne    = round2(pendingGross - reprisesTotal);
     const pendingAmount   = round2(Math.max(0, soldeInterne));
 
@@ -641,6 +649,8 @@ export class VendorsService {
       reprisesRemboursements: balance.reprisesRemboursements,
       dette:                  balance.dette,
       messageDette:           balance.messageDette,
+      // Part de « enAttente » qui n'est pas encore retirable (livres < 24 h).
+      gainsEnRetenue,
     };
   }
 
@@ -1251,6 +1261,8 @@ export class VendorsService {
         'vendor.status',
         'vendor.submittedAt',
         'vendor.submissionCount',
+        'vendor.commissionType',
+        'vendor.commissionValue',
         'user.id',
         'user.prenom',
         'user.name',
@@ -1508,6 +1520,55 @@ export class VendorsService {
     });
 
     return { message: 'Boutique bloquée avec succès' };
+  }
+
+  // ─────────────────────────────────────────────────────
+  // ADMIN — COMMISSION D'UN VENDEUR (pourcentage, montant fixe par commande, ou défaut)
+  // ─────────────────────────────────────────────────────
+  async setVendorCommission(
+    vendorId: string,
+    type:     'percent' | 'fixed' | 'default',
+    value:    number | undefined,
+    adminId:  string,
+    ip:       string,
+  ) {
+    const vendor = await this.vendorRepo.findOne({ where: { id: vendorId } });
+    if (!vendor) throw new NotFoundException('Profil vendeur introuvable');
+
+    let newType:  'percent' | 'fixed' | null = null;
+    let newValue: number | null = null;
+    if (type !== 'default') {
+      if (value === undefined || !Number.isFinite(value) || value < 0) {
+        throw new BadRequestException('Indiquez une valeur positive.');
+      }
+      if (type === 'percent' && value > 100) {
+        throw new BadRequestException('Un pourcentage ne peut pas dépasser 100.');
+      }
+      newType  = type;
+      newValue = Math.round(value * 100) / 100;
+    }
+
+    const old = { type: vendor.commissionType, value: vendor.commissionValue };
+    vendor.commissionType  = newType;
+    vendor.commissionValue = newValue;
+    await this.vendorRepo.save(vendor);
+
+    await this.logService.log({
+      actorId:    adminId,
+      actorType:  ActorType.ADMIN,
+      action:     LogAction.COMMISSION_RATE_CHANGED,
+      entityType: 'vendor_profile',
+      entityId:   vendorId,
+      oldValue:   old,
+      newValue:   { type: newType, value: newValue },
+      ipAddress:  ip,
+    });
+
+    return {
+      message: 'Commission mise à jour. Elle s\'applique aux prochaines commandes payées.',
+      commissionType:  newType,
+      commissionValue: newValue,
+    };
   }
 
   // ─────────────────────────────────────────────────────

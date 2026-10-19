@@ -144,6 +144,24 @@ export class CartService {
       throw new BadRequestException('Ce produit n\'est plus disponible');
     }
 
+    // 2 bis. Livre numérique : un seul exemplaire, et jamais un livre déjà
+    // acheté (il se télécharge depuis la Bibliothèque).
+    if (variant.product.isDigital) {
+      if (dto.quantity !== 1) {
+        throw new BadRequestException('Un livre numérique s\'achète en un seul exemplaire');
+      }
+      const owned = await this.variantRepo.manager.query(
+        `SELECT 1 FROM "library_items"
+          WHERE "userId" = $1 AND "productId" = $2 AND "revokedAt" IS NULL LIMIT 1`,
+        [userId, variant.product.id],
+      );
+      if (Array.isArray(owned) && owned.length > 0) {
+        throw new BadRequestException(
+          'Vous possédez déjà ce livre : retrouvez-le dans votre Bibliothèque'
+        );
+      }
+    }
+
     // 3. Vérifier le stock disponible
     if (variant.stockQuantity < dto.quantity) {
       throw new BadRequestException(
@@ -159,6 +177,9 @@ export class CartService {
     });
 
     if (existingItem) {
+      if (variant.product.isDigital) {
+        throw new BadRequestException('Ce livre est déjà dans votre panier');
+      }
       // Incrémenter la quantité
       const newQuantity = existingItem.quantity + dto.quantity;
 
@@ -216,6 +237,10 @@ export class CartService {
     });
 
     if (!item) throw new NotFoundException('Article introuvable dans le panier');
+
+    if (item.variant.product?.isDigital && dto.quantity !== 1) {
+      throw new BadRequestException('Un livre numérique s\'achète en un seul exemplaire');
+    }
 
     // Vérifier le stock pour la nouvelle quantité
     if (item.variant.stockQuantity < dto.quantity) {

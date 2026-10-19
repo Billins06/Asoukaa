@@ -58,6 +58,12 @@ export class Commission {
   @Column({ type: 'decimal', precision: 5, scale: 2 })
   taux: number;
 
+  // Mode de calcul utilisé pour CETTE commande : 'percent' (taux ci-dessus) ou
+  // 'fixed' (montant fixe par commande ; `taux` est alors le pourcentage
+  // équivalent, à titre d'information).
+  @Column({ type: 'varchar', length: 10, default: 'percent' })
+  typeCommission: string;
+
   // Montant prélevé par Asoukaa
   // Calculé : totalCommande (base produits) * taux / 100
   @Column({ type: 'decimal', precision: 12, scale: 2 })
@@ -78,6 +84,12 @@ export class Commission {
   // Rempli quand le reversement est effectué
   @Column({ nullable: true, type: 'timestamp' })
   paidAt: Date;
+
+  // Date à partir de laquelle le gain peut être retiré par le vendeur.
+  // null = disponible dès que la commande est « livrée » (produits physiques).
+  // Livre numérique : paiement + 24 h (le client a 24 h pour signaler un souci).
+  @Column({ nullable: true, type: 'timestamp' })
+  availableAt: Date | null;
 
   // Quel admin a validé le reversement
   @Column({ nullable: true })

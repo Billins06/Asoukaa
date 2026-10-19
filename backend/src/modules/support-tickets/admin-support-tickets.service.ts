@@ -205,10 +205,10 @@ export class AdminSupportTicketsService {
     ];
     const admins = await this.loadAdminNames(adminIds);
 
-    let order: { id: string; orderNumber: string; status: string } | null = null;
+    let order: { id: string; orderNumber: string; status: string; isDigital: boolean } | null = null;
     if (ticket.orderId) {
       const [o] = await this.dataSource.query(
-        `SELECT id, "orderNumber", status FROM orders WHERE id = $1`,
+        `SELECT id, "orderNumber", status, "isDigital" FROM orders WHERE id = $1`,
         [ticket.orderId],
       );
       order = o ?? null;

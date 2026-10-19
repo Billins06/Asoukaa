@@ -26,6 +26,8 @@ import { RequestRefundDto }   from './dto/request-refund.dto';
 import { RejectRefundDto }    from './dto/reject-refund.dto';
 import { MarkRefundProcessedDto } from './dto/mark-refund-processed.dto';
 import { MarkPaymentReviewedDto } from './dto/mark-payment-reviewed.dto';
+import { ClaimFreeOrdersDto }    from './dto/claim-free-orders.dto';
+import { AdminRefundDigitalDto } from './dto/admin-refund-digital.dto';
 import { PaymentStatus }      from './entities/payment.entity';
 import { RefundStatus }       from './entities/refund.entity';
 import { JwtAuthGuard }       from '../auth/guards/jwt-auth.guard';
@@ -114,6 +116,17 @@ export class PaymentsController {
   // ensuite via le flux Mobile Money normal (POST /payments/initiate,
   // ci-dessus). Voir PaymentsService (confirmCodPayment supprimée) et
   // OrdersService.createVendorInitiated.
+
+  // Livres numériques à 0 F : validation sans paiement Mobile Money.
+  @ApiOperation({ summary: 'Valider des livres numériques gratuits (0 F)' })
+  @Post('free')
+  @HttpCode(HttpStatus.CREATED)
+  claimFreeOrders(
+    @Req() req: Request,
+    @Body() dto: ClaimFreeOrdersDto,
+  ) {
+    return this.paymentsService.claimFreeOrders(getUser(req).id, dto.orderIds, getIp(req));
+  }
 
   @ApiOperation({ summary: 'Demander un remboursement' })
   @Post('refund')
@@ -215,6 +228,31 @@ export class PaymentsController {
       clampPage(page),
       clampLimit(limit, 20),
     );
+  }
+
+  // Livre numérique : aperçu (téléchargé ? délai de 24 h ?) puis remboursement
+  // décidé par un admin après un ticket d'assistance.
+  @ApiOperation({ summary: '[ADMIN] Aperçu du remboursement d\'un livre numérique' })
+  @UseGuards(RolesGuard)
+  @Roles(Role.ADMIN)
+  @Get('refunds/digital-preview/:orderId')
+  getDigitalRefundPreview(
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+    @Query('ticketId', new ParseUUIDPipe({ optional: true })) ticketId?: string,
+  ) {
+    return this.paymentsService.getDigitalRefundPreview(orderId, ticketId);
+  }
+
+  @ApiOperation({ summary: '[ADMIN] Rembourser un livre numérique (après ticket)' })
+  @UseGuards(RolesGuard)
+  @Roles(Role.ADMIN)
+  @Post('refunds/digital')
+  @HttpCode(HttpStatus.OK)
+  refundDigitalOrder(
+    @Req() req: Request,
+    @Body() dto: AdminRefundDigitalDto,
+  ) {
+    return this.paymentsService.adminRefundDigitalOrder(getUser(req).id, dto, getIp(req));
   }
 
   @ApiOperation({ summary: '[ADMIN] Approuver un remboursement' })

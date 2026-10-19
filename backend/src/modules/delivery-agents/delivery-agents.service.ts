@@ -290,7 +290,7 @@ export class DeliveryAgentsService {
 
     const earnings = await this.earningRepo.find({
       where: { agentId: agent.id },
-      relations: ['delivery', 'delivery.order'],
+      relations: ['delivery', 'delivery.order', 'independentDelivery'],
       order: { createdAt: 'DESC' },
     });
 
@@ -307,7 +307,7 @@ export class DeliveryAgentsService {
       totalRecu:       paidAmount,
       historique: earnings.slice(0, 30).map(e => ({
         id:          e.id,
-        orderNumber: e.delivery?.order?.orderNumber ?? '—',
+        orderNumber: e.delivery?.order?.orderNumber ?? (e.independentDeliveryId ? 'Course express' : '—'),
         montant:     Number(e.montantLivreur),
         statut:      e.status,
         date:        e.paidAt ?? e.createdAt,
@@ -333,6 +333,22 @@ export class DeliveryAgentsService {
       throw new ForbiddenException(
         'Votre profil doit être validé pour modifier votre disponibilité'
       );
+    }
+
+    // Pas de « disponible » tant qu'une course express est en cours pour lui.
+    if (dto.isAvailableNow) {
+      const busyExpress = await this.agentRepo.manager.query(
+        `SELECT 1 FROM independent_deliveries
+          WHERE "agentId" = $1
+            AND status IN ('contre-proposition','paiement en attente','accepté','en cours de livraison')
+          LIMIT 1`,
+        [agent.id],
+      );
+      if (busyExpress.length > 0) {
+        throw new BadRequestException(
+          'Vous avez une course express en cours : terminez-la avant de vous remettre disponible.',
+        );
+      }
     }
 
     agent.isAvailableNow = dto.isAvailableNow;

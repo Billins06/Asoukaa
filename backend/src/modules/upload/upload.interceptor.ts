@@ -69,6 +69,20 @@ export function UploadParseInterceptor(
         );
       }
 
+      // Livre numérique (PDF, jusqu'à 50 Mo) : vendeur APPROUVÉ seulement, et
+      // contrôlé AVANT de lire le fichier en mémoire.
+      if (this.uploadService.isEbookType(type)) {
+        if (mode === 'multiple') {
+          throw new BadRequestException("Un livre s'envoie un fichier à la fois");
+        }
+        const okVendor = await this.uploadService.isApprovedVendor((req as any).user?.id);
+        if (!okVendor) {
+          throw new ForbiddenException(
+            'Seul un vendeur approuvé peut envoyer un livre numérique',
+          );
+        }
+      }
+
       const userId = (req as any).user?.id;
       const quotaKey = `${admin ? 'admin' : 'user'}:${userId ?? req.ip}`;
       // Une tentative = 1 envoi décompté dès maintenant (même si le fichier

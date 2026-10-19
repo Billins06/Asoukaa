@@ -10,6 +10,7 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { v4 as uuidv4 }  from 'uuid';
 import { extname, join } from 'path';
 import { promises as fs } from 'fs';
+import { createHmac, timingSafeEqual } from 'crypto';
 
 export enum UploadType {
   DOCUMENT      = 'documents',
@@ -34,6 +35,10 @@ export enum UploadType {
   // Captures d'écran / photos jointes aux tickets de support (3 par
   // message max) — images uniquement, ouvert à tout compte connecté.
   TICKET        = 'tickets',
+  // Livres numériques (PDF) — stockage PRIVÉ, jamais d'URL publique : le client
+  // télécharge via un lien signé court délivré par le module library.
+  // Réservé aux vendeurs approuvés, PDF uniquement.
+  EBOOK         = 'ebooks',
 }
 
 const ALLOWED_MIME_TYPES = ['image/jpeg','image/jpg','image/png','image/webp','application/pdf'];
@@ -49,7 +54,10 @@ const VIDEO_UPLOAD_TYPES = new Set<UploadType>([UploadType.PRODUCT_VIDEO]);
 // via MAX_VIDEO_FILE_SIZE (en octets), sur le même modèle que
 // MAX_FILE_SIZE pour les images/documents.
 export const DEFAULT_MAX_VIDEO_FILE_SIZE = 50 * 1024 * 1024;
-const PRIVATE_TYPES = new Set<UploadType>([UploadType.DOCUMENT, UploadType.SELFIE]);
+// Livre numérique : PDF uniquement, 50 Mo par défaut (MAX_EBOOK_FILE_SIZE, en octets).
+export const DEFAULT_MAX_EBOOK_FILE_SIZE = 50 * 1024 * 1024;
+const EBOOK_UPLOAD_TYPES = new Set<UploadType>([UploadType.EBOOK]);
+const PRIVATE_TYPES = new Set<UploadType>([UploadType.DOCUMENT, UploadType.SELFIE, UploadType.EBOOK]);
 // Types publics alimentés uniquement depuis le back-office : seul un
 // compte ADMIN/SUPERADMIN peut y envoyer un fichier (contrôle dans
 // UploadController). Sans ça, n'importe quel client connecté pourrait
@@ -183,6 +191,9 @@ export class UploadService {
       const n = Number(raw);
       return Number.isFinite(n) && n > 0 ? Math.trunc(n) : fallback;
     };
+    if (EBOOK_UPLOAD_TYPES.has(type as UploadType)) {
+      return positive(this.configService.get('MAX_EBOOK_FILE_SIZE'), DEFAULT_MAX_EBOOK_FILE_SIZE);
+    }
     return VIDEO_UPLOAD_TYPES.has(type as UploadType)
       ? positive(this.configService.get('MAX_VIDEO_FILE_SIZE'), DEFAULT_MAX_VIDEO_FILE_SIZE)
       : positive(this.configService.get('MAX_FILE_SIZE'), 5242880);
@@ -289,12 +300,15 @@ export class UploadService {
     if (!file) throw new BadRequestException('Aucun fichier reçu');
 
     const isVideoType = VIDEO_UPLOAD_TYPES.has(type);
+    const isEbookType = EBOOK_UPLOAD_TYPES.has(type);
     const isImageOnlyType = IMAGE_ONLY_UPLOAD_TYPES.has(type);
     const allowedMimeTypes = isVideoType
       ? VIDEO_MIME_TYPES
+      : isEbookType ? ['application/pdf']
       : isImageOnlyType ? IMAGE_MIME_TYPES : ALLOWED_MIME_TYPES;
     const allowedExtensions = isVideoType
       ? VIDEO_EXTENSIONS
+      : isEbookType ? ['.pdf']
       : isImageOnlyType ? IMAGE_EXTENSIONS : ALLOWED_EXTENSIONS;
     // Même valeur que la limite Multer appliquée à la réception (deuxième
     // barrière, au cas où le service serait appelé ailleurs que par la route).
@@ -305,6 +319,8 @@ export class UploadService {
       throw new BadRequestException(
         isVideoType
           ? `Type de fichier non autorisé. Formats acceptés : MP4, MOV, WEBM`
+          : isEbookType
+            ? `Type de fichier non autorisé. Seul le format PDF est accepté pour un livre`
           : isImageOnlyType
             ? `Type de fichier non autorisé. Formats acceptés : JPG, PNG, WEBP`
             : `Type de fichier non autorisé. Formats acceptés : JPG, PNG, WEBP, PDF`
@@ -330,11 +346,13 @@ export class UploadService {
         );
       }
     } else {
-      const wantsPdf = ext === '.pdf' || file.mimetype === 'application/pdf';
+      const wantsPdf = isEbookType || ext === '.pdf' || file.mimetype === 'application/pdf';
       const contentOk = !!buf && (wantsPdf ? isPdf(buf) : matchesImageSignature(buf));
       if (!contentOk) {
         throw new BadRequestException(
-          isImageOnlyType
+          isEbookType
+            ? 'Le contenu du fichier n\'est pas un PDF valide'
+          : isImageOnlyType
             ? 'Le contenu du fichier n\'est pas une image valide (JPG, PNG, WEBP)'
             : 'Le contenu du fichier n\'est pas une image ou un PDF valide'
         );
@@ -352,9 +370,13 @@ export class UploadService {
     const storagePath = `${type}/${uniqueFilename}`;
     const { error: uploadError } = await this.supabase!.storage.from(bucket).upload(storagePath, file.buffer, { contentType: file.mimetype, upsert: false });
     if (uploadError) throw new InternalServerErrorException(`Échec de l'upload vers le stockage : ${uploadError.message}`);
-    const url = isPrivate
-      ? await this.createSignedUrl(bucket, storagePath)
-      : this.supabase!.storage.from(bucket).getPublicUrl(storagePath).data.publicUrl;
+    // Livre numérique : AUCUNE URL renvoyée (le fichier ne se télécharge que via
+    // la Bibliothèque, après achat) ; seul `path` est utile au formulaire.
+    const url = EBOOK_UPLOAD_TYPES.has(type)
+      ? ''
+      : isPrivate
+        ? await this.createSignedUrl(bucket, storagePath)
+        : this.supabase!.storage.from(bucket).getPublicUrl(storagePath).data.publicUrl;
     return { url, path: `${bucket}/${storagePath}`, filename: uniqueFilename, size: file.size };
   }
 
@@ -367,9 +389,11 @@ export class UploadService {
     } catch (err) {
       throw new InternalServerErrorException(`Échec de l'upload vers le stockage local : ${(err as Error).message}`);
     }
-    const url = isPrivate
-      ? `${this.appUrl}/api/v1/upload/file/${type}/${uniqueFilename}`
-      : `${this.appUrl}/uploads/${type}/${uniqueFilename}`;
+    const url = EBOOK_UPLOAD_TYPES.has(type)
+      ? ''
+      : isPrivate
+        ? `${this.appUrl}/api/v1/upload/file/${type}/${uniqueFilename}`
+        : `${this.appUrl}/uploads/${type}/${uniqueFilename}`;
     return { url, path: `local/${type}/${uniqueFilename}`, filename: uniqueFilename, size: file.size };
   }
 
@@ -411,7 +435,7 @@ export class UploadService {
   // Comparaison de fin de chaîne (RIGHT) et non LIKE : le nom contient « _ »
   // ou « % » possibles, qui sont des jokers LIKE.
   async isPrivateFileOwner(userId: string, type: string, filename: string): Promise<boolean> {
-    if (!userId || !this.isPrivateType(type)) return false;
+    if (!userId || !this.isPrivateType(type) || EBOOK_UPLOAD_TYPES.has(type as UploadType)) return false;
     if (!/^[A-Za-z0-9._-]{1,200}$/.test(filename) || filename.includes('..')) return false;
 
     const column = type === UploadType.DOCUMENT ? 'idDocumentUrl' : 'selfieUrl';
@@ -433,6 +457,99 @@ export class UploadService {
       [userId, needle],
     );
     return Array.isArray(rows) && rows.length > 0;
+  }
+
+  // ─── Livres numériques ───────────────────────────────────────────────
+
+  isEbookType(type: string): boolean {
+    return EBOOK_UPLOAD_TYPES.has(type as UploadType);
+  }
+
+  // Le compte est-il un vendeur APPROUVÉ ? (envoi d'un PDF de livre)
+  async isApprovedVendor(userId: string): Promise<boolean> {
+    if (!userId) return false;
+    const rows = await this.dataSource.query(
+      `SELECT 1 FROM "vendor_profiles" WHERE "userId" = $1 AND "status" = 'approuvé' LIMIT 1`,
+      [userId],
+    );
+    return Array.isArray(rows) && rows.length > 0;
+  }
+
+  // Un chemin de livre valide a EXACTEMENT la forme émise par notre upload :
+  // « <bucket privé>/ebooks/<uuid>.pdf » (ou « local/ebooks/<uuid>.pdf »).
+  // Empêche d'enregistrer un chemin arbitraire (autre bucket, autre dossier, « .. »).
+  isEbookPath(path: string): boolean {
+    if (typeof path !== 'string' || path.length > 500) return false;
+    const head = this.driver === 'local' ? 'local' : this.privateBucket.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`^${head}/ebooks/[0-9a-f-]{36}\\.pdf$`, 'i').test(path);
+  }
+
+  // Taille réelle (octets) d'un PDF déjà envoyé ; lève une erreur claire s'il
+  // n'existe pas. La taille vient du stockage, jamais du client.
+  async getEbookSize(path: string): Promise<number> {
+    if (!this.isEbookPath(path)) {
+      throw new BadRequestException('Fichier du livre invalide : renvoyez le PDF.');
+    }
+    const [, type, filename] = path.split('/');
+    const missing = new BadRequestException('Fichier PDF introuvable : renvoyez le PDF du livre.');
+    if (this.driver === 'local') {
+      try {
+        const st = await fs.stat(join(LOCAL_UPLOAD_ROOT, type, filename));
+        return st.size;
+      } catch {
+        throw missing;
+      }
+    }
+    const { data, error } = await this.supabase!.storage.from(this.privateBucket).list(type, { search: filename, limit: 5 });
+    if (error) throw new InternalServerErrorException(`Échec de lecture du stockage : ${error.message}`);
+    const item = (data ?? []).find((f) => f.name === filename);
+    const size = Number((item as any)?.metadata?.size);
+    if (!item || !Number.isFinite(size) || size <= 0) throw missing;
+    return size;
+  }
+
+  // Lien de téléchargement COURT (quelques minutes) vers un livre acheté.
+  //  - Supabase : URL signée par le stockage, avec nom de fichier de téléchargement ;
+  //  - local (dev) : jeton HMAC signé avec JWT_SECRET, lu par GET /library/file/:token.
+  async createEbookDownloadUrl(path: string, ttlSeconds: number, downloadName: string): Promise<string> {
+    if (!this.isEbookPath(path)) {
+      throw new BadRequestException('Fichier du livre invalide');
+    }
+    if (this.driver === 'local') {
+      const payload = Buffer.from(JSON.stringify({ p: path, e: Date.now() + ttlSeconds * 1000, n: downloadName })).toString('base64url');
+      return `${this.appUrl}/api/v1/library/file/${payload}.${this.signLocalToken(payload)}`;
+    }
+    const objectPath = path.split('/').slice(1).join('/');
+    const { data, error } = await this.supabase!.storage
+      .from(this.privateBucket)
+      .createSignedUrl(objectPath, ttlSeconds, { download: downloadName });
+    if (error || !data) throw new InternalServerErrorException(`Échec de génération du lien de téléchargement : ${error?.message ?? 'inconnue'}`);
+    return data.signedUrl;
+  }
+
+  private signLocalToken(payload: string): string {
+    const secret = this.configService.getOrThrow<string>('JWT_SECRET');
+    return createHmac('sha256', `ebook:${secret}`).update(payload).digest('base64url');
+  }
+
+  // Vérifie un jeton local (dev) : signature + expiration. Renvoie le chemin disque
+  // et le nom de téléchargement, ou null si invalide/expiré.
+  verifyLocalEbookToken(token: string): { filePath: string; downloadName: string } | null {
+    if (this.driver !== 'local' || typeof token !== 'string') return null;
+    const [payload, sig] = token.split('.');
+    if (!payload || !sig) return null;
+    const expected = this.signLocalToken(payload);
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+    try {
+      const { p, e, n } = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+      if (typeof p !== 'string' || typeof e !== 'number' || e < Date.now() || !this.isEbookPath(p)) return null;
+      const [, type, filename] = p.split('/');
+      return { filePath: join(LOCAL_UPLOAD_ROOT, type, filename), downloadName: typeof n === 'string' ? n : filename };
+    } catch {
+      return null;
+    }
   }
 
   async refreshSignedUrl(storedPath: string): Promise<string> {

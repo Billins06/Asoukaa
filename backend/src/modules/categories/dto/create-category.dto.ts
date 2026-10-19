@@ -39,4 +39,11 @@ export class CreateCategoryDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  // true = catégorie de livres numériques. Une sous-catégorie suit TOUJOURS
+  // la nature de son parent (la valeur envoyée est alors ignorée si identique,
+  // refusée si différente).
+  @IsOptional()
+  @IsBoolean()
+  isDigital?: boolean;
 }

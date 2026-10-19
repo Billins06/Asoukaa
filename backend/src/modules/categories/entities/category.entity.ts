@@ -61,6 +61,11 @@ export class Category {
   @Column({ default: true })
   isActive: boolean;
 
+  // true = catégorie réservée aux livres numériques (un livre ne peut être
+  // rangé que dans une catégorie numérique, et un produit physique jamais).
+  @Column({ default: false })
+  isDigital: boolean;
+
   @CreateDateColumn()
   createdAt: Date;
 

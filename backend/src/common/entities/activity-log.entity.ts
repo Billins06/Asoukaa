@@ -91,6 +91,8 @@ export enum LogAction {
   // ⚠️ Valeur aussi ajoutée à activity_logs_action_enum par la migration
   // 1791840000000-AddPaymentReviewed.
   PAYMENT_REVIEWED        = 'Paiement reçu examiné par un administrateur',
+  EBOOK_DOWNLOADED        = 'Livre numérique téléchargé',
+  EBOOK_REFUNDED          = 'Livre numérique remboursé',
 
   // Alerte sécurité : un vendeur demande un retrait vers un numéro Mobile Money
   // différent de son dernier retrait / de celui de sa fiche. ⚠️ Valeur aussi

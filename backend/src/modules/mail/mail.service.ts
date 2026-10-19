@@ -262,11 +262,12 @@ export class MailService {
     orderNumber: string,
     montant: number,
     orderId?: string,
+    isDigital = false,
   ): Promise<void> {
     await this.send(
       to,
       `✅ Paiement confirmé — Commande ${orderNumber}`,
-      paymentConfirmedTemplate({ prenom, orderNumber, montant, orderId }),
+      paymentConfirmedTemplate({ prenom, orderNumber, montant, orderId, isDigital }),
     );
   }
 

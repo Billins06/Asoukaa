@@ -20,6 +20,7 @@ import { Refund, RefundStatus }                   from './entities/refund.entity
 import { VendorEarningAdjustment }                from './entities/vendor-earning-adjustment.entity';
 import { Order, OrderStatus }                     from '../orders/entities/order.entity';
 import { ProductVariant }                         from '../products/entities/product-variant.entity';
+import { Product }                                from '../products/entities/product.entity';
 import { VendorProfile }                          from '../users/entities/vendor-profile.entity';
 import { User }                                   from '../users/entities/user.entity';
 
@@ -73,6 +74,13 @@ export type SettleOutcome =
 
 // Taux de commission par défaut si non configuré sur le vendeur
 const DEFAULT_COMMISSION_RATE = 10; // 10%
+
+// Livre numérique : le gain du vendeur n'est retirable que 24 h après le
+// paiement — c'est aussi le délai dont dispose le client pour signaler un
+// fichier défectueux (un remboursement ne tombe ainsi presque jamais sur un
+// gain déjà retiré).
+const DIGITAL_EARNINGS_HOLD_HOURS = 24;
+const DIGITAL_REFUND_WINDOW_HOURS = 24;
 
 // Délai maximum d'une interrogation de FeexPay (statut d'un paiement).
 const FEEXPAY_STATUS_TIMEOUT_MS = 10_000;
@@ -178,6 +186,10 @@ export class PaymentsService {
         'Cette commande ne peut plus être payée'
       );
     }
+
+    // 2 bis. Livres numériques : jamais deux fois le même livre, et un livre
+    // à 0 F ne passe pas par Mobile Money (POST /payments/free).
+    await this.assertDigitalOrdersPayable(userId, [order]);
 
     // 3. Vérifier qu'un paiement n'est pas déjà en cours
     let existingPayment = await this.paymentRepo.findOne({
@@ -386,6 +398,8 @@ export class PaymentsService {
         );
       }
     }
+
+    await this.assertDigitalOrdersPayable(userId, orders);
 
     let existingPayments = await this.paymentRepo.find({
       where: { orderId: In(orderIds) },
@@ -627,7 +641,7 @@ export class PaymentsService {
     return `229${digitsOnly}`;
   }
 
-  private async callFeexPayRequestToPay(params: {
+  async callFeexPayRequestToPay(params: {
     phoneNumber: string;
     amount:      number;
     reseau:      string;
@@ -818,7 +832,7 @@ export class PaymentsService {
   // un HTTP en erreur donnent { reachable: false } — "vérification
   // impossible", à ne jamais confondre avec un paiement échoué.
   // ─────────────────────────────────────────────────────
-  private async fetchFeexPayStatus(providerRef: string): Promise<FeexPayStatusResult> {
+  async fetchFeexPayStatus(providerRef: string): Promise<FeexPayStatusResult> {
     const baseUrl =
       this.configService.get<string>('FEEXPAY_BASE_URL')
       ?? 'https://api-v2.feexpay.me';
@@ -1301,6 +1315,9 @@ export class PaymentsService {
     // refait plus bas sous verrou, car l'admin peut annuler entre-temps.
     // (Dans le try : tout refus est journalisé par le catch ci-dessous.)
 
+    // Titres des livres numériques de la commande (remplis dans la transaction).
+    let bookTitles: string[] = [];
+
     // Transaction atomique : tout réussit ou tout échoue
     try {
       if (payment.order.status !== OrderStatus.PENDING) {
@@ -1365,7 +1382,8 @@ export class PaymentsService {
         // décrémentaient tous les deux → stock négatif et survente.
         // Le verrou sérialise les confirmations concurrentes ; la vérification
         // qui suit fait échouer (et annule) celle qui arrive trop tard.
-        for (const item of order.items) {
+        // Livre numérique : pas de stock à décrémenter (stock fictif jamais épuisé).
+        for (const item of (order.isDigital ? [] : order.items)) {
           const variant = await manager.findOne(ProductVariant, {
             where: { id: item.variantId },
             lock: { mode: 'pessimistic_write' },
@@ -1407,6 +1425,13 @@ export class PaymentsService {
         // 4. Calculer et créer la commission
         await this.createCommission(manager, order);
 
+        // 5. Livre numérique : la commande passe directement « livrée » et le
+        // livre entre dans la Bibliothèque du client, dans la MÊME transaction
+        // que le paiement (jamais l'un sans l'autre).
+        if (order.isDigital) {
+          bookTitles = await this.completeDigitalOrder(manager, order);
+        }
+
         return false;
       });
 
@@ -1431,13 +1456,16 @@ export class PaymentsService {
 
     // 5. Envoyer email de confirmation au client (best-effort)
     const user = payment.order.user;
+    // Livre à 0 F : aucun paiement à confirmer par e-mail.
+    const skipPaymentMail = payment.order.isDigital && Number(payment.montant) === 0;
     try {
-      await this.mailService.sendPaymentConfirmed(
+      if (!skipPaymentMail) await this.mailService.sendPaymentConfirmed(
         user.email,
         user.prenom,
         payment.order.orderNumber,
         Number(payment.montant),
         payment.order.id,
+        !!payment.order.isDigital,
       );
     } catch (error) {
       this.logger.error(`Échec envoi mail confirmation paiement → ${user.email}`, error?.message);
@@ -1454,17 +1482,42 @@ export class PaymentsService {
         select: ['id', 'userId'],
       });
       if (vendor?.userId) {
-        await this.notificationsService.notifyNewOrder(
-          vendor.userId,
-          payment.order.orderNumber,
-          payment.order.id,
-        );
+        if (payment.order.isDigital) {
+          // Livre : rien à « confirmer » ni à expédier — simple info de vente.
+          await this.notificationsService.notifyNewBookSale(
+            vendor.userId,
+            bookTitles.join(', '),
+            payment.order.orderNumber,
+            payment.order.id,
+          );
+        } else {
+          await this.notificationsService.notifyNewOrder(
+            vendor.userId,
+            payment.order.orderNumber,
+            payment.order.id,
+          );
+        }
       }
     } catch (error) {
       this.logger.error(
         `Échec notification nouvelle commande → vendeur de la commande ${payment.order.id}`,
         error?.message,
       );
+    }
+
+    // Livre numérique : prévenir le client que son livre est dans la Bibliothèque.
+    if (payment.order.isDigital) {
+      try {
+        await this.notificationsService.notifyBookAvailable(
+          payment.order.userId,
+          bookTitles.join(', '),
+          payment.order.id,
+        );
+      } catch (error) {
+        this.logger.error(
+          `Échec notification « livre disponible » (commande ${payment.order.id}) : ${(error as Error)?.message}`,
+        );
+      }
     }
 
     await this.logService.log({
@@ -1752,6 +1805,7 @@ export class PaymentsService {
   async getRefundQuote(userId: string, orderId: string) {
     const order = await this.orderRepo.findOne({ where: { id: orderId, userId } });
     if (!order) throw new NotFoundException('Commande introuvable');
+    this.assertNotDigitalForClientRefund(order);
 
     if (
       order.status !== OrderStatus.CANCELLED &&
@@ -1826,6 +1880,7 @@ export class PaymentsService {
     });
 
     if (!order) throw new NotFoundException('Commande introuvable');
+    this.assertNotDigitalForClientRefund(order);
 
     // 2. Vérifier que la commande est annulée ou livrée
     if (
@@ -2300,6 +2355,17 @@ export class PaymentsService {
         processedAt,
       });
 
+      // Livre numérique remboursé : l'accès à la Bibliothèque est retiré dans
+      // la MÊME transaction (jamais « remboursé mais encore possédé »).
+      if (refund.order.isDigital) {
+        await manager.query(
+          `UPDATE "library_items"
+              SET "revokedAt" = now(), "revokedReason" = $2
+            WHERE "orderId" = $1 AND "revokedAt" IS NULL`,
+          [refund.orderId, `Remboursé : ${refund.motif ?? ''}`.slice(0, 300)],
+        );
+      }
+
       // Idempotence : un remboursement ne reprend qu'UNE fois (index unique
       // sur refundId en plus de ce contrôle).
       const existing = await manager.findOne(VendorEarningAdjustment, {
@@ -2335,6 +2401,18 @@ export class PaymentsService {
         // Les gains ne comptent que les commandes LIVRÉES : une commande
         // annulée n'a jamais rien crédité au vendeur, donc rien à reprendre.
         note = 'Commande non livrée : aucun gain vendeur à reprendre.';
+      } else if (
+        commission.availableAt
+        && new Date(commission.availableAt).getTime() > processedAt.getTime()
+      ) {
+        // Livre numérique remboursé PENDANT la retenue de 24 h : le gain n'a
+        // jamais été retirable (il ne compte pas encore dans le solde), donc
+        // rien à reprendre — on annule simplement ce gain pour qu'il n'apparaisse
+        // pas plus tard.
+        montantVendeur = 0;
+        proportion     = 0;
+        note = 'Livre remboursé pendant la retenue de 24 h : gain du vendeur annulé avant tout versement.';
+        await manager.update(Commission, { id: commission.id }, { commissionVendor: 0 });
       } else {
         const cv = Number(commission.commissionVendor);
         montantVendeur = this.round2(Math.min(Math.max(montantRemb, 0), cv));
@@ -2572,14 +2650,36 @@ export class PaymentsService {
     // (produits après remise), pas le total payé par le client.
     // Tous les lecteurs (gains vendeur, solde de retrait, tableaux de bord)
     // lisent commissionVendor / montantCommission : ils restent cohérents.
-    const rate             = DEFAULT_COMMISSION_RATE;
-    const baseProduits     = Math.max(
+    // Commission propre au vendeur (fixée par l'admin) : pourcentage ou montant
+    // fixe par commande ; sans réglage, 10 % comme avant.
+    const fixedMode = vendor.commissionType === 'fixed' && vendor.commissionValue != null;
+    const customRate = !fixedMode && vendor.commissionType === 'percent' && vendor.commissionValue != null
+      ? Number(vendor.commissionValue)
+      : NaN;
+    // Garde-fou : une valeur incohérente retombe sur la commission par défaut.
+    const rate      = Number.isFinite(customRate) && customRate >= 0 && customRate <= 100
+      ? customRate
+      : DEFAULT_COMMISSION_RATE;
+    let baseProduits       = Math.max(
       0,
       Number(order.subtotal) - Number(order.rabais ?? 0),
     );
-    const commissionAmount = Number(
-      ((baseProduits * rate) / 100).toFixed(2)
-    );
+    // Livre numérique + code promo de la PLATEFORME (non créé par un vendeur) :
+    // la remise est financée par Asoukaa, le vendeur est calculé sur le prix
+    // plein. Un code créé par le vendeur lui-même reste à sa charge.
+    if (order.isDigital && order.couponId && Number(order.rabais ?? 0) > 0) {
+      const rows: Array<{ vendorId: string | null }> = await manager.query(
+        'SELECT "vendorId" FROM "coupons" WHERE "id" = $1',
+        [order.couponId],
+      );
+      if (rows[0] && !rows[0].vendorId) {
+        baseProduits = Math.max(0, Number(order.subtotal));
+      }
+    }
+    // Montant fixe : jamais plus que la base (le vendeur ne paie pas plus que ses ventes).
+    const commissionAmount = fixedMode
+      ? Number(Math.min(Number(vendor.commissionValue), baseProduits).toFixed(2))
+      : Number(((baseProduits * rate) / 100).toFixed(2));
     const vendorAmount     = Number(
       (baseProduits - commissionAmount).toFixed(2)
     );
@@ -2588,11 +2688,383 @@ export class PaymentsService {
     commission.orderId            = order.id;
     commission.vendorId           = order.vendorId;
     commission.totalCommande      = Number(baseProduits.toFixed(2));
-    commission.taux               = rate;
+    commission.typeCommission     = fixedMode ? 'fixed' : 'percent';
+    // Montant fixe : on garde le pourcentage équivalent pour les statistiques.
+    commission.taux               = fixedMode
+      ? (baseProduits > 0 ? Number(((commissionAmount / baseProduits) * 100).toFixed(2)) : 0)
+      : rate;
     commission.montantCommission  = commissionAmount;
     commission.commissionVendor   = vendorAmount;
     commission.status             = CommissionStatus.PENDING;
+    // Livre numérique : gain retirable 24 h après le paiement ; produit
+    // physique : null = disponible dès que la commande est « livrée ».
+    commission.availableAt        = order.isDigital
+      ? new Date(Date.now() + DIGITAL_EARNINGS_HOLD_HOURS * 60 * 60 * 1000)
+      : null;
 
     await manager.save(commission);
+  }
+
+  // ═════════════════════════════════════════════════════
+  // LIVRES NUMÉRIQUES
+  // ═════════════════════════════════════════════════════
+
+  // Refus d'un remboursement client « classique » pour un livre : il passe par
+  // un ticket d'assistance traité par un administrateur.
+  private assertNotDigitalForClientRefund(order: Order): void {
+    if (order.isDigital) {
+      throw new BadRequestException(
+        'Un livre numérique ne se rembourse pas depuis l\'application. Si le fichier est '
+        + 'défectueux ou ne s\'ouvre pas, ouvrez un ticket d\'assistance dans les '
+        + `${DIGITAL_REFUND_WINDOW_HOURS} heures qui suivent l'achat.`,
+      );
+    }
+  }
+
+  // Avant paiement : un livre déjà possédé ne se rachète pas, et un livre à
+  // 0 F ne passe pas par Mobile Money.
+  private async assertDigitalOrdersPayable(userId: string, orders: Order[]): Promise<void> {
+    // Le même livre ne doit pas figurer deux fois dans le lot payé.
+    const seen = new Set<string>();
+    for (const order of orders) {
+      if (!order.isDigital) continue;
+      for (const item of order.items ?? []) {
+        const pid = item.variant?.productId;
+        if (!pid) continue;
+        if (seen.has(pid)) {
+          throw new BadRequestException(
+            'Le même livre apparaît deux fois dans cette commande : retirez le doublon de votre panier.',
+          );
+        }
+        seen.add(pid);
+      }
+    }
+    for (const order of orders) {
+      if (!order.isDigital) continue;
+      if (Number(order.total) <= 0) {
+        throw new BadRequestException(
+          'Ce livre est gratuit : aucun paiement n\'est nécessaire (validation gratuite).',
+        );
+      }
+      const productIds = (order.items ?? [])
+        .map(i => i.variant?.productId)
+        .filter((id): id is string => !!id);
+      if (productIds.length === 0) continue;
+      const owned = await this.dataSource.query(
+        `SELECT 1 FROM "library_items"
+          WHERE "userId" = $1 AND "productId" = ANY($2::uuid[]) AND "revokedAt" IS NULL LIMIT 1`,
+        [userId, productIds],
+      );
+      if (Array.isArray(owned) && owned.length > 0) {
+        throw new BadRequestException(
+          'Vous possédez déjà un des livres de cette commande : retrouvez-le dans votre Bibliothèque.',
+        );
+      }
+      // Autre commande du même client pour ce livre, avec un paiement déjà
+      // réussi ou encore en cours (moins de 20 min) : on évite le double débit.
+      const others = await this.dataSource.query(
+        `SELECT 1
+           FROM "orders" o
+           JOIN "order_items" oi ON oi."orderId" = o."id"
+           JOIN "product_variants" v ON v."id" = oi."variantId"
+           JOIN "payments" pay ON pay."orderId" = o."id"
+          WHERE o."userId" = $1
+            AND o."id" <> ALL($3::uuid[])
+            AND v."productId" = ANY($2::uuid[])
+            AND o."status" <> 'annulé'
+            AND (pay."status" = 'success'
+                 OR (pay."status" = 'en attente' AND pay."createdAt" > now() - interval '20 minutes'))
+          LIMIT 1`,
+        [userId, productIds, orders.map(o => o.id)],
+      );
+      if (Array.isArray(others) && others.length > 0) {
+        throw new BadRequestException(
+          'Un paiement est déjà en cours pour ce livre. Terminez-le ou patientez 20 minutes avant de réessayer.',
+        );
+      }
+    }
+  }
+
+  // Finalise une commande de livres payée : statut « livré », entrée dans la
+  // Bibliothèque, compteur de ventes. Appelée DANS la transaction de
+  // confirmPayment. Renvoie les titres (pour les notifications).
+  private async completeDigitalOrder(manager: EntityManager, order: Order): Promise<string[]> {
+    await manager.update(Order, { id: order.id }, { status: OrderStatus.DELIVERED });
+    order.status = OrderStatus.DELIVERED;
+
+    const titles: string[] = [];
+    for (const item of order.items) {
+      const productId = item.variant?.productId;
+      if (!productId) continue;
+
+      const rows: Array<{ prod_name: string }> = await manager.query(
+        `SELECT "prod_name" FROM "products" WHERE "id" = $1`,
+        [productId],
+      );
+      if (rows[0]?.prod_name) titles.push(rows[0].prod_name);
+
+      // Un livre par client : si le client le possède déjà (ligne active), on ne
+      // touche à rien (WHERE ... IS NOT NULL) ; s'il avait été remboursé avant
+      // (ligne révoquée), l'accès est rouvert à zéro.
+      const inserted = await manager.query(
+        `INSERT INTO "library_items" ("userId", "productId", "orderId")
+         VALUES ($1, $2, $3)
+         ON CONFLICT ("userId", "productId") DO UPDATE SET
+           "orderId" = EXCLUDED."orderId",
+           "revokedAt" = NULL, "revokedReason" = NULL,
+           "downloadCount" = 0, "firstDownloadedAt" = NULL, "lastDownloadedAt" = NULL,
+           "createdAt" = now()
+         WHERE "library_items"."revokedAt" IS NOT NULL
+         RETURNING "id"`,
+        [order.userId, productId, order.id],
+      );
+      if (!Array.isArray(inserted) || inserted.length === 0) {
+        this.logger.warn(
+          `[LIVRE] Le client ${order.userId} possédait déjà le livre ${productId} `
+          + `(commande ${order.orderNumber}) : double achat à examiner.`,
+        );
+      }
+
+      await manager.increment(Product, { id: productId }, 'totalVentes', item.quantity);
+    }
+    return titles;
+  }
+
+  // POST /payments/free — valide des livres numériques à 0 F : même chemin que
+  // le paiement (commission à 0, Bibliothèque, notifications), sans FeexPay.
+  async claimFreeOrders(userId: string, orderIds: string[], ip: string) {
+    const orders = await this.orderRepo.find({
+      where:     { id: In(orderIds), userId },
+      relations: ['items', 'items.variant'],
+    });
+    if (orders.length !== new Set(orderIds).size) {
+      throw new NotFoundException('Une ou plusieurs commandes sont introuvables');
+    }
+    for (const order of orders) {
+      if (!order.isDigital || Number(order.total) !== 0) {
+        throw new BadRequestException(
+          `La commande ${order.orderNumber} n'est pas un livre gratuit.`,
+        );
+      }
+      // Déjà validée (réponse perdue lors d'un essai précédent) : on la saute
+      // plus bas sans erreur.
+      if (order.status !== OrderStatus.PENDING && order.status !== OrderStatus.DELIVERED) {
+        throw new BadRequestException(
+          `La commande ${order.orderNumber} ne peut plus être validée.`,
+        );
+      }
+    }
+    // Déjà possédé ? (les commandes à 0 F sont exclues du contrôle « payable »)
+    for (const order of orders) {
+      if (order.status === OrderStatus.DELIVERED) continue;
+      const productIds = order.items.map(i => i.variant?.productId).filter((id): id is string => !!id);
+      const owned = await this.dataSource.query(
+        `SELECT 1 FROM "library_items"
+          WHERE "userId" = $1 AND "productId" = ANY($2::uuid[]) AND "revokedAt" IS NULL LIMIT 1`,
+        [userId, productIds],
+      );
+      if (Array.isArray(owned) && owned.length > 0) {
+        throw new BadRequestException(
+          'Vous possédez déjà un de ces livres : retrouvez-le dans votre Bibliothèque.',
+        );
+      }
+    }
+
+    const done: string[] = [];
+    for (const order of orders) {
+      let payment = await this.paymentRepo.findOne({ where: { orderId: order.id } });
+      if (!payment) {
+        try {
+          payment          = this.paymentRepo.create();
+          payment.orderId  = order.id;
+          payment.method   = PaymentMethod.FREE;
+          payment.operator = null;
+          payment.status   = PaymentStatus.PENDING;
+          payment.montant  = 0;
+          await this.paymentRepo.save(payment);
+        } catch {
+          // Course (double clic) : la ligne existe déjà, on la relit.
+          payment = await this.paymentRepo.findOne({ where: { orderId: order.id } });
+        }
+      }
+      if (!payment) throw new BadRequestException('Validation impossible, réessayez.');
+      if (payment.status === PaymentStatus.SUCCESS) {
+        done.push(order.orderNumber);
+        continue;
+      }
+      if (order.status === OrderStatus.DELIVERED) continue;
+      // Un essai précédent a pu laisser ce paiement gratuit « échoué » : on le rouvre.
+      if (payment.status === PaymentStatus.FAILED && payment.method === PaymentMethod.FREE) {
+        await this.paymentRepo.update({ id: payment.id }, { status: PaymentStatus.PENDING });
+      }
+      await this.confirmPayment(payment.id, `FREE-${order.orderNumber}`, ip);
+      done.push(order.orderNumber);
+    }
+    return {
+      message: done.length > 1
+        ? 'Vos livres sont disponibles dans votre Bibliothèque'
+        : 'Votre livre est disponible dans votre Bibliothèque',
+      orders: done,
+    };
+  }
+
+  // ADMIN — aperçu avant de rembourser un livre depuis un ticket : le livre
+  // a-t-il été téléchargé ? le délai de 24 h est-il respecté ?
+  async getDigitalRefundPreview(orderId: string, ticketId?: string) {
+    const order = await this.orderRepo.findOne({ where: { id: orderId } });
+    if (!order) throw new NotFoundException('Commande introuvable');
+    if (!order.isDigital) {
+      throw new BadRequestException('Cette commande ne contient pas de livre numérique');
+    }
+    const payment = await this.paymentRepo.findOne({ where: { orderId } });
+    const existing = await this.refundRepo.findOne({ where: { orderId } });
+    const books: Array<{
+      productId: string; title: string; downloadCount: number;
+      firstDownloadedAt: Date | null; revokedAt: Date | null;
+    }> = await this.dataSource.query(
+      `SELECT l."productId", p."prod_name" AS "title", l."downloadCount",
+              l."firstDownloadedAt", l."revokedAt"
+         FROM "library_items" l
+         JOIN "products" p ON p."id" = l."productId"
+        WHERE l."orderId" = $1`,
+      [orderId],
+    );
+    const fixed   = await this.getFixedRefundAmount(orderId);
+    const montant = fixed === null ? null : this.round2(Math.min(fixed, Number(payment?.montant ?? 0)));
+    const { windowOpen, windowEndsAt, reason } = await this.digitalRefundWindow(order, payment, ticketId);
+    return {
+      orderId,
+      orderNumber:   order.orderNumber,
+      paymentStatus: payment?.status ?? null,
+      paidAt:        payment?.paidAt ?? null,
+      totalPaye:     payment ? Number(payment.montant) : 0,
+      montantRemboursable: montant ?? 0,
+      dejaRembourse: !!existing,
+      fenetreOuverte: windowOpen,
+      fenetreJusquau: windowEndsAt,
+      fenetreMotif:   reason,
+      livres:        books,
+      jamaisTelecharge: books.length > 0 && books.every(b => (b.downloadCount ?? 0) === 0),
+    };
+  }
+
+  // Le client a 24 h après l'achat pour SIGNALER le problème. Si un ticket (de
+  // CE client, pour CETTE commande) a été ouvert dans ce délai, l'admin peut
+  // traiter plus tard : le délai porte sur le signalement, pas sur le traitement.
+  private async digitalRefundWindow(
+    order: Order,
+    payment: Payment | null,
+    ticketId?: string,
+  ): Promise<{ windowOpen: boolean; windowEndsAt: Date | null; reason: string }> {
+    if (!payment?.paidAt) {
+      return { windowOpen: false, windowEndsAt: null, reason: 'Aucun paiement confirmé' };
+    }
+    const endsAt = new Date(
+      new Date(payment.paidAt).getTime() + DIGITAL_REFUND_WINDOW_HOURS * 60 * 60 * 1000,
+    );
+    if (Date.now() <= endsAt.getTime()) {
+      return { windowOpen: true, windowEndsAt: endsAt, reason: 'Dans les 24 h après l\'achat' };
+    }
+    if (ticketId) {
+      const rows: Array<{ createdAt: Date }> = await this.dataSource.query(
+        `SELECT "createdAt" FROM "support_tickets"
+          WHERE "id" = $1 AND "orderId" = $2 AND "userId" = $3 LIMIT 1`,
+        [ticketId, order.id, order.userId],
+      );
+      const paidMs = new Date(payment.paidAt).getTime();
+      const createdMs = rows[0] ? new Date(rows[0].createdAt).getTime() : 0;
+      if (rows[0] && createdMs >= paidMs && createdMs <= endsAt.getTime()) {
+        return { windowOpen: true, windowEndsAt: endsAt, reason: 'Ticket ouvert par le client dans les 24 h' };
+      }
+    }
+    return {
+      windowOpen: false,
+      windowEndsAt: endsAt,
+      reason: 'Délai de 24 h dépassé et aucun ticket ouvert dans ce délai',
+    };
+  }
+
+  // ADMIN — rembourse un livre numérique (fichier défectueux ou jamais
+  // téléchargé, constaté via un ticket). Réutilise le circuit habituel
+  // (montant = part du vendeur, commission plateforme non rendue), puis retire
+  // l'accès à la Bibliothèque.
+  async adminRefundDigitalOrder(
+    adminId: string,
+    dto: { orderId: string; motif: string; ticketId?: string },
+    ip: string,
+  ) {
+    const order = await this.orderRepo.findOne({ where: { id: dto.orderId } });
+    if (!order) throw new NotFoundException('Commande introuvable');
+    if (!order.isDigital) {
+      throw new BadRequestException('Cette commande ne contient pas de livre numérique');
+    }
+    const payment = await this.paymentRepo.findOne({ where: { orderId: dto.orderId } });
+    if (!payment || payment.status !== PaymentStatus.SUCCESS) {
+      throw new BadRequestException('Aucun paiement confirmé trouvé pour cette commande');
+    }
+    if (Number(payment.montant) <= 0) {
+      throw new BadRequestException('Livre gratuit : rien à rembourser.');
+    }
+    const win = await this.digitalRefundWindow(order, payment, dto.ticketId);
+    if (!win.windowOpen) {
+      throw new BadRequestException(win.reason + ' : remboursement impossible.');
+    }
+    // Jamais plus que ce que le client a réellement payé (cas d'un code promo
+    // financé par la plateforme : la part du vendeur peut dépasser le payé).
+    const fixed   = await this.getFixedRefundAmount(order.id);
+    const montant = fixed === null ? null : this.round2(Math.min(fixed, Number(payment.montant)));
+    if (montant === null || montant <= 0) {
+      throw new BadRequestException('Aucun montant remboursable pour cette commande.');
+    }
+
+    // Création SOUS verrou de la commande : deux clics (ou deux admins) en
+    // même temps ne créent pas deux remboursements.
+    const refund = await this.dataSource.transaction(async (manager) => {
+      await manager.query('SELECT "id" FROM "orders" WHERE "id" = $1 FOR UPDATE', [order.id]);
+      const dup = await manager.findOne(Refund, { where: { orderId: order.id } });
+      if (dup) {
+        throw new BadRequestException('Un remboursement existe déjà pour cette commande');
+      }
+      const created       = manager.create(Refund, {
+        paymentId:   payment.id,
+        orderId:     order.id,
+        montantRemb: montant,
+        motif:       `[Livre numérique] ${dto.motif}`,
+        status:      RefundStatus.PENDING,
+      });
+      return manager.save(created);
+    });
+
+    await this.logService.log({
+      actorId:    adminId,
+      actorType:  ActorType.ADMIN,
+      action:     LogAction.REFUND_REQUESTED,
+      entityType: 'refund',
+      entityId:   refund.id,
+      newValue:   { amount: montant, motif: dto.motif, ticketId: dto.ticketId ?? null, digital: true },
+      ipAddress:  ip,
+    });
+
+    // L'approbation retire aussi l'accès au livre (même transaction, voir
+    // approveRefundAndReclaimEarnings). Si elle échoue, on supprime la demande
+    // « en attente » pour que l'admin puisse réessayer proprement.
+    let result: unknown;
+    try {
+      result = await this.processRefund(refund.id, adminId, 'approve', ip);
+    } catch (err) {
+      await this.refundRepo.delete({ id: refund.id, status: RefundStatus.PENDING }).catch(() => undefined);
+      throw err;
+    }
+    await this.logService.log({
+      actorId:    adminId,
+      actorType:  ActorType.ADMIN,
+      action:     LogAction.EBOOK_REFUNDED,
+      entityType: 'order',
+      entityId:   order.id,
+      newValue:   { refundId: refund.id, ticketId: dto.ticketId ?? null },
+      ipAddress:  ip,
+    });
+
+    return { ...(result as object), refundId: refund.id, accesRetire: true };
   }
 }

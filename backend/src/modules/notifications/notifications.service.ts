@@ -506,6 +506,38 @@ export class NotificationsService {
     });
   }
 
+  // Livre numérique acheté : au CLIENT (accès à la Bibliothèque).
+  async notifyBookAvailable(userId: string, titles: string, orderId: string) {
+    return this.create({
+      userId,
+      title:         '📚 Votre livre est disponible',
+      body:          titles
+        ? `${titles} est dans votre Bibliothèque : vous pouvez le télécharger dès maintenant.`
+        : 'Votre livre est dans votre Bibliothèque : vous pouvez le télécharger dès maintenant.',
+      prefKey:       'orders',
+      type:          NotificationType.ORDER,
+      referenceId:   orderId,
+      referenceType: 'order',
+      sendEmail:     false,
+    });
+  }
+
+  // Livre numérique vendu : au VENDEUR (information seulement — rien à
+  // confirmer ni à expédier ; le gain est retirable 24 h après le paiement).
+  async notifyNewBookSale(vendorUserId: string, titles: string, orderNumber: string, orderId: string) {
+    return this.create({
+      userId:        vendorUserId,
+      title:         '📚 Livre vendu !',
+      body:          `Vente de ${titles || 'votre livre numérique'} (commande ${orderNumber}). `
+                   + 'Aucune action à faire : le client l\'a déjà reçu. Votre gain sera retirable dans 24 h.',
+      prefKey:       'newOrders',
+      type:          NotificationType.ORDER,
+      referenceId:   orderId,
+      referenceType: 'order',
+      sendEmail:     false,
+    });
+  }
+
   async notifyNewOrder(vendorUserId: string, orderNumber: string, orderId: string) {
     return this.create({
       userId:        vendorUserId,
@@ -596,16 +628,169 @@ export class NotificationsService {
   // Nouvelle course express (livraison indépendante, Type B) ouverte aux
   // livreurs disponibles. Pas d'email : plusieurs livreurs sont notifiés
   // pour une seule course, un email à chacun serait du spam.
-  async notifyNewIndependentDelivery(agentUserId: string, deliveryId: string) {
+  async notifyNewIndependentDelivery(agentUserId: string, deliveryId: string, details?: string) {
     return this.create({
       userId:        agentUserId,
       title:         '⚡ Nouvelle course express',
-      body:          'Une nouvelle demande de livraison est disponible.',
+      body:          details
+        ? `Nouvelle demande de livraison : ${details}`
+        : 'Une nouvelle demande de livraison est disponible.',
       prefKey:       'newDeliveries',
       type:          NotificationType.DELIVERY,
       referenceId:   deliveryId,
       referenceType: 'independent_delivery',
       sendEmail:     false,
+    });
+  }
+
+  // ─── Course express négociée ───────────────────────────
+  // Côté CLIENT : referenceType « independent_delivery_client » (ouvre
+  // « Mes courses express »). Côté LIVREUR : « independent_delivery ».
+
+  // Un livreur accepte le prix (kind='accepted') ou propose un autre prix (kind='counter').
+  async notifyIndependentOffer(
+    clientUserId: string,
+    deliveryId:   string,
+    kind:         'accepted' | 'counter',
+    amount:       number,
+  ) {
+    const montant = `${Math.round(amount).toLocaleString('fr-FR')} F`;
+    return this.create({
+      userId:        clientUserId,
+      title:         kind === 'accepted'
+        ? '✅ Un livreur accepte votre course'
+        : '💬 Un livreur propose un autre prix',
+      body:          kind === 'accepted'
+        ? `Prix convenu : ${montant}. Payez en Mobile Money pour confirmer (15 min).`
+        : `Contre-proposition : ${montant}. Acceptez ou refusez (15 min).`,
+      type:          NotificationType.DELIVERY,
+      referenceId:   deliveryId,
+      referenceType: 'independent_delivery_client',
+      sendEmail:     false,
+    });
+  }
+
+  // Le client répond à la contre-proposition.
+  async notifyIndependentCounterAnswer(agentUserId: string, deliveryId: string, accepted: boolean) {
+    return this.create({
+      userId:        agentUserId,
+      title:         accepted ? '✅ Contre-proposition acceptée' : '❌ Contre-proposition refusée',
+      body:          accepted
+        ? 'Le client a accepté votre prix. Il doit maintenant payer la course.'
+        : 'Le client a refusé votre prix. La demande est de nouveau ouverte aux autres livreurs.',
+      type:          NotificationType.DELIVERY,
+      referenceId:   deliveryId,
+      referenceType: 'independent_delivery',
+      sendEmail:     false,
+    });
+  }
+
+  // Course payée : le livreur peut partir.
+  async notifyIndependentPaid(agentUserId: string, deliveryId: string, amount: number) {
+    const montant = `${Math.round(amount).toLocaleString('fr-FR')} F`;
+    return this.create({
+      userId:        agentUserId,
+      title:         '💰 Course payée',
+      body:          `Le client a payé ${montant}. Vous pouvez aller chercher le colis.`,
+      type:          NotificationType.DELIVERY,
+      referenceId:   deliveryId,
+      referenceType: 'independent_delivery',
+      sendEmail:     false,
+    });
+  }
+
+  // Le client annule (avant paiement) : le livreur réservé est prévenu.
+  async notifyIndependentCancelledForAgent(agentUserId: string, deliveryId: string) {
+    return this.create({
+      userId:        agentUserId,
+      title:         'Course annulée',
+      body:          'Le client a annulé cette demande de course express.',
+      type:          NotificationType.DELIVERY,
+      referenceId:   deliveryId,
+      referenceType: 'independent_delivery',
+      sendEmail:     false,
+    });
+  }
+
+  // Course express annulée par l'administration : au LIVREUR.
+  async notifyIndependentAdminCancelledForAgent(agentUserId: string, deliveryId: string, reason?: string) {
+    return this.create({
+      userId:        agentUserId,
+      title:         'Course annulée',
+      body:          `Cette course express a été annulée par l'administration${reason ? ` : ${reason}` : '.'}`,
+      type:          NotificationType.DELIVERY,
+      referenceId:   deliveryId,
+      referenceType: 'independent_delivery',
+      sendEmail:     false,
+    });
+  }
+
+  // Course express annulée par l'administration : au CLIENT.
+  async notifyIndependentAdminCancelledForClient(
+    clientUserId: string, deliveryId: string, refundToCome: boolean, reason?: string,
+  ) {
+    return this.create({
+      userId:        clientUserId,
+      title:         'Course express annulée',
+      body:          `Votre course express a été annulée par l'administration${reason ? ` : ${reason}` : '.'}`
+        + (refundToCome ? ' Vous serez remboursé sous peu.' : ''),
+      type:          NotificationType.DELIVERY,
+      referenceId:   deliveryId,
+      referenceType: 'independent_delivery_client',
+      sendEmail:     true,
+    });
+  }
+
+  // Remboursement d'une course express effectué : au CLIENT.
+  async notifyIndependentRefunded(clientUserId: string, deliveryId: string, amount: number) {
+    return this.create({
+      userId:        clientUserId,
+      title:         '💸 Course remboursée',
+      body:          `Votre course express a été remboursée (${Math.round(amount).toLocaleString('fr-FR')} F).`,
+      type:          NotificationType.DELIVERY,
+      referenceId:   deliveryId,
+      referenceType: 'independent_delivery_client',
+      sendEmail:     true,
+    });
+  }
+
+  // Suivi pour le client : colis récupéré / livré.
+  async notifyIndependentStatusForClient(
+    clientUserId: string,
+    deliveryId:   string,
+    status:       'in_transit' | 'delivered',
+  ) {
+    return this.create({
+      userId:        clientUserId,
+      title:         status === 'delivered' ? '📦 Colis livré' : '🚚 Colis en route',
+      body:          status === 'delivered'
+        ? 'Votre course express est terminée.'
+        : 'Le livreur a récupéré votre colis.',
+      type:          NotificationType.DELIVERY,
+      referenceId:   deliveryId,
+      referenceType: 'independent_delivery_client',
+      sendEmail:     false,
+    });
+  }
+
+  // Produit désactivé / réactivé par l'administration : au VENDEUR.
+  async notifyProductAdminBlock(
+    vendorUserId: string,
+    productName:  string,
+    productId:    string,
+    blocked:      boolean,
+    reason?:      string | null,
+  ) {
+    return this.create({
+      userId:        vendorUserId,
+      title:         blocked ? '⚠️ Produit désactivé' : '✅ Produit réactivé',
+      body:          blocked
+        ? `« ${productName} » a été désactivé par l'administration${reason ? ` : ${reason}` : ''}. Contactez le support pour plus d'informations.`
+        : `« ${productName} » a été réactivé par l'administration.`,
+      type:          NotificationType.VALIDATION,
+      referenceId:   productId,
+      referenceType: 'product',
+      sendEmail:     true,
     });
   }
 

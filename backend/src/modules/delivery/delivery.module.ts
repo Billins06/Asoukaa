@@ -3,6 +3,9 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { DeliveryController }       from './delivery.controller';
 import { DeliveryService }          from './delivery.service';
+import { IndependentDeliveriesService } from './independent-deliveries.service';
+import { AdminIndependentDeliveriesService } from './admin-independent-deliveries.service';
+import { AdminIndependentDeliveriesController } from './admin-independent-deliveries.controller';
 import { Delivery }                 from './entities/delivery.entity';
 import { IndependentDelivery }      from './entities/independent-delivery.entity';
 import { DeliveryProof }            from './entities/delivery-proof.entity';
@@ -17,6 +20,7 @@ import { CommonModule }             from '../../common/common.module';
 import { UploadModule }             from '../upload/upload.module';
 import { DeliveryEarningsModule }   from '../delivery-earnings/delivery-earnings.module';
 import { NotificationsModule }      from '../notifications/notifications.module';
+import { PaymentsModule }           from '../payments/payments.module';
 
 @Module({
   imports: [
@@ -36,9 +40,10 @@ import { NotificationsModule }      from '../notifications/notifications.module'
     UploadModule,
     DeliveryEarningsModule,
     NotificationsModule,
+    PaymentsModule,
   ],
-  controllers: [DeliveryController],
-  providers:   [DeliveryService],
+  controllers: [DeliveryController, AdminIndependentDeliveriesController],
+  providers:   [DeliveryService, IndependentDeliveriesService, AdminIndependentDeliveriesService],
   exports:     [DeliveryService, TypeOrmModule],
 })
 export class DeliveryModule {}

@@ -194,6 +194,8 @@ export class VendorWithdrawalsService {
         .select('COALESCE(SUM(c.commissionVendor), 0)', 'sum')
         .where('c.vendorId = :vendorId', { vendorId: vendor.id })
         .andWhere('o.status = :status', { status: OrderStatus.DELIVERED })
+        // Livres numériques : gain retirable seulement 24 h après le paiement.
+        .andWhere('(c.availableAt IS NULL OR c.availableAt <= :now)', { now: new Date() })
         .getRawOne<{ sum: string }>(),
       // Montants deja reverses par l'ancien circuit « Commissions » de
       // l'admin (CommissionStatus.PAID = « montant reversé au vendeur »).
@@ -207,6 +209,7 @@ export class VendorWithdrawalsService {
         .where('c.vendorId = :vendorId', { vendorId: vendor.id })
         .andWhere('o.status = :status', { status: OrderStatus.DELIVERED })
         .andWhere('c.status = :cstatus', { cstatus: CommissionStatus.PAID })
+        .andWhere('(c.availableAt IS NULL OR c.availableAt <= :now)', { now: new Date() })
         .getRawOne<{ sum: string }>(),
       withdrawalRepo
         .createQueryBuilder('w')

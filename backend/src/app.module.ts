@@ -29,7 +29,9 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { ActivityLogsModule } from './modules/activity-logs/activity-logs.module';
 import { VendorWithdrawalsModule } from './modules/vendor-withdrawals/vendor-withdrawals.module';
 import { VitrineModule } from './modules/vitrine/vitrine.module';
+import { BannersModule } from './modules/banners/banners.module';
 import { SupportTicketsModule } from './modules/support-tickets/support-tickets.module';
+import { LibraryModule } from './modules/library/library.module';
 import { CommonModule } from './common/common.module';
 import { PresenceModule } from './modules/presence/presence.module';
 import { validateEnvironment } from './config/env.validation';
@@ -125,7 +127,9 @@ import { validateEnvironment } from './config/env.validation';
     ActivityLogsModule,
     VendorWithdrawalsModule,
     VitrineModule,
+    BannersModule,
     SupportTicketsModule,
+    LibraryModule,
     PresenceModule,
   ],
   providers: [

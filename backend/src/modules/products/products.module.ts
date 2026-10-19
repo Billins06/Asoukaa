@@ -3,6 +3,9 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { ProductsController } from './products.controller';
 import { ProductsService }    from './products.service';
+import { AdminProductsController } from './admin-products.controller';
+import { AdminProductsService }    from './admin-products.service';
+import { NotificationsModule }     from '../notifications/notifications.module';
 import { Product }            from './entities/product.entity';
 import { ProductVariant }     from './entities/product-variant.entity';
 import { ProductImage }       from './entities/product-image.entity';
@@ -28,9 +31,11 @@ import { UploadModule }       from '../upload/upload.module';
     // UploadService : contrôle « URL issue de notre stockage » des images de
     // produit / de variante (assertIsOwnUploadUrl).
     UploadModule,
+    // Notification du vendeur quand l'admin désactive / réactive un produit.
+    NotificationsModule,
   ],
-  controllers: [ProductsController],
-  providers:   [ProductsService],
+  controllers: [ProductsController, AdminProductsController],
+  providers:   [ProductsService, AdminProductsService],
   exports:     [ProductsService, TypeOrmModule],
 })
 export class ProductsModule {}

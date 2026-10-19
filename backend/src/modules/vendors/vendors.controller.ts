@@ -29,6 +29,7 @@ import { UpdateShopDto }             from './dto/update-shop.dto';
 import { UpdatePaymentSettingsDto }  from './dto/update-payment-settings.dto';
 import { UpdateVendorSettingsDto }    from './dto/update-vendor-settings.dto';
 import { ReviewVendorDto }           from './dto/review-vendor.dto';
+import { SetVendorCommissionDto }    from './dto/set-vendor-commission.dto';
 import { VendorStatus }              from '../users/entities/vendor-profile.entity';
 import { JwtAuthGuard }              from '../auth/guards/jwt-auth.guard';
 import { RolesGuard }                from '../auth/guards/roles.guard';
@@ -267,6 +268,21 @@ export class VendorsController {
       getUser(req).id,
       dto,
       getIp(req),
+    );
+  }
+
+  @ApiOperation({ summary: '[ADMIN] Fixer la commission d\'un vendeur (pourcentage, montant fixe par commande, ou défaut)' })
+  @UseGuards(RolesGuard)
+  @Roles(Role.ADMIN)
+  @Patch(':id/commission')
+  @HttpCode(HttpStatus.OK)
+  setCommission(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SetVendorCommissionDto,
+    @Req() req: Request,
+  ) {
+    return this.vendorsService.setVendorCommission(
+      id, dto.type, dto.value, getUser(req).id, getIp(req),
     );
   }
 

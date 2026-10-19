@@ -95,14 +95,21 @@ export class Order {
   // Adresse de livraison choisie par le client
   // Reste obligatoire meme en mode retrait (on la garde comme
   // adresse de facturation / contact, pas de changement de schema)
-  @Column()
-  addressId: string;
+  // Facultative UNIQUEMENT pour une commande 100 % livres numériques (rien à livrer).
+  @Column({ type: 'uuid', nullable: true })
+  addressId: string | null;
 
   @ManyToOne(() => Address, {
     onDelete: 'RESTRICT',
+    nullable: true,
   })
   @JoinColumn({ name: 'addressId' })
-  address: Address;
+  address: Address | null;
+
+  // true = commande de livres numériques (pas de livraison, passe directement
+  // à « livré » dès le paiement confirmé).
+  @Column({ default: false })
+  isDigital: boolean;
 
   // Le client se fait livrer, ou vient retirer en boutique ?
   @Column({

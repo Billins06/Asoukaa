@@ -33,7 +33,7 @@ export class DeliveryEarningsService {
 
     const options: FindManyOptions<DeliveryEarning> = {
       where,
-      relations: ['delivery', 'agent', 'agent.user', 'processedBy'],
+      relations: ['delivery', 'independentDelivery', 'agent', 'agent.user', 'processedBy'],
       order: { createdAt: 'DESC' },
       skip: (page - 1) * limit,
       take: limit,
@@ -55,7 +55,7 @@ export class DeliveryEarningsService {
   private async findOrFail(id: string) {
     const earning = await this.earningRepo.findOne({
       where: { id },
-      relations: ['delivery', 'agent', 'agent.user', 'processedBy'],
+      relations: ['delivery', 'independentDelivery', 'agent', 'agent.user', 'processedBy'],
     });
 
     if (!earning) {

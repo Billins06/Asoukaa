@@ -10,6 +10,7 @@ import {
   Index,
 } from 'typeorm';
 import { Delivery } from './delivery.entity';
+import { IndependentDelivery } from './independent-delivery.entity';
 import { DeliveryAgentProfile } from '../../users/entities/delivery-agent-profile.entity';
 import { AdminAccount } from '../../auth/entities/admin-account.entity';
 
@@ -29,15 +30,29 @@ export class DeliveryEarning {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  // Une livraison = un seul gain (calculé une fois, à la remise au client)
-  @Column({ unique: true })
-  deliveryId: string;
+  // Une livraison = un seul gain (calculé une fois, à la remise au client).
+  // Nul pour le gain d'une course express (voir independentDeliveryId).
+  @Column({ type: 'uuid', nullable: true, unique: true })
+  deliveryId: string | null;
 
   @OneToOne(() => Delivery, {
+    nullable: true,
     onDelete: 'RESTRICT',
   })
   @JoinColumn({ name: 'deliveryId' })
-  delivery: Delivery;
+  delivery: Delivery | null;
+
+  // Gain d'une course express (migration 1791880000000) : un seul par course.
+  // Exactement UNE des deux colonnes (deliveryId / independentDeliveryId) est renseignée.
+  @Column({ type: 'uuid', nullable: true, unique: true })
+  independentDeliveryId: string | null;
+
+  @OneToOne(() => IndependentDelivery, {
+    nullable: true,
+    onDelete: 'RESTRICT',
+  })
+  @JoinColumn({ name: 'independentDeliveryId' })
+  independentDelivery: IndependentDelivery | null;
 
   @Column()
   agentId: string;

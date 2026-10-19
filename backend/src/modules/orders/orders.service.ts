@@ -153,19 +153,30 @@ export class OrdersService implements OnModuleInit {
       throw new BadRequestException('Votre panier est vide');
     }
 
-    // 2. Vérifier l'adresse
-    const address = await this.addressRepo.findOne({
-      where: { id: dto.addressId, userId },
-    });
-
-    if (!address) {
-      throw new NotFoundException('Adresse introuvable');
+    // 2. Vérifier l'adresse — seulement s'il y a un produit PHYSIQUE à livrer.
+    // Un panier 100 % livres numériques n'a besoin ni d'adresse, ni de
+    // livraison, ni de frais.
+    const hasPhysical = cart.items.some(i => !i.variant?.product?.isDigital);
+    let address: Address | null = null;
+    if (hasPhysical) {
+      if (!dto.addressId) {
+        throw new BadRequestException('L\'adresse de livraison est obligatoire');
+      }
+      address = await this.addressRepo.findOne({
+        where: { id: dto.addressId, userId },
+      });
+      if (!address) {
+        throw new NotFoundException('Adresse introuvable');
+      }
     }
 
     // 2bis. Mode de livraison choisi par le client : livraison a domicile
     // (defaut) ou retrait en boutique. En retrait, pas de frais de
-    // livraison et pas de fiche Delivery a creer.
-    const deliveryMode = dto.deliveryMode ?? OrderDeliveryMode.LIVRAISON;
+    // livraison et pas de fiche Delivery a creer. Ne concerne que les
+    // produits physiques : un livre numérique n'a jamais de livraison.
+    const deliveryMode = hasPhysical
+      ? (dto.deliveryMode ?? OrderDeliveryMode.LIVRAISON)
+      : OrderDeliveryMode.RETRAIT;
 
     // Frais de livraison de la commune de destination (table
     // delivery_zones, paramétrée par l'admin). Même frais appliqué à chaque
@@ -175,14 +186,16 @@ export class OrdersService implements OnModuleInit {
     // non desservie est refusée (400), et le mode de transport bus/taxi est
     // contrôlé contre la commune (obligatoire dans le Nord, interdit ailleurs).
     const livraison =
-      deliveryMode === OrderDeliveryMode.RETRAIT
+      deliveryMode === OrderDeliveryMode.RETRAIT || !address
         ? { frais: 0, transportMode: null as string | null, commune: null as string | null }
         : await this.resolveLivraison(address.ville, dto.transportMode);
     const fraisLivraisonCommune = livraison.frais;
 
     // 3. Vérifier le stock de chaque article
-    // et regrouper les articles par boutique
-    const vendorGroups = new Map<string, CartItem[]>();
+    // et regrouper les articles par boutique ET par nature : une commande
+    // « livres numériques » est séparée de la commande « produits physiques »
+    // de la même boutique (pas de livraison, payée puis livrée aussitôt).
+    const vendorGroups = new Map<string, { vendorId: string; isDigital: boolean; items: CartItem[] }>();
 
     for (const item of cart.items) {
       const variant = item.variant;
@@ -216,6 +229,26 @@ export class OrdersService implements OnModuleInit {
       // ici, au moment de créer la commande.
       this.assertVariantOrderable(variant);
 
+      // Livre numérique : un seul exemplaire, et jamais deux fois le même livre.
+      if (variant.product.isDigital) {
+        if (item.quantity !== 1) {
+          throw new BadRequestException(
+            `"${variant.product.prod_name}" est un livre numérique : un seul exemplaire par achat.`
+          );
+        }
+        const owned = await this.dataSource.query(
+          `SELECT 1 FROM "library_items"
+            WHERE "userId" = $1 AND "productId" = $2 AND "revokedAt" IS NULL LIMIT 1`,
+          [userId, variant.product.id],
+        );
+        if (Array.isArray(owned) && owned.length > 0) {
+          throw new BadRequestException(
+            `Vous possédez déjà "${variant.product.prod_name}" : retrouvez-le dans votre Bibliothèque. `
+            + `Veuillez le retirer de votre panier.`
+          );
+        }
+      }
+
       // Vérifier stock disponible
       if (variant.stockQuantity < item.quantity) {
         if (variant.stockQuantity === 0) {
@@ -246,13 +279,21 @@ export class OrdersService implements OnModuleInit {
         item.quantity,
       );
 
-      // Regrouper par vendeur
-      const vendorId = variant.product.vendorId;
-      if (!vendorGroups.has(vendorId)) {
-        vendorGroups.set(vendorId, []);
+      // Regrouper par vendeur et par nature (livre / physique)
+      const vendorId  = variant.product.vendorId;
+      const isDigital = variant.product.isDigital === true;
+      const groupKey  = `${vendorId}|${isDigital ? 'D' : 'P'}`;
+      if (!vendorGroups.has(groupKey)) {
+        vendorGroups.set(groupKey, { vendorId, isDigital, items: [] });
       }
-      vendorGroups.get(vendorId)!.push(item);
+      vendorGroups.get(groupKey)!.items.push(item);
     }
+
+    // Les groupes physiques d'abord : un coupon (remise) va de préférence sur
+    // la commande de produits physiques.
+    const orderedGroups = [...vendorGroups.values()].sort(
+      (a, b) => Number(a.isDigital) - Number(b.isDigital),
+    );
 
     // 4. Vérifier le coupon si fourni
     let coupon: Coupon | null = null;
@@ -264,7 +305,7 @@ export class OrdersService implements OnModuleInit {
       // (avant, la remise était prise sur la première boutique du panier,
       // même si elle n'avait rien offert).
       const scopeVendorId = coupon.vendorId ?? coupon.createdByVendorId ?? null;
-      if (scopeVendorId && !vendorGroups.has(scopeVendorId)) {
+      if (scopeVendorId && !orderedGroups.some(g => g.vendorId === scopeVendorId)) {
         throw new BadRequestException(
           'Ce code promo ne s\'applique pas aux articles de votre panier.'
         );
@@ -286,7 +327,7 @@ export class OrdersService implements OnModuleInit {
         // Commande qui porte la remise du coupon (et donc son « usage »).
         let discountedOrderId: string | null = null;
 
-        for (const [vendorId, items] of vendorGroups) {
+        for (const { vendorId, isDigital, items } of orderedGroups) {
           // Calculer le sous-total de cette boutique
           const subtotal = items.reduce(
             (sum, item) =>
@@ -302,9 +343,12 @@ export class OrdersService implements OnModuleInit {
           let discount = 0;
           let couponApplied = false;
           if (coupon) {
-            const eligible = couponScopeVendorId
-              ? vendorId === couponScopeVendorId
-              : orders.length === 0;
+            // Une seule commande porte la remise (la première éligible dont le
+            // sous-total est > 0) : sinon un coupon à montant fixe serait
+            // compté deux fois pour une boutique qui a une commande physique
+            // ET une commande de livres.
+            const eligible = discountedOrderId === null && subtotal > 0
+              && (couponScopeVendorId ? vendorId === couponScopeVendorId : true);
             if (eligible) {
               discount = this.calculateDiscount(coupon, subtotal);
               couponApplied = true;
@@ -321,17 +365,20 @@ export class OrdersService implements OnModuleInit {
           order.orderNumber         = orderNumber;
           order.userId              = userId;
           order.vendorId            = vendorId;
-          order.addressId           = dto.addressId;
+          order.addressId           = isDigital ? null : (dto.addressId ?? null);
+          order.isDigital           = isDigital;
           order.couponId            = couponApplied ? coupon!.id : null;
           order.status              = OrderStatus.PENDING;
           order.instructions        = dto.instructions ?? null;
           order.subtotal            = Number(subtotal.toFixed(2));
-          order.fraisLivraison      = fraisLivraisonCommune;
+          // Livre numérique : aucun frais de livraison, jamais de transport.
+          const fraisCommande       = isDigital ? 0 : fraisLivraisonCommune;
+          order.fraisLivraison      = fraisCommande;
           order.rabais              = Number(discount.toFixed(2));
           order.montantCommission   = 0; // calculé au paiement
-          order.total               = Number((total + fraisLivraisonCommune).toFixed(2));
-          order.deliveryMode        = deliveryMode;
-          order.transportMode       = livraison.transportMode;
+          order.total               = Number((total + fraisCommande).toFixed(2));
+          order.deliveryMode        = isDigital ? OrderDeliveryMode.RETRAIT : deliveryMode;
+          order.transportMode       = isDigital ? null : livraison.transportMode;
           // Code de remise secret de la commande (voir handover-code.util.ts).
           order.handoverCode        = generateHandoverCode();
 
@@ -402,11 +449,13 @@ export class OrdersService implements OnModuleInit {
     // 7bis. Créer la fiche Delivery pour chaque commande livrée (pas en
     // mode retrait). C'est cette étape qui manquait jusqu'ici : aucune
     // commande ne generait de fiche de livraison, meme en mode livraison.
-    if (deliveryMode === OrderDeliveryMode.LIVRAISON) {
+    if (deliveryMode === OrderDeliveryMode.LIVRAISON && address) {
       const adresseLivraison =
         `${address.quartier}, ${address.ville}, ${address.country}`;
 
       for (const order of createdOrders) {
+        // Un livre numérique n'a pas de livraison.
+        if (order.isDigital) continue;
         await this.deliveryService.createForOrder(
           order.id,
           pickupAddressByOrderId.get(order.id) ?? '',
@@ -447,6 +496,9 @@ export class OrdersService implements OnModuleInit {
         orderNumber: o.orderNumber,
         total:       o.total,
         status:      o.status,
+        // L'appli saute le paiement FeexPay pour une commande à 0 F
+        // (POST /payments/free) et n'affiche ni suivi ni adresse pour un livre.
+        isDigital:   o.isDigital,
       })),
     };
   }
@@ -742,6 +794,13 @@ export class OrdersService implements OnModuleInit {
       }
       // Produit désactivé / brouillon ou variante désactivée : plus commandable.
       this.assertVariantOrderable(variant);
+      // Un livre numérique ne se commande que par le client lui-même
+      // (accès à sa Bibliothèque, pas de livraison).
+      if (variant.product.isDigital) {
+        throw new BadRequestException(
+          `"${variant.product.prod_name}" est un livre numérique : le client doit l'acheter lui-même depuis l'application.`
+        );
+      }
       if (variant.stockQuantity < item.quantity) {
         throw new BadRequestException(
           `Stock insuffisant pour "${variant.product.prod_name}" : `

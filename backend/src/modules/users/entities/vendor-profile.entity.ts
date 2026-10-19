@@ -159,6 +159,18 @@ export class VendorProfile {
   @Column({ type: 'decimal', precision: 12, scale: 2, default: 0 })
   minWithdrawalAmount: number;
 
+  // ─── Commission de la plateforme sur CE vendeur (fixée par l'admin) ───
+  // 'percent' = pourcentage des produits (commissionValue = %, ex. 12.5) ;
+  // 'fixed'   = montant fixe PAR COMMANDE en FCFA (commissionValue = montant) ;
+  // null      = commission par défaut de la plateforme (10 %).
+  // Ne s'applique qu'aux commandes payées APRÈS le changement : les commissions
+  // déjà calculées gardent leur taux d'origine.
+  @Column({ type: 'varchar', length: 10, nullable: true })
+  commissionType: 'percent' | 'fixed' | null;
+
+  @Column({ type: 'decimal', precision: 12, scale: 2, nullable: true })
+  commissionValue: number | null;
+
   // ─── Statistiques publiques ─────────────────────────────
 
   // Nombre de fois où un acheteur a ouvert la page boutique.

@@ -25,6 +25,10 @@ import { AssignDeliveryAgentDto }        from './dto/assign-agent.dto';
 import { UpdateDeliveryStatusDto }       from './dto/update-delivery-status.dto';
 import { UpdateIndependentDeliveryStatusDto } from './dto/update-independent-delivery-status.dto';
 import { CreateIndependentDeliveryDto }  from './dto/create-independent-delivery.dto';
+import { CounterOfferDto }               from './dto/counter-offer.dto';
+import { RespondCounterOfferDto }        from './dto/respond-counter-offer.dto';
+import { PayIndependentDeliveryDto }     from './dto/pay-independent-delivery.dto';
+import { IndependentDeliveriesService }  from './independent-deliveries.service';
 import { SubmitPickupProofDto }          from './dto/submit-pickup-proof.dto';
 import { SubmitHandoffProofDto }         from './dto/submit-handoff-proof.dto';
 import { DeliveryStatus }                from './entities/delivery.entity';
@@ -47,7 +51,10 @@ const getUser = (req: Request): any => (req as any).user;
 @UseGuards(JwtAuthGuard)
 @Controller('delivery')
 export class DeliveryController {
-  constructor(private readonly deliveryService: DeliveryService) {}
+  constructor(
+    private readonly deliveryService: DeliveryService,
+    private readonly independentService: IndependentDeliveriesService,
+  ) {}
 
   // ─── Type A — Routes Vendeur ──────────────────────────
 
@@ -164,51 +171,99 @@ export class DeliveryController {
     );
   }
 
-  // ─── Type B — Routes Client ───────────────────────────
+  // ─── Type B — Courses express (client + livreur) ──────
 
-  @ApiOperation({ summary: 'Créer une demande de livraison indépendante' })
+  @ApiOperation({ summary: 'Créer une course express (délai + prix proposé)' })
   @Post('independent')
   @HttpCode(HttpStatus.CREATED)
   createIndependent(
     @Req() req: Request,
     @Body() dto: CreateIndependentDeliveryDto,
   ) {
-    return this.deliveryService.createIndependent(
-      getUser(req).id,
-      dto,
-      getIp(req),
-    );
+    return this.independentService.create(getUser(req).id, dto, getIp(req));
+  }
+
+  @ApiOperation({ summary: 'Mes courses express (client)' })
+  @Get('independent/requests')
+  myIndependentRequests(@Req() req: Request) {
+    return this.independentService.myRequests(getUser(req).id);
   }
 
   @ApiOperation({ summary: 'Demandes de livraison disponibles (livreur)' })
   @Get('independent/available')
   getPendingIndependent(@Req() req: Request) {
-    return this.deliveryService.getPendingIndependentDeliveries(
-      getUser(req).id,
-    );
+    return this.independentService.available(getUser(req).id);
   }
 
-  @ApiOperation({ summary: 'Mes courses express acceptées (livreur)' })
+  @ApiOperation({ summary: 'Mes courses express (livreur)' })
   @Get('independent/mine')
   getMyIndependentDeliveries(@Req() req: Request) {
-    return this.deliveryService.getMyIndependentDeliveries(getUser(req).id);
+    return this.independentService.mine(getUser(req).id);
   }
 
-  @ApiOperation({ summary: 'Accepter une livraison indépendante' })
+  @ApiOperation({ summary: 'Accepter le prix proposé (livreur)' })
   @Patch('independent/:id/accept')
   @HttpCode(HttpStatus.OK)
   acceptIndependent(
     @Param('id', ParseUUIDPipe) id: string,
     @Req() req: Request,
   ) {
-    return this.deliveryService.acceptIndependent(
-      id,
-      getUser(req).id,
-      getIp(req),
-    );
+    return this.independentService.accept(id, getUser(req).id, getIp(req));
   }
 
-  @ApiOperation({ summary: 'Mettre à jour statut livraison indépendante' })
+  @ApiOperation({ summary: 'Proposer un autre prix (livreur, une seule fois)' })
+  @Patch('independent/:id/counter')
+  @HttpCode(HttpStatus.OK)
+  counterIndependent(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Req() req: Request,
+    @Body() dto: CounterOfferDto,
+  ) {
+    return this.independentService.counter(id, getUser(req).id, dto.price, getIp(req));
+  }
+
+  @ApiOperation({ summary: 'Accepter / refuser la contre-proposition (client)' })
+  @Patch('independent/:id/respond')
+  @HttpCode(HttpStatus.OK)
+  respondIndependent(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Req() req: Request,
+    @Body() dto: RespondCounterOfferDto,
+  ) {
+    return this.independentService.respondToCounter(id, getUser(req).id, dto.accept, getIp(req));
+  }
+
+  @ApiOperation({ summary: 'Payer la course en Mobile Money (client)' })
+  @Post('independent/:id/pay')
+  @HttpCode(HttpStatus.OK)
+  payIndependent(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Req() req: Request,
+    @Body() dto: PayIndependentDeliveryDto,
+  ) {
+    return this.independentService.pay(id, getUser(req).id, dto, getIp(req));
+  }
+
+  @ApiOperation({ summary: 'Statut du paiement d\'une course (client)' })
+  @Get('independent/:id/payment-status')
+  independentPaymentStatus(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Req() req: Request,
+  ) {
+    return this.independentService.paymentStatus(id, getUser(req).id);
+  }
+
+  @ApiOperation({ summary: 'Annuler une course non payée (client)' })
+  @Patch('independent/:id/cancel')
+  @HttpCode(HttpStatus.OK)
+  cancelIndependent(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Req() req: Request,
+  ) {
+    return this.independentService.cancel(id, getUser(req).id, getIp(req));
+  }
+
+  @ApiOperation({ summary: 'Mettre à jour le statut d\'une course (livreur)' })
   @Patch('independent/:id/status')
   @HttpCode(HttpStatus.OK)
   updateIndependentStatus(
@@ -216,12 +271,7 @@ export class DeliveryController {
     @Req() req: Request,
     @Body() body: UpdateIndependentDeliveryStatusDto,
   ) {
-    return this.deliveryService.updateIndependentStatus(
-      id,
-      getUser(req).id,
-      body.status,
-      getIp(req),
-    );
+    return this.independentService.updateStatus(id, getUser(req).id, body.status, getIp(req));
   }
 
   // ─── Routes Admin ─────────────────────────────────────

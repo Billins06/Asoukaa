@@ -31,6 +31,7 @@ export enum ProductStatus {
 //  - produits d'une boutique.
 @Index('IDX_products_status_createdAt', ['status', 'createdAt'])
 @Index('IDX_products_vendorId', ['vendorId'])
+@Index('IDX_products_isDigital', ['isDigital'])
 // Recherche par nom (trigrammes GIN, migration 1757800000000) : créé et géré
 // par migration — `synchronize: false` dit à TypeORM de ne ni le créer ni le supprimer.
 @Index('idx_products_prod_name_trgm', ['prod_name'], { synchronize: false } as any)
@@ -74,6 +75,40 @@ export class Product {
   @Column({ type: 'varchar', nullable: true, length: 100 })
   dimensions: string | null;
 
+  // ─── Livre numérique (PDF) ─────────────────────────────
+  // true = livre : pas de livraison, pas de stock, un seul achat par client,
+  // fichier téléchargé depuis la Bibliothèque (module library).
+  @Column({ default: false })
+  isDigital: boolean;
+
+  @Column({ type: 'varchar', nullable: true, length: 200 })
+  author: string | null;
+
+  // Saisi à la main par le vendeur
+  @Column({ type: 'int', nullable: true })
+  pageCount: number | null;
+
+  @Column({ type: 'varchar', nullable: true, length: 50 })
+  language: string | null;
+
+  // Taille réelle du PDF (relevée côté serveur, jamais fournie par le client).
+  // bigint → Postgres le renvoie en texte : on le convertit en nombre.
+  @Column({
+    type: 'bigint',
+    nullable: true,
+    transformer: {
+      to:   (v: number | null | undefined) => v ?? null,
+      from: (v: string | number | null) => (v === null || v === undefined ? null : Number(v)),
+    },
+  })
+  fileSizeBytes: number | null;
+
+  // Chemin du PDF dans le stockage PRIVÉ (ex: "asoukaa-private/ebooks/<uuid>.pdf").
+  // ⚠️ select:false : ne sort JAMAIS dans une réponse d'API. Seul le module
+  // library le lit (par .addSelect), pour fabriquer un lien signé court.
+  @Column({ type: 'varchar', nullable: true, length: 500, select: false })
+  filePath: string | null;
+
   @Column({
     type: 'enum',
     enum: ProductStatus,
@@ -84,6 +119,21 @@ export class Product {
   // Mis en avant sur la page d'accueil par l'admin
   @Column({ default: false })
   isVedette: boolean;
+
+  // Désactivé par l'ADMINISTRATION (migration 1791870000000) : le produit passe
+  // en « inactive » et le vendeur ne peut plus le réactiver lui-même.
+  @Column({ default: false })
+  isBlockedByAdmin: boolean;
+
+  @Column({ type: 'varchar', length: 500, nullable: true })
+  adminBlockReason: string | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  adminBlockedAt: Date | null;
+
+  // Statut avant le blocage (restauré à la réactivation).
+  @Column({ type: 'varchar', length: 30, nullable: true })
+  adminBlockedFromStatus: string | null;
 
   // Calculé automatiquement à chaque nouvel avis approuvé
   // ⚠️ Ne jamais laisser le vendeur modifier cette valeur

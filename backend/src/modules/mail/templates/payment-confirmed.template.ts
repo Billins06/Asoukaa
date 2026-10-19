@@ -6,6 +6,8 @@ export interface PaymentConfirmedData {
   montant:     number;
   /** Id réel de la commande (UUID), pour le bouton "Suivre ma commande". */
   orderId?:    string;
+  /** Livre numérique : déjà disponible dans la Bibliothèque (pas d'attente du vendeur). */
+  isDigital?:  boolean;
 }
 
 export const paymentConfirmedTemplate = (data: PaymentConfirmedData): string => {
@@ -20,7 +22,9 @@ export const paymentConfirmedTemplate = (data: PaymentConfirmedData): string => 
         <td align="right" style="padding:16px 0 0;font-size:19px;font-weight:800;color:#FF6B00;">${Number(data.montant).toLocaleString('fr-FR')} FCFA</td>
       </tr>
     </table>
-    <p style="margin:22px 0 8px;font-size:14px;color:#6B6B72;line-height:1.6;text-align:center;">Votre commande est en attente de confirmation par le vendeur. Vous serez prévenu(e) dès qu'il l'aura confirmée.</p>`;
+    <p style="margin:22px 0 8px;font-size:14px;color:#6B6B72;line-height:1.6;text-align:center;">${data.isDigital
+      ? 'Votre livre numérique est disponible : ouvrez la Bibliothèque dans l\'application pour le télécharger (PDF).'
+      : 'Votre commande est en attente de confirmation par le vendeur. Vous serez prévenu(e) dès qu\'il l\'aura confirmée.'}</p>`;
 
   return renderEmailLayout({
     category: 'commande',
@@ -28,7 +32,7 @@ export const paymentConfirmedTemplate = (data: PaymentConfirmedData): string => 
     title: 'Paiement confirmé',
     intro: `Bonjour <strong style="color:#3A3A40;">${escapeHtml(data.prenom)}</strong>, votre paiement a été confirmé pour la commande <strong style="color:#3A3A40;">#${escapeHtml(data.orderNumber)}</strong>.`,
     body,
-    cta: data.orderId
+    cta: data.orderId && !data.isDigital
       ? { label: 'Suivre ma commande', href: `asoukaa://order?id=${encodeURIComponent(data.orderId)}` }
       : undefined,
   });

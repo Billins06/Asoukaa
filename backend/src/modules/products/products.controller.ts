@@ -58,6 +58,7 @@ export class ProductsController {
   @ApiQuery({ name: 'search',     required: false })
   @ApiQuery({ name: 'categoryId', required: false })
   @ApiQuery({ name: 'vendorId',   required: false })
+  @ApiQuery({ name: 'isDigital',  required: false, description: 'true = livres numériques seulement' })
   @ApiQuery({ name: 'minPrice',   required: false })
   @ApiQuery({ name: 'maxPrice',   required: false })
   @Get()
@@ -67,6 +68,7 @@ export class ProductsController {
     @Query('search')     search?:     string,
     @Query('categoryId') categoryId?: string,
     @Query('vendorId')   vendorId?:   string,
+    @Query('isDigital')  isDigital?:  string,
     @Query('minPrice')   minPrice?:   number,
     @Query('maxPrice')   maxPrice?:   number,
   ) {
@@ -94,6 +96,7 @@ export class ProductsController {
       search,
       categoryId,
       vendorId,
+      onlyDigital: isDigital === 'true',
       minPrice:   minPrice ? Number(minPrice) : undefined,
       maxPrice:   maxPrice ? Number(maxPrice) : undefined,
     });
