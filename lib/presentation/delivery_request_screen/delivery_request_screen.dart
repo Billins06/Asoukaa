@@ -3,7 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../theme/app_theme.dart';
-import '../../services/api_service.dart';
+import '../../routes/app_routes.dart';
+import '../../services/express_delivery_service.dart';
 import '../../services/nest_auth_service.dart';
 import '../../widgets/app_toast.dart';
 
@@ -22,10 +23,10 @@ class _DeliveryRequestScreenState extends State<DeliveryRequestScreen> {
   final _notesController = TextEditingController();
   final _priceController = TextEditingController();
 
-  String _urgency = 'normal';
+  String _delai = 'normal';
   bool _isSubmitting = false;
 
-  static const Map<String, Map<String, dynamic>> _urgencyOptions = {
+  static const Map<String, Map<String, dynamic>> _delaiOptions = {
     'normal': {
       'label': 'Normal',
       'subtitle': 'Livraison dans la journée',
@@ -76,35 +77,32 @@ class _DeliveryRequestScreenState extends State<DeliveryRequestScreen> {
     setState(() => _isSubmitting = true);
 
     try {
-      final price =
-          double.tryParse(_priceController.text.replaceAll(',', '.')) ?? 0.0;
-      final notes = _notesController.text.trim();
-
-      await ApiService.instance.client.post(
-        '/api/v1/delivery-requests',
-        data: {
-          'pickupAddress': _pickupController.text.trim(),
-          'dropoffAddress': _dropoffController.text.trim(),
-          'packageDescription': _descriptionController.text.trim(),
-          'urgency': _urgency,
-          'proposedPrice': price,
-          if (notes.isNotEmpty) 'notes': notes,
-        },
+      final price = int.tryParse(_priceController.text.trim()) ?? 0;
+      await ExpressDeliveryService.instance.create(
+        pickupAddress: _pickupController.text.trim(),
+        adresseLivraison: _dropoffController.text.trim(),
+        packageDescription: _descriptionController.text.trim(),
+        delai: _delai,
+        proposedPrice: price,
+        notes: _notesController.text.trim(),
       );
 
       if (mounted) {
         AppToast.show(
           context,
-          message: 'Demande envoyée ! Un livreur va vous contacter.',
+          message: 'Demande envoyée ! Les livreurs disponibles sont prévenus.',
           type: ToastType.success,
         );
-        Navigator.pop(context);
+        Navigator.pushReplacementNamed(context, AppRoutes.myExpressDeliveries);
       }
     } catch (e) {
       if (mounted) {
         AppToast.show(
           context,
-          message: 'Erreur lors de l\'envoi. Veuillez réessayer.',
+          message: ExpressDeliveryService.errorMessage(
+            e,
+            'Erreur lors de l\'envoi. Veuillez réessayer.',
+          ),
           type: ToastType.error,
         );
       }
@@ -177,16 +175,16 @@ class _DeliveryRequestScreenState extends State<DeliveryRequestScreen> {
               maxLines: 2,
             ),
             const SizedBox(height: 24),
-            _buildSectionTitle('Urgence', Icons.timer_rounded),
+            _buildSectionTitle('Délai', Icons.timer_rounded),
             const SizedBox(height: 12),
-            _buildUrgencySelector(),
+            _buildDelaiSelector(),
             const SizedBox(height: 24),
             _buildSectionTitle('Prix proposé', Icons.payments_rounded),
             const SizedBox(height: 12),
             _buildPriceField(),
             const SizedBox(height: 8),
             Text(
-              'Proposez un montant juste. Le livreur peut négocier avant d\'accepter.',
+              'Proposez un montant juste. Un livreur peut accepter ce prix ou vous proposer un autre montant, que vous acceptez ou refusez. Le paiement se fait ensuite en Mobile Money dans l\'application.',
               style: GoogleFonts.outfit(fontSize: 12, color: AppTheme.muted),
             ),
             const SizedBox(height: 32),
@@ -214,6 +212,20 @@ class _DeliveryRequestScreenState extends State<DeliveryRequestScreen> {
           color: AppTheme.textPrimary,
         ),
       ),
+      actions: [
+        TextButton(
+          onPressed: () =>
+              Navigator.pushNamed(context, AppRoutes.myExpressDeliveries),
+          child: Text(
+            'Mes courses',
+            style: GoogleFonts.outfit(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: AppTheme.primary,
+            ),
+          ),
+        ),
+      ],
       bottom: PreferredSize(
         preferredSize: const Size.fromHeight(1),
         child: Container(height: 1, color: AppTheme.outlineVariant),
@@ -359,16 +371,16 @@ class _DeliveryRequestScreenState extends State<DeliveryRequestScreen> {
     );
   }
 
-  Widget _buildUrgencySelector() {
+  Widget _buildDelaiSelector() {
     return Column(
-      children: _urgencyOptions.entries.map((entry) {
+      children: _delaiOptions.entries.map((entry) {
         final key = entry.key;
         final opt = entry.value;
-        final isSelected = _urgency == key;
+        final isSelected = _delai == key;
         final color = opt['color'] as Color;
 
         return GestureDetector(
-          onTap: () => setState(() => _urgency = key),
+          onTap: () => setState(() => _delai = key),
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 200),
             margin: const EdgeInsets.only(bottom: 10),
@@ -428,12 +440,13 @@ class _DeliveryRequestScreenState extends State<DeliveryRequestScreen> {
   Widget _buildPriceField() {
     return TextFormField(
       controller: _priceController,
-      keyboardType: const TextInputType.numberWithOptions(decimal: true),
-      inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9,.]'))],
+      keyboardType: TextInputType.number,
+      inputFormatters: [FilteringTextInputFormatter.digitsOnly],
       validator: (v) {
         if (v == null || v.trim().isEmpty) return 'Prix requis';
-        final price = double.tryParse(v.replaceAll(',', '.'));
-        if (price == null || price <= 0) return 'Prix invalide';
+        final price = int.tryParse(v.trim());
+        if (price == null || price < 500) return 'Minimum 500 FCFA';
+        if (price > 500000) return 'Maximum 500 000 FCFA';
         return null;
       },
       style: GoogleFonts.outfit(

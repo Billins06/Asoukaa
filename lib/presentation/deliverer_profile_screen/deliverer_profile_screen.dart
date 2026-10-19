@@ -5,6 +5,7 @@ import 'package:google_fonts/google_fonts.dart';
 import '../../routes/app_routes.dart';
 import 'package:dio/dio.dart';
 import 'package:image_picker/image_picker.dart';
+import '../../services/photo_picker_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../services/api_service.dart';
 import '../../services/deliverer_availability.dart';
@@ -1735,7 +1736,8 @@ class _DelivererProfileScreenState extends State<DelivererProfileScreen>
                 _pickAndUpdateAvatar(ImageSource.gallery);
               },
             ),
-            ListTile(
+            if (PhotoPickerService.cameraAvailable)
+              ListTile(
               leading: const Icon(Icons.camera_alt_outlined),
               title: Text('Appareil photo', style: GoogleFonts.outfit()),
               onTap: () {

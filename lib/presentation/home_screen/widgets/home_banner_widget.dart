@@ -2,366 +2,364 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import '../../../routes/app_routes.dart';
-import '../../../services/product_service.dart';
-import '../../../widgets/custom_image_widget.dart';
-import '../../../utils/lecture_json.dart';
+import 'package:url_launcher/url_launcher.dart';
 
+import '../../../routes/app_routes.dart';
+import '../../../services/banner_service.dart';
+import '../../../services/product_service.dart';
+import '../../../utils/lecture_json.dart';
+import '../../../widgets/app_toast.dart';
+import '../../../widgets/custom_image_widget.dart';
+
+/// Bannières défilantes de l'accueil, entièrement pilotées par l'admin
+/// (dashboard > Bannières) : image, titre/sous-titre facultatifs, durée
+/// d'affichage propre à chaque bannière et cible du clic (catégorie,
+/// produit, boutique ou lien externe). Aucune bannière => la zone disparaît.
+///
+/// [refreshToken] : incrémenté par l'accueil au « tirer pour actualiser »
+/// pour recharger la liste.
 class HomeBannerWidget extends StatefulWidget {
-  const HomeBannerWidget({super.key});
+  final int refreshToken;
+
+  const HomeBannerWidget({super.key, this.refreshToken = 0});
 
   @override
   State<HomeBannerWidget> createState() => _HomeBannerWidgetState();
 }
 
-class _HomeBannerWidgetState extends State<HomeBannerWidget>
-    with SingleTickerProviderStateMixin {
-  int _currentPage = 0;
-  late PageController _pageController;
-  late AnimationController _countdownController;
-  Timer? _autoAdvanceTimer;
+class _HomeBannerWidgetState extends State<HomeBannerWidget> {
+  static const double _height = 216;
 
-  static final List<Map<String, dynamic>> _defaultBanners = [
-    {
-      'imageUrl':
-          'https://images.pexels.com/photos/5632398/pexels-photo-5632398.jpeg',
-      'semanticLabel':
-          'Femme africaine en tenue traditionnelle colorée tenant des tissus wax dans un marché',
-      'tag': 'VENTE FLASH',
-      'title': 'Tissus Wax\nAuthentiques',
-      'subtitle': 'Jusqu\'à -40% sur les collections',
-      'cta': 'Découvrir',
-      'tagColor': const Color(0xFFDC2626),
-      'countdown': true,
-      'searchQuery': 'Tissu Wax',
-    },
-    {
-      'imageUrl': 'https://images.unsplash.com/photo-1553880380-b9f10ea55fe4',
-      'semanticLabel':
-          'Téléphones intelligents et tablettes disposés sur une surface noire brillante',
-      'tag': 'NOUVEAU',
-      'title': 'Électronique\nTop Qualité',
-      'subtitle': 'Smartphones dès 45 000 FCFA',
-      'cta': 'Voir les offres',
-      'tagColor': const Color(0xFF16A34A),
-      'countdown': false,
-      'searchQuery': 'Électronique',
-    },
-    {
-      'imageUrl':
-          'https://img.rocket.new/generatedImages/rocket_gen_img_1d426ee46-1773114867630.png',
-      'semanticLabel':
-          'Épices africaines colorées dans des bols en céramique sur fond de bois',
-      'tag': 'LIVRAISON OFFERTE',
-      'title': 'Épices &\nAlimentation',
-      'subtitle': 'Livraison gratuite dès 15 000 FCFA',
-      'cta': 'Commander',
-      'tagColor': const Color(0xFF7C3AED),
-      'countdown': false,
-      'searchQuery': 'Alimentation',
-    },
-  ];
+  final PageController _pageController = PageController(viewportFraction: 0.92);
+  Timer? _timer;
 
   List<Map<String, dynamic>> _banners = [];
-  int _countdownSeconds = 9258;
+  bool _loading = true;
+  int _currentPage = 0;
+  // Incrémenté à chaque chargement : une réponse arrivée en retard est ignorée.
+  int _loadGen = 0;
+  bool _navigating = false;
 
   @override
   void initState() {
     super.initState();
-    _banners = _defaultBanners;
-    _pageController = PageController(viewportFraction: 0.92);
-    _countdownController =
-        AnimationController(vsync: this, duration: const Duration(seconds: 1))
-          ..addListener(() {
-            if (mounted) {
-              setState(() {
-                if (_countdownSeconds > 0) _countdownSeconds--;
-              });
-            }
-          });
-    _countdownController.repeat();
+    _load();
+  }
 
-    _autoAdvanceTimer = Timer.periodic(const Duration(seconds: 4), (_) {
-      if (!mounted) return;
-      final nextPage = (_currentPage + 1) % _banners.length;
+  @override
+  void didUpdateWidget(covariant HomeBannerWidget oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.refreshToken != widget.refreshToken) _load();
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    _pageController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    final gen = ++_loadGen;
+    final list = await BannerService.instance.getBanners();
+    if (!mounted || gen != _loadGen) return;
+    setState(() {
+      _banners = list;
+      _loading = false;
+      if (_currentPage >= list.length) _currentPage = 0;
+    });
+    // La liste a pu changer de taille : on recale le défilement.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_pageController.hasClients || _banners.isEmpty) return;
+      final shown = _pageController.page?.round() ?? 0;
+      if (shown != _currentPage) _pageController.jumpToPage(_currentPage);
+    });
+    _scheduleNext();
+  }
+
+  /// Programme le passage à la bannière suivante après la durée choisie par
+  /// l'admin pour la bannière actuellement affichée.
+  void _scheduleNext() {
+    _timer?.cancel();
+    if (!mounted || _banners.length < 2) return;
+    final seconds = lireInt(
+      _banners[_currentPage]['durationSeconds'],
+      BannerService.defaultSeconds,
+    ).clamp(BannerService.minSeconds, BannerService.maxSeconds).toInt();
+    _timer = Timer(Duration(seconds: seconds), () {
+      if (!mounted || _banners.length < 2) return;
+      final covered = ModalRoute.of(context)?.isCurrent == false;
+      final dragging = _pageController.hasClients &&
+          _pageController.position.isScrollingNotifier.value;
+      if (!_pageController.hasClients || covered || dragging) {
+        // Accueil recouvert par une autre page ou doigt sur la bannière :
+        // on réessaie après la durée de la bannière affichée.
+        _scheduleNext();
+        return;
+      }
+      // onPageChanged reprogramme ensuite le minuteur de la page suivante.
       _pageController.animateToPage(
-        nextPage,
+        (_currentPage + 1) % _banners.length,
         duration: const Duration(milliseconds: 600),
         curve: Curves.easeInOutCubic,
       );
     });
   }
 
-  @override
-  void dispose() {
-    _autoAdvanceTimer?.cancel();
-    _pageController.dispose();
-    _countdownController.dispose();
-    super.dispose();
-  }
-
-  String _formatCountdown() {
-    final h = _countdownSeconds ~/ 3600;
-    final m = (_countdownSeconds % 3600) ~/ 60;
-    final s = _countdownSeconds % 60;
-    return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
-  }
-
-  bool _bannerNavigating = false;
+  // ─── Clic sur une bannière ───────────────────────────────────────────
 
   Future<void> _onBannerTap(Map<String, dynamic> banner) async {
-    final query = banner['searchQuery'] as String? ?? '';
-    if (query.isEmpty) {
-      Navigator.pushNamed(context, AppRoutes.searchResults, arguments: query);
-      return;
-    }
-    if (_bannerNavigating) return;
-    _bannerNavigating = true;
-    try {
-      // La bannière représente une catégorie ; on cherche un vendeur réel
-      // qui vend dans cette catégorie pour ouvrir sa page boutique.
-      final result = await ProductService.instance.getProducts(
-        search: query,
-        limit: 1,
-      );
-      if (!mounted) return;
+    if (_navigating) return;
+    final type = (banner['targetType'] ?? '').toString();
+    final id = (banner['targetId'] ?? '').toString();
+    final label = (banner['targetLabel'] ?? '').toString();
 
-      final products = result.data;
-      if (result.success && products != null && products.isNotEmpty) {
-        final product = products.first;
-        final shopData = product['vendor'] ??
-            product['shops'] ??
-            product['vendeur'] ??
-            product['shop_info'];
-        final shopId = shopData is Map
-            ? (shopData['id']?.toString() ?? '')
-            : '';
+    switch (type) {
+      case 'category':
+        if (id.isEmpty) return;
+        _navigating = true;
+        Navigator.pushNamed(
+          context,
+          AppRoutes.categoryProducts,
+          arguments: {
+            'mode': 'category',
+            'id': id,
+            'title': label.isEmpty ? 'Produits' : label,
+          },
+        ).whenComplete(() => _navigating = false);
+        return;
 
-        if (shopId.isNotEmpty) {
-          final shopName = shopData is Map
-              ? (shopData['shopName'] as String? ??
-                  shopData['name'] as String? ??
-                  '')
-              : '';
-          final shopLogo = shopData is Map
-              ? (shopData['logoUrl'] as String? ??
-                  shopData['logo_url'] as String? ??
-                  '')
-              : '';
-          final shopRating = shopData is Map
-              ? lireDouble(shopData['rating'], 4.5)
-              : 4.5;
+      case 'shop':
+        if (id.isEmpty) return;
+        _navigating = true;
+        final shopName = label.isEmpty ? 'Boutique' : label;
+        final shopLogo = (banner['targetLogo'] ?? '').toString();
+        Navigator.pushNamed(
+          context,
+          AppRoutes.boutiqueVendeur,
+          arguments: {
+            'id': id,
+            'name': shopName,
+            if (shopLogo.isNotEmpty) 'logo': shopLogo,
+            'logoSemanticLabel': 'Logo de la boutique $shopName',
+            // Note et ventes réelles : rechargées par la page boutique.
+            'rating': 0.0,
+            'salesCount': 0,
+          },
+        ).whenComplete(() => _navigating = false);
+        return;
 
-          Navigator.pushNamed(
-            context,
-            AppRoutes.boutiqueVendeur,
-            arguments: {
-              'id': shopId,
-              'name': shopName,
-              'logo': shopLogo,
-              'logoSemanticLabel': 'Logo de la boutique $shopName',
-              'rating': shopRating,
-              'salesCount': 0,
-            },
-          );
-          return;
+      case 'product':
+        if (id.isEmpty) return;
+        _navigating = true;
+        try {
+          final result = await ProductService.instance.getProductById(id);
+          if (!mounted) return;
+          final product = result.data;
+          if (result.success && product != null) {
+            Navigator.pushNamed(
+              context,
+              AppRoutes.productDetail,
+              arguments: product,
+            );
+          } else {
+            AppToast.show(
+              context,
+              message: result.error ?? 'Ce produit n\'est plus disponible.',
+              type: ToastType.error,
+            );
+          }
+        } finally {
+          _navigating = false;
         }
-      }
+        return;
 
-      // Aucun vendeur trouvé pour cette catégorie : repli sur la recherche.
-      Navigator.pushNamed(context, AppRoutes.searchResults, arguments: query);
-    } catch (_) {
-      if (!mounted) return;
-      Navigator.pushNamed(context, AppRoutes.searchResults, arguments: query);
-    } finally {
-      _bannerNavigating = false;
+      case 'link':
+        final url = (banner['targetUrl'] ?? '').toString().trim();
+        final uri = Uri.tryParse(url);
+        // Le serveur n'envoie que du https ; on revérifie par prudence.
+        if (uri == null || uri.scheme != 'https' || uri.host.isEmpty) return;
+        _navigating = true;
+        try {
+          final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+          if (!ok && mounted) {
+            AppToast.show(
+              context,
+              message: 'Impossible d\'ouvrir ce lien',
+              type: ToastType.error,
+            );
+          }
+        } catch (_) {
+          if (mounted) {
+            AppToast.show(
+              context,
+              message: 'Impossible d\'ouvrir ce lien',
+              type: ToastType.error,
+            );
+          }
+        } finally {
+          _navigating = false;
+        }
+        return;
     }
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        SizedBox(
-          height: 216,
-          child: PageView.builder(
-            controller: _pageController,
-            onPageChanged: (i) => setState(() => _currentPage = i),
-            itemCount: _banners.length,
-            itemBuilder: (_, index) {
-              final banner = _banners[index];
-              return AnimatedScale(
-                scale: _currentPage == index ? 1.0 : 0.96,
-                duration: const Duration(milliseconds: 300),
-                curve: Curves.easeOutCubic,
-                child: GestureDetector(
-                  onTap: () => _onBannerTap(banner),
-                  child: Container(
-                    margin: const EdgeInsets.symmetric(horizontal: 8),
+  // ─── Affichage ───────────────────────────────────────────────────────
+
+  Widget _buildBanner(Map<String, dynamic> banner, int index) {
+    final titre = (banner['titre'] ?? '').toString();
+    final sousTitre = (banner['sousTitre'] ?? '').toString();
+    final hasText = titre.isNotEmpty || sousTitre.isNotEmpty;
+
+    return AnimatedScale(
+      scale: _currentPage == index ? 1.0 : 0.96,
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOutCubic,
+      child: GestureDetector(
+        onTap: () => _onBannerTap(banner),
+        child: Container(
+          margin: const EdgeInsets.symmetric(horizontal: 8),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(20),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withAlpha(25),
+                blurRadius: 16,
+                offset: const Offset(0, 6),
+              ),
+            ],
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(20),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                CustomImageWidget(
+                  imageUrl: banner['imageUrl'] as String,
+                  width: double.infinity,
+                  height: _height,
+                  fit: BoxFit.cover,
+                  semanticLabel: titre.isNotEmpty ? titre : 'Bannière',
+                ),
+                if (hasText) ...[
+                  Container(
                     decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(20),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withAlpha(25),
-                          blurRadius: 16,
-                          offset: const Offset(0, 6),
-                        ),
-                      ],
-                    ),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(20),
-                      child: Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          CustomImageWidget(
-                            imageUrl: banner['imageUrl'] as String,
-                            width: double.infinity,
-                            height: 216,
-                            fit: BoxFit.cover,
-                            semanticLabel: banner['semanticLabel'] as String,
-                          ),
-                          Container(
-                            decoration: BoxDecoration(
-                              gradient: LinearGradient(
-                                colors: [
-                                  Colors.black.withAlpha(160),
-                                  Colors.transparent,
-                                ],
-                                begin: Alignment.centerLeft,
-                                end: Alignment.centerRight,
-                              ),
-                            ),
-                          ),
-                          Padding(
-                            padding: const EdgeInsets.all(20),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 8,
-                                    vertical: 3,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: banner['tagColor'] as Color,
-                                    borderRadius: BorderRadius.circular(4),
-                                  ),
-                                  child: Text(
-                                    banner['tag'] as String,
-                                    style: GoogleFonts.outfit(
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.w700,
-                                      color: Colors.white,
-                                      letterSpacing: 0.5,
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                Text(
-                                  banner['title'] as String,
-                                  style: GoogleFonts.outfit(
-                                    fontSize: 20,
-                                    fontWeight: FontWeight.w800,
-                                    color: Colors.white,
-                                    height: 1.2,
-                                  ),
-                                ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  banner['subtitle'] as String,
-                                  style: GoogleFonts.outfit(
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.w400,
-                                    color: Colors.white.withAlpha(210),
-                                  ),
-                                ),
-                                if (banner['countdown'] == true) ...[
-                                  const SizedBox(height: 8),
-                                  _CountdownChip(time: _formatCountdown()),
-                                ],
-                                const SizedBox(height: 12),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 14,
-                                    vertical: 7,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFFFF6210),
-                                    borderRadius: BorderRadius.circular(8),
-                                  ),
-                                  child: Text(
-                                    banner['cta'] as String,
-                                    style: GoogleFonts.outfit(
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w700,
-                                      color: Colors.white,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
+                      gradient: LinearGradient(
+                        colors: [
+                          Colors.black.withAlpha(160),
+                          Colors.transparent,
                         ],
+                        begin: Alignment.centerLeft,
+                        end: Alignment.centerRight,
                       ),
                     ),
                   ),
-                ),
-              );
-            },
-          ),
-        ),
-        const SizedBox(height: 12),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: List.generate(
-            _banners.length,
-            (i) => AnimatedContainer(
-              duration: const Duration(milliseconds: 300),
-              curve: Curves.easeOutCubic,
-              margin: const EdgeInsets.symmetric(horizontal: 3),
-              width: _currentPage == i ? 20 : 6,
-              height: 6,
-              decoration: BoxDecoration(
-                color: _currentPage == i
-                    ? const Color(0xFFFF6210)
-                    : const Color(0xFFFF6210).withAlpha(60),
-                borderRadius: BorderRadius.circular(3),
-              ),
+                  Padding(
+                    padding: const EdgeInsets.all(20),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: FractionallySizedBox(
+                        widthFactor: 0.65,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (titre.isNotEmpty)
+                              Text(
+                                titre,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: GoogleFonts.outfit(
+                                  fontSize: 20,
+                                  fontWeight: FontWeight.w800,
+                                  color: Colors.white,
+                                  height: 1.2,
+                                ),
+                              ),
+                            if (titre.isNotEmpty && sousTitre.isNotEmpty)
+                              const SizedBox(height: 4),
+                            if (sousTitre.isNotEmpty)
+                              Text(
+                                sousTitre,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: GoogleFonts.outfit(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w400,
+                                  color: Colors.white.withAlpha(220),
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ],
             ),
           ),
         ),
-      ],
+      ),
     );
   }
-}
-
-class _CountdownChip extends StatelessWidget {
-  final String time;
-  const _CountdownChip({required this.time});
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-      decoration: BoxDecoration(
-        color: Colors.black.withAlpha(120),
-        borderRadius: BorderRadius.circular(6),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
+    // Premier chargement : emplacement réservé (évite que l'accueil saute).
+    if (_loading) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 8, bottom: 16),
+        child: Container(
+          height: _height,
+          margin: const EdgeInsets.symmetric(horizontal: 16),
+          decoration: BoxDecoration(
+            color: const Color(0xFFF1EDE8),
+            borderRadius: BorderRadius.circular(20),
+          ),
+        ),
+      );
+    }
+    // Aucune bannière visible : la zone n'apparaît pas.
+    if (_banners.isEmpty) return const SizedBox.shrink();
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 8, bottom: 16),
+      child: Column(
         children: [
-          const Icon(Icons.timer_outlined, size: 12, color: Colors.white),
-          const SizedBox(width: 4),
-          Text(
-            time,
-            style: GoogleFonts.outfit(
-              fontSize: 12,
-              fontWeight: FontWeight.w700,
-              color: Colors.white,
-              fontFeatures: const [FontFeature.tabularFigures()],
+        SizedBox(
+          height: _height,
+          child: PageView.builder(
+            controller: _pageController,
+            onPageChanged: (i) {
+              setState(() => _currentPage = i);
+              _scheduleNext();
+            },
+            itemCount: _banners.length,
+            itemBuilder: (_, index) => _buildBanner(_banners[index], index),
+          ),
+        ),
+        if (_banners.length > 1) ...[
+          const SizedBox(height: 12),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: List.generate(
+              _banners.length,
+              (i) => AnimatedContainer(
+                duration: const Duration(milliseconds: 300),
+                curve: Curves.easeOutCubic,
+                margin: const EdgeInsets.symmetric(horizontal: 3),
+                width: _currentPage == i ? 20 : 6,
+                height: 6,
+                decoration: BoxDecoration(
+                  color: _currentPage == i
+                      ? const Color(0xFFFF6210)
+                      : const Color(0xFFFF6210).withAlpha(60),
+                  borderRadius: BorderRadius.circular(3),
+                ),
+              ),
             ),
           ),
+        ],
         ],
       ),
     );

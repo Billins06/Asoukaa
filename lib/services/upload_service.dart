@@ -1,6 +1,16 @@
+import 'dart:typed_data';
+
 import 'package:dio/dio.dart';
 import 'package:image_picker/image_picker.dart';
 import 'api_service.dart';
+
+/// Résultat de l'envoi d'un livre numérique : le serveur ne renvoie pas d'URL
+/// (le PDF est privé), seulement un chemin à joindre à la fiche du livre.
+class EbookUploadResult {
+  final String path;
+  final int size;
+  const EbookUploadResult({required this.path, required this.size});
+}
 
 class UploadService {
   static UploadService? _instance;
@@ -42,6 +52,40 @@ class UploadService {
     });
     final response = await _client.post('/api/v1/upload/$type', data: formData);
     return response.data['url'] as String;
+  }
+
+  /// Envoie le PDF d'un livre numérique (type « ebooks », 50 Mo max, vendeur
+  /// approuvé uniquement). Délais allongés : un gros fichier met du temps.
+  Future<EbookUploadResult> uploadEbook(
+    Uint8List bytes,
+    String filename, {
+    void Function(double progress)? onProgress,
+  }) async {
+    final formData = FormData.fromMap({
+      'file': MultipartFile.fromBytes(
+        bytes,
+        filename: filename,
+        contentType: DioMediaType.parse('application/pdf'),
+      ),
+    });
+    final response = await _client.post(
+      '/api/v1/upload/ebooks',
+      data: formData,
+      options: Options(
+        sendTimeout: const Duration(minutes: 5),
+        receiveTimeout: const Duration(minutes: 3),
+      ),
+      onSendProgress: (sent, total) {
+        if (onProgress != null && total > 0) onProgress(sent / total);
+      },
+    );
+    final data = response.data;
+    final path = data is Map ? (data['path'] ?? '').toString() : '';
+    if (path.isEmpty) {
+      throw Exception('Réponse du serveur invalide (chemin du fichier manquant).');
+    }
+    final size = data is Map ? int.tryParse('${data['size'] ?? ''}') ?? bytes.length : bytes.length;
+    return EbookUploadResult(path: path, size: size);
   }
 
   Future<List<String>> uploadMultiple(List<XFile> files, String type) async {

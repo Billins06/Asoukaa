@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:dio/dio.dart';
 import 'package:image_picker/image_picker.dart';
+import '../../services/photo_picker_service.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../theme/app_theme.dart';
 import '../../routes/app_routes.dart';
@@ -2242,7 +2243,8 @@ class _SellerProfileScreenState extends State<SellerProfileScreen>
                 _pickAndUpdateShopLogo(ImageSource.gallery);
               },
             ),
-            ListTile(
+            if (PhotoPickerService.cameraAvailable)
+              ListTile(
               leading: const Icon(Icons.camera_alt_outlined),
               title: Text('Appareil photo', style: GoogleFonts.outfit()),
               onTap: () {
@@ -2355,7 +2357,8 @@ class _SellerProfileScreenState extends State<SellerProfileScreen>
                 _pickAndUpdateShopBanner(ImageSource.gallery);
               },
             ),
-            ListTile(
+            if (PhotoPickerService.cameraAvailable)
+              ListTile(
               leading: const Icon(Icons.camera_alt_outlined),
               title: Text('Appareil photo', style: GoogleFonts.outfit()),
               onTap: () {

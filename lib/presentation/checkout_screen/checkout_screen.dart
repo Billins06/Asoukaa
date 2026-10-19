@@ -6,6 +6,8 @@ import 'package:google_fonts/google_fonts.dart';
 import '../../services/nest_auth_service.dart';
 import '../../services/user_service.dart';
 import '../../services/api_service.dart';
+import '../../services/library_service.dart';
+import '../../services/payment_prefs_service.dart';
 import '../../theme/app_theme.dart';
 import '../../routes/app_routes.dart';
 import '../../widgets/app_toast.dart';
@@ -82,7 +84,14 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   String? _transportMode;
 
   // Frais de livraison reellement appliques : nul en mode retrait
-  double get _currentDeliveryFee => _deliveryMode == 'retrait' ? 0 : _deliveryFee;
+  double get _currentDeliveryFee =>
+      (!_hasPhysical || _deliveryMode == 'retrait') ? 0 : _deliveryFee;
+
+  // false = panier de livres numériques seulement : ni adresse ni livraison.
+  bool _hasPhysical = true;
+  // Un paiement Mobile Money n'est nécessaire que si le total est > 0
+  // (un livre gratuit est validé sans paiement).
+  bool get _needsPayment => _hasPhysical || _total > 0;
 
   // Created order ID (pending state before payment)
   // Panier réparti sur plusieurs boutiques -> une commande par boutique
@@ -131,6 +140,12 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       _cityController.text = (args['city'] as String?) ?? _cityController.text;
       _transportMode = args['transportMode'] as String?;
       _isNordZone = (args['isNordZone'] as bool?) ?? false;
+      _hasPhysical = args['hasPhysical'] != false;
+      if (!_hasPhysical) {
+        _deliveryMode = 'retrait';
+        _isNordZone = false;
+        _transportMode = null;
+      }
     }
   }
 
@@ -148,6 +163,15 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         _firstNameController.text = profile.prenom;
         _lastNameController.text = profile.name;
         _phoneController.text = profile.phone;
+      }
+    } catch (_) {}
+    // Numéro de paiement par défaut (enregistré dans le profil) : proposé ici,
+    // le client peut encore le modifier avant de payer.
+    try {
+      final def = await PaymentPrefsService.instance.getDefault();
+      if (def != null && mounted) {
+        _selectedOperator = def.operator;
+        _phoneController.text = def.number;
       }
     } catch (_) {}
     if (mounted) setState(() => _isLoadingProfile = false);
@@ -286,7 +310,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       return;
     }
 
-    if (_deliveryMode != 'retrait' && _isNordZone && _transportMode == null) {
+    if (_hasPhysical && _deliveryMode != 'retrait' && _isNordZone && _transportMode == null) {
       AppToast.show(
         context,
         message: 'Choisissez bus ou taxi pour cette commune',
@@ -325,7 +349,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         _pendingOrders = List<Map<String, dynamic>>.from(tentative!.commandes);
       } else {
         // Étape 1 : créer l'adresse de livraison et récupérer son UUID
-        final addressId = await _createDeliveryAddress();
+        // Livres numériques seulement : aucune adresse à créer.
+        final addressId = _hasPhysical ? await _createDeliveryAddress() : '';
         if (addressId == null) {
           if (mounted) {
             AppToast.show(
@@ -346,8 +371,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         _pendingOrders = await _createOrders(
           addressId: addressId,
           instructions: instructions.isNotEmpty ? instructions : null,
-          deliveryMode: _deliveryMode,
-          transportMode: _isNordZone ? _transportMode : null,
+          deliveryMode: _hasPhysical ? _deliveryMode : null,
+          transportMode: (_hasPhysical && _isNordZone) ? _transportMode : null,
         );
         if (_pendingOrders.isNotEmpty) {
           _tentativeEnCours = _TentativeCommande(
@@ -357,7 +382,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         }
 
         // Mettre à jour le téléphone si demandé
-        if (_saveAddress) {
+        if (_hasPhysical && _saveAddress) {
           try {
             await UserService.instance.updateProfile(
               phone: normaliserTelephone(_phoneController.text),
@@ -387,6 +412,64 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       // GET /payments/{id}/status jusqu'à confirmation, échec ou délai
       // dépassé, puis on redirige vers l'écran de confirmation.
       try {
+        // Livres numériques à 0 F : validés sans paiement (POST /payments/free).
+        final freeIds = _pendingOrders
+            .where((o) => o['isDigital'] == true && lireDouble(o['total']) <= 0)
+            .map((o) => o['id'] as String?)
+            .whereType<String>()
+            .toList();
+        final allOrderNumbers = _pendingOrders
+            .map((o) => o['orderNumber']?.toString() ?? '')
+            .where((n) => n.isNotEmpty)
+            .toList();
+        final firstOrderId = _pendingOrders
+            .map((o) => o['id'] as String?)
+            .whereType<String>()
+            .toList();
+
+        if (freeIds.isNotEmpty) {
+          final claim = await LibraryService.instance.claimFreeOrders(freeIds);
+          if (!claim.success) {
+            if (!mounted) return;
+            setState(() => _isPlacingOrder = false);
+            AppToast.show(
+              context,
+              message: claim.error ?? "Impossible d'ajouter ces livres gratuits.",
+              type: ToastType.error,
+            );
+            return;
+          }
+          // Ces commandes sont terminées : on ne les rejoue pas à un nouvel essai.
+          _pendingOrders = _pendingOrders
+              .where((o) => !freeIds.contains(o['id']))
+              .toList();
+          _tentativeEnCours = _pendingOrders.isEmpty
+              ? null
+              : _TentativeCommande(
+                  _tentativeEnCours?.signature ?? '',
+                  List<Map<String, dynamic>>.from(_pendingOrders),
+                );
+          if (_pendingOrders.isEmpty) {
+            // Tout était gratuit : rien à payer, la Bibliothèque est prête.
+            final args = <String, dynamic>{
+              'orderNumber': allOrderNumbers.join(', '),
+              'orderId': firstOrderId.isNotEmpty ? firstOrderId.first : null,
+              'firstName': _firstNameController.text.trim(),
+              'lastName': _lastNameController.text.trim(),
+              'address': '',
+              'city': '',
+              'country': _selectedCountry,
+              'phone': _phoneController.text.trim(),
+              'paymentMethod': 'Gratuit',
+              'total': 0,
+              'isDigital': true,
+            };
+            _paiementResolu = false;
+            await _finaliserPaiementReussi(args, freeIds, null);
+            return;
+          }
+        }
+
         final orderIds = _pendingOrders
             .map((o) => o['id'] as String?)
             .whereType<String>()
@@ -456,6 +539,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             'city': _cityController.text.trim(),
             'country': _selectedCountry,
             'phone': _phoneController.text.trim(),
+            'isDigital': !_hasPhysical,
             'paymentMethod': '$_selectedOperator (Mobile Money)',
             // Montant réellement facturé (calculé par le serveur).
             'total': (totalServeur > 0 ? totalServeur : _total).round(),
@@ -922,10 +1006,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                   children: [
                     _buildSectionHeader(
                       Icons.local_shipping_outlined,
-                      'Mode de réception',
+                      _hasPhysical ? 'Mode de réception' : 'Réception',
                     ),
                     const SizedBox(height: 12),
-                    _buildDeliveryRecap(),
+                    _hasPhysical ? _buildDeliveryRecap() : _buildDigitalRecap(),
                     if (_deliveryMode != 'retrait' &&
                         _isNordZone &&
                         _transportMode != null) ...[
@@ -935,19 +1019,23 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                     const SizedBox(height: 24),
                     _buildSectionHeader(
                       Icons.location_on_rounded,
-                      _deliveryMode == 'retrait'
-                          ? 'Coordonnées de contact'
-                          : 'Adresse de livraison',
+                      !_hasPhysical
+                          ? (_needsPayment ? 'Coordonnées de paiement' : 'Votre commande')
+                          : (_deliveryMode == 'retrait'
+                              ? 'Coordonnées de contact'
+                              : 'Adresse de livraison'),
                     ),
                     const SizedBox(height: 12),
                     _buildShippingForm(),
-                    const SizedBox(height: 24),
-                    _buildSectionHeader(
-                      Icons.payment_rounded,
-                      'Mode de paiement',
-                    ),
-                    const SizedBox(height: 12),
-                    _buildPaymentSection(),
+                    if (_needsPayment) ...[
+                      const SizedBox(height: 24),
+                      _buildSectionHeader(
+                        Icons.payment_rounded,
+                        'Mode de paiement',
+                      ),
+                      const SizedBox(height: 12),
+                      _buildPaymentSection(),
+                    ],
                     const SizedBox(height: 24),
                     _buildSectionHeader(
                       Icons.receipt_long_rounded,
@@ -1161,7 +1249,66 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     );
   }
 
+  // Récapitulatif « réception » d'un panier de livres numériques.
+  Widget _buildDigitalRecap() {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: AppTheme.successContainer,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.menu_book_rounded, size: 20, color: AppTheme.success),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'Livres numériques : aucune livraison ni adresse. Vous les téléchargez dans votre Bibliothèque dès que la commande est confirmée.',
+              style: GoogleFonts.outfit(
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+                color: AppTheme.success,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Panier de livres seulement : on ne demande que le téléphone et l'opérateur
+  // Mobile Money (et rien du tout si tout est gratuit).
+  Widget _buildDigitalForm() {
+    return Container(
+      decoration: BoxDecoration(
+        color: AppTheme.surface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppTheme.outline),
+      ),
+      padding: const EdgeInsets.all(16),
+      child: _needsPayment
+          ? Column(
+              children: [
+                _buildTextField(
+                  controller: _phoneController,
+                  label: 'Téléphone',
+                  icon: Icons.phone_outlined,
+                  keyboardType: TextInputType.phone,
+                  validator: (v) => (v == null || v.isEmpty) ? 'Requis' : null,
+                ),
+                const SizedBox(height: 12),
+                _buildOperatorDropdown(),
+              ],
+            )
+          : Text(
+              'Ces livres sont gratuits : aucun paiement à faire.',
+              style: GoogleFonts.outfit(fontSize: 13, color: AppTheme.textSecondary),
+            ),
+    );
+  }
+
   Widget _buildShippingForm() {
+    if (!_hasPhysical) return _buildDigitalForm();
     return Container(
       decoration: BoxDecoration(
         color: AppTheme.surface,
@@ -1688,7 +1835,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                 ],
                 const SizedBox(height: 8),
                 _buildPriceLine(
-                  _deliveryMode == 'retrait' ? 'Retrait en boutique' : 'Livraison',
+                  !_hasPhysical
+                      ? 'Livraison (aucune)'
+                      : (_deliveryMode == 'retrait' ? 'Retrait en boutique' : 'Livraison'),
                   _currentDeliveryFee,
                   color: _deliveryMode == 'retrait' ? AppTheme.success : null,
                 ),
@@ -1737,9 +1886,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    _deliveryMode == 'retrait'
-                        ? 'Retrait en boutique : disponible sous 24–48h, tu seras prévenu(e)'
-                        : 'Livraison estimée : 2–4 jours ouvrables',
+                    !_hasPhysical
+                        ? 'Livre numérique : disponible dans votre Bibliothèque après confirmation'
+                        : (_deliveryMode == 'retrait'
+                            ? 'Retrait en boutique : disponible sous 24–48h, tu seras prévenu(e)'
+                            : 'Livraison estimée : 2–4 jours ouvrables'),
                     style: GoogleFonts.outfit(
                       fontSize: 12,
                       fontWeight: FontWeight.w500,
@@ -1804,7 +1955,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text(
-                'Total à payer',
+                _needsPayment ? 'Total à payer' : 'Total',
                 style: GoogleFonts.outfit(
                   fontSize: 13,
                   color: AppTheme.textSecondary,
@@ -1863,7 +2014,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                         const Icon(Icons.lock_rounded, size: 18),
                         const SizedBox(width: 8),
                         Text(
-                          'Payer avec FeeXPay',
+                          _needsPayment ? 'Payer avec FeeXPay' : 'Obtenir gratuitement',
                           style: GoogleFonts.outfit(
                             fontSize: 16,
                             fontWeight: FontWeight.w700,
@@ -1882,12 +2033,14 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   /// crée alors une commande par boutique (voir OrdersService.createFromCart)
   /// et renvoie la liste complète — on ne garde plus seulement la première.
   Future<List<Map<String, dynamic>>> _createOrders({
-    required String addressId,
+    String? addressId,
     String? instructions,
     String? deliveryMode,
     String? transportMode,
   }) async {
-    final data = <String, dynamic>{'addressId': addressId};
+    final data = <String, dynamic>{
+      if (addressId != null && addressId.isNotEmpty) 'addressId': addressId,
+    };
     // Code promo validé dans le panier (nom du champ : `couponCode`, voir
     // CreateOrderDto côté serveur).
     if (_couponCode != null && _couponCode!.isNotEmpty) {

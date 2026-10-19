@@ -28,6 +28,8 @@ import '../presentation/categories_screen/categories_screen.dart';
 import '../presentation/wishlist_screen/wishlist_screen.dart';
 import '../presentation/followed_shops_screen/followed_shops_screen.dart';
 import '../presentation/delivery_request_screen/delivery_request_screen.dart';
+import '../presentation/become_agent_screen/become_agent_screen.dart';
+import '../presentation/delivery_request_screen/my_express_deliveries_screen.dart';
 import '../presentation/support_help_screen/support_help_screen.dart';
 import '../presentation/support_help_screen/ticket_detail_screen.dart';
 import '../presentation/legal_page_screen/legal_page_screen.dart';
@@ -48,6 +50,7 @@ import '../presentation/agent_complete_documents_screen/agent_complete_documents
 import '../presentation/change_email_screen/change_email_screen.dart';
 import '../presentation/become_vendor_screen/become_vendor_screen.dart';
 import '../presentation/all_products_screen/all_products_screen.dart';
+import '../presentation/library_screen/library_screen.dart';
 
 class AppRoutes {
   static const String initial = '/';
@@ -79,6 +82,7 @@ class AppRoutes {
   static const String wishlist = '/wishlist-screen';
   static const String followedShops = '/followed-shops-screen';
   static const String deliveryRequest = '/delivery-request-screen';
+  static const String myExpressDeliveries = '/my-express-deliveries-screen';
   static const String supportHelp = '/support-help-screen';
   // Detail d'un ticket de support. Argument : id du ticket (String) ou Map
   // { 'ticketId': String, 'fromSupport': bool }.
@@ -108,8 +112,11 @@ class AppRoutes {
   static const String changeEmail = '/change-email-screen';
   // Première demande vendeur d'un compte déjà connecté. Résultat : true si envoyée.
   static const String becomeVendor = '/become-vendor-screen';
+  static const String becomeAgent = '/become-agent-screen';
   // Liste complète des produits actifs (par pages).
   static const String allProducts = '/all-products-screen';
+  // « Ma Bibliothèque » : livres numériques achetés (téléchargement PDF).
+  static const String library = '/library-screen';
 
   static Map<String, WidgetBuilder> routes = {
     initial: (context) => const AuthGate(),
@@ -143,6 +150,7 @@ class AppRoutes {
       return ChangeEmailScreen(currentEmail: a is String ? a : '');
     },
     becomeVendor: (context) => const BecomeVendorScreen(),
+    becomeAgent: (context) => const BecomeAgentScreen(),
     allProducts: (context) => const AllProductsScreen(),
     onboarding: (context) => const OnboardingScreen(),
     notifications: (context) => const NotificationsScreen(),
@@ -156,8 +164,10 @@ class AppRoutes {
       return CategoriesScreen(initialCategory: a is String ? a : null);
     },
     wishlist: (context) => const WishlistScreen(),
+    library: (context) => const LibraryScreen(),
     followedShops: (context) => const FollowedShopsScreen(),
     deliveryRequest: (context) => const DeliveryRequestScreen(),
+    myExpressDeliveries: (context) => const MyExpressDeliveriesScreen(),
     supportHelp: (context) => const SupportHelpScreen(),
     ticketDetail: (context) {
       final a = ModalRoute.of(context)?.settings.arguments;

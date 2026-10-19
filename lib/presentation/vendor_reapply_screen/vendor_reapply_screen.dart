@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
+import '../../services/photo_picker_service.dart';
 import 'dart:io';
 import '../../theme/app_theme.dart';
 import '../../widgets/app_toast.dart';
@@ -50,7 +51,6 @@ class _VendorReapplyScreenState extends State<VendorReapplyScreen> {
   bool _termsAccepted = true;
   bool _fraudAccepted = true;
 
-  final _picker = ImagePicker();
 
   @override
   void initState() {
@@ -113,21 +113,21 @@ class _VendorReapplyScreenState extends State<VendorReapplyScreen> {
 
   Future<void> _pickIdDocument() async {
     final file =
-        await _picker.pickImage(source: ImageSource.gallery, imageQuality: 90);
-    if (file != null) setState(() => _idDocument = file);
+        await PhotoPickerService.pick(context, imageQuality: 90);
+    if (file != null && mounted) setState(() => _idDocument = file);
   }
 
   Future<void> _pickSelfie() async {
     final file =
-        await _picker.pickImage(source: ImageSource.gallery, imageQuality: 90);
-    if (file != null) setState(() => _selfie = file);
+        await PhotoPickerService.pick(context, imageQuality: 90, frontCamera: true);
+    if (file != null && mounted) setState(() => _selfie = file);
   }
 
   Future<void> _pickSampleProduct() async {
     if (_sampleProducts.length >= 3) return;
     final file =
-        await _picker.pickImage(source: ImageSource.gallery, imageQuality: 85);
-    if (file != null) setState(() => _sampleProducts.add(file));
+        await PhotoPickerService.pick(context, imageQuality: 85);
+    if (file != null && mounted) setState(() => _sampleProducts.add(file));
   }
 
   void _removeSampleProduct(int index) {

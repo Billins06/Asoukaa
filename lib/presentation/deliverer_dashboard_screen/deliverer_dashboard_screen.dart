@@ -14,6 +14,7 @@ import '../../services/nest_auth_service.dart';
 import '../../services/api_service.dart';
 import '../../services/notification_service.dart';
 import '../../services/deliverer_availability.dart';
+import '../../services/express_delivery_service.dart';
 
 class DelivererDashboardScreen extends StatefulWidget {
   const DelivererDashboardScreen({super.key});
@@ -2070,23 +2071,25 @@ class _CoursesExpressTab extends StatefulWidget {
 }
 
 class _CoursesExpressTabState extends State<_CoursesExpressTab> {
+  final _service = ExpressDeliveryService.instance;
   List<Map<String, dynamic>> _requests = [];
   bool _isLoading = true;
   String _filter = 'pending';
+  String? _busyId;
 
-  static const Map<String, Map<String, dynamic>> _urgencyConfig = {
+  static const Map<String, Map<String, dynamic>> _delaiConfig = {
     'normal': {
-      'label': 'Normal',
+      'label': 'Normal · dans la journée',
       'color': Color(0xFF16A34A),
       'icon': Icons.schedule_rounded,
     },
     'urgent': {
-      'label': 'Urgent',
+      'label': 'Urgent · 2 à 3 h',
       'color': Color(0xFFD97706),
       'icon': Icons.bolt_rounded,
     },
     'express': {
-      'label': 'Express',
+      'label': 'Express · moins d\'1 h',
       'color': Color(0xFFDC2626),
       'icon': Icons.rocket_launch_rounded,
     },
@@ -2098,70 +2101,97 @@ class _CoursesExpressTabState extends State<_CoursesExpressTab> {
     _loadRequests();
   }
 
-  Future<void> _loadRequests() async {
-    setState(() => _isLoading = true);
+  Future<void> _loadRequests({bool showSpinner = true}) async {
+    if (!mounted) return;
+    final f = _filter;
+    if (showSpinner) setState(() => _isLoading = true);
     try {
-      final String path;
-      final Map<String, dynamic> params;
-      // Routes réelles du backend (module delivery, préfixe au singulier) :
-      // les courses express = les "livraisons indépendantes".
-      if (_filter == 'pending') {
-        path = '/api/v1/delivery/independent/available';
-        params = {};
-      } else {
-        path = '/api/v1/delivery/independent/mine';
-        params = {};
-      }
-
-      final r = await ApiService.instance.client.get(path, queryParameters: params.isNotEmpty ? params : null);
-      final raw = r.data;
-      final list = raw is List ? raw : (raw is Map ? (raw['data'] ?? raw['items'] ?? []) as List : []);
-
-      if (mounted) {
+      final list = f == 'pending'
+          ? await _service.available()
+          : await _service.mine();
+      // Réponse d'un ancien filtre (bascule rapide) : on l'ignore.
+      if (mounted && f == _filter) {
         setState(() {
-          _requests = list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+          _requests = list;
           _isLoading = false;
         });
       }
     } catch (_) {
-      if (mounted) setState(() => _isLoading = false);
+      if (mounted && f == _filter) setState(() => _isLoading = false);
     }
   }
 
-  Future<void> _acceptRequest(String requestId) async {
+  void _snack(String msg, {bool error = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg, style: GoogleFonts.outfit()),
+        backgroundColor: error ? AppTheme.error : AppTheme.success,
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  Future<void> _run(String id, Future<void> Function() action, String okMsg,
+      String failMsg) async {
+    if (!mounted) return;
+    setState(() => _busyId = id);
     try {
-      await ApiService.instance.client.patch(
-        '/api/v1/delivery/independent/$requestId/accept',
-      );
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'Course acceptée ! Contactez le client.',
-              style: GoogleFonts.outfit(),
-            ),
-            backgroundColor: AppTheme.success,
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-        _loadRequests();
-      }
+      await action();
+      _snack(okMsg);
     } catch (e) {
+      _snack(ExpressDeliveryService.errorMessage(e, failMsg), error: true);
+    } finally {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'Erreur: impossible d\'accepter la course.',
-              style: GoogleFonts.outfit(),
-            ),
-            backgroundColor: AppTheme.error,
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
+        setState(() => _busyId = null);
+        await _loadRequests(showSpinner: false);
       }
     }
   }
+
+  Future<void> _acceptRequest(Map<String, dynamic> r) async {
+    final id = r['id'] as String;
+    final price = formatFcfa(toNum(r['proposedPrice']));
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Accepter à $price ?', style: GoogleFonts.outfit()),
+        content: Text(
+          'Le client aura 15 minutes pour payer. Vous serez prévenu dès que c\'est fait.',
+          style: GoogleFonts.outfit(),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: Text('Annuler', style: GoogleFonts.outfit())),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: Text('Accepter', style: GoogleFonts.outfit())),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    await _run(id, () => _service.accept(id), 'Prix accepté. En attente du paiement du client.',
+        'Impossible d\'accepter la course.');
+  }
+
+  Future<void> _counterRequest(Map<String, dynamic> r) async {
+    final id = r['id'] as String;
+    final price = await showDialog<int>(
+      context: context,
+      builder: (ctx) => _CounterPriceDialog(
+        clientPrice: formatFcfa(toNum(r['proposedPrice'])),
+      ),
+    );
+    if (price == null || !mounted) return;
+    await _run(id, () => _service.counter(id, price),
+        'Contre-proposition envoyée. Le client a 15 min pour répondre.',
+        'Impossible d\'envoyer la proposition.');
+  }
+
+  Future<void> _setStatus(String id, String status, String okMsg) =>
+      _run(id, () => _service.updateStatus(id, status), okMsg,
+          'Mise à jour impossible.');
 
   @override
   Widget build(BuildContext context) {
@@ -2187,16 +2217,26 @@ class _CoursesExpressTabState extends State<_CoursesExpressTab> {
                 )
               : RefreshIndicator(
                   color: AppTheme.primary,
-                  onRefresh: _loadRequests,
+                  onRefresh: () => _loadRequests(showSpinner: false),
                   child: ListView.builder(
                     padding: const EdgeInsets.all(16),
                     itemCount: _requests.length,
-                    itemBuilder: (_, i) => _DeliveryRequestCard(
-                      request: _requests[i],
-                      urgencyConfig: _urgencyConfig,
-                      showAcceptButton: _filter == 'pending',
-                      onAccept: () => _acceptRequest(_requests[i]['id']),
-                    ),
+                    itemBuilder: (_, i) {
+                      final r = _requests[i];
+                      final id = r['id'] as String;
+                      return _DeliveryRequestCard(
+                        request: r,
+                        delaiConfig: _delaiConfig,
+                        isAvailableList: _filter == 'pending',
+                        busy: _busyId == id,
+                        onAccept: () => _acceptRequest(r),
+                        onCounter: () => _counterRequest(r),
+                        onPickedUp: () => _setStatus(
+                            id, 'en cours de livraison', 'Colis récupéré.'),
+                        onDelivered: () =>
+                            _setStatus(id, 'livré', 'Course terminée. Bravo !'),
+                      );
+                    },
                   ),
                 ),
         ),
@@ -2284,41 +2324,64 @@ class _FilterChip extends StatelessWidget {
 
 class _DeliveryRequestCard extends StatelessWidget {
   final Map<String, dynamic> request;
-  final Map<String, Map<String, dynamic>> urgencyConfig;
-  final bool showAcceptButton;
+  final Map<String, Map<String, dynamic>> delaiConfig;
+  final bool isAvailableList;
+  final bool busy;
   final VoidCallback onAccept;
+  final VoidCallback onCounter;
+  final VoidCallback onPickedUp;
+  final VoidCallback onDelivered;
 
   const _DeliveryRequestCard({
     required this.request,
-    required this.urgencyConfig,
-    required this.showAcceptButton,
+    required this.delaiConfig,
+    required this.isAvailableList,
+    required this.busy,
     required this.onAccept,
+    required this.onCounter,
+    required this.onPickedUp,
+    required this.onDelivered,
   });
 
   @override
   Widget build(BuildContext context) {
-    final urgency = request['urgency'] as String? ?? 'normal';
-    final config = urgencyConfig[urgency] ?? urgencyConfig['normal']!;
+    final delai = request['delai'] as String? ?? 'normal';
+    final config = delaiConfig[delai] ?? delaiConfig['normal']!;
     final color = config['color'] as Color;
-    final price = (request['proposed_price'] as num?)?.toDouble() ?? 0.0;
-    final requester = request['requester'] as Map<String, dynamic>?;
-    final requesterName = requester?['full_name'] as String? ?? 'Client';
-    final status = request['status'] as String? ?? 'pending';
+    final status = request['status'] as String? ?? 'en attente';
+    final requester = request['requester'] as Map?;
+    final requesterName = requester?['prenom'] as String? ?? 'Client';
+    final requesterPhone = requester?['phone'] as String?;
 
-    final statusColors = {
-      'pending': AppTheme.warning,
-      'accepted': AppTheme.primary,
-      'in_progress': AppTheme.warning,
-      'completed': AppTheme.success,
-      'cancelled': AppTheme.error,
+    // Prix affiché : prix du client (liste), puis prix convenu / proposé.
+    final num? price = isAvailableList
+        ? toNum(request['proposedPrice'])
+        : (status == 'contre-proposition'
+              ? toNum(request['counterPrice'])
+              : (toNum(request['tarifConvenu']) ??
+                    toNum(request['proposedPrice'])));
+
+    const statusColors = {
+      'en attente': AppTheme.warning,
+      'contre-proposition': AppTheme.primary,
+      'paiement en attente': AppTheme.primary,
+      'accepté': AppTheme.success,
+      'en cours de livraison': AppTheme.warning,
+      'livré': AppTheme.success,
+      'annulée': AppTheme.error,
     };
-    final statusLabels = {
-      'pending': 'En attente',
-      'accepted': 'Acceptée',
-      'in_progress': 'En cours',
-      'completed': 'Terminée',
-      'cancelled': 'Annulée',
+    const statusLabels = {
+      'en attente': 'Disponible',
+      'contre-proposition': 'Offre envoyée — réponse du client',
+      'paiement en attente': 'Attente du paiement du client',
+      'accepté': 'Payée — à récupérer',
+      'en cours de livraison': 'En livraison',
+      'livré': 'Livrée',
+      'annulée': 'Annulée',
     };
+
+    final notes = request['notes'] as String?;
+    final desc = request['packageDescription'] as String? ?? '';
 
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
@@ -2336,58 +2399,38 @@ class _DeliveryRequestCard extends StatelessWidget {
               children: [
                 Row(
                   children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 3,
-                      ),
-                      decoration: BoxDecoration(
-                        color: color.withAlpha(25),
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            config['icon'] as IconData,
-                            size: 12,
-                            color: color,
-                          ),
-                          const SizedBox(width: 4),
-                          Text(
-                            config['label'] as String,
-                            style: GoogleFonts.outfit(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                              color: color,
+                    Flexible(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: color.withAlpha(25),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(config['icon'] as IconData,
+                                size: 12, color: color),
+                            const SizedBox(width: 4),
+                            Flexible(
+                              child: Text(
+                                config['label'] as String,
+                                overflow: TextOverflow.ellipsis,
+                                style: GoogleFonts.outfit(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                  color: color,
+                                ),
+                              ),
                             ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 3,
-                      ),
-                      decoration: BoxDecoration(
-                        color: (statusColors[status] ?? AppTheme.muted)
-                            .withAlpha(20),
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      child: Text(
-                        statusLabels[status] ?? status,
-                        style: GoogleFonts.outfit(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                          color: statusColors[status] ?? AppTheme.muted,
+                          ],
                         ),
                       ),
                     ),
-                    const Spacer(),
+                    const SizedBox(width: 8),
                     Text(
-                      '${price.toStringAsFixed(0)} FCFA',
+                      formatFcfa(price),
                       style: GoogleFonts.outfit(
                         fontSize: 16,
                         fontWeight: FontWeight.w700,
@@ -2396,74 +2439,34 @@ class _DeliveryRequestCard extends StatelessWidget {
                     ),
                   ],
                 ),
+                if (!isAvailableList) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    statusLabels[status] ?? status,
+                    style: GoogleFonts.outfit(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: statusColors[status] ?? AppTheme.muted,
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 12),
                 _RouteRow(
-                  pickup: request['pickup_address'] as String? ?? '',
-                  delivery: request['dropoff_address'] as String? ?? '',
+                  pickup: request['pickupAddress'] as String? ?? '',
+                  delivery: request['adresseLivraison'] as String? ?? '',
                 ),
-                const SizedBox(height: 10),
-                Row(
-                  children: [
-                    const Icon(
-                      Icons.inventory_2_outlined,
-                      size: 13,
-                      color: AppTheme.muted,
-                    ),
-                    const SizedBox(width: 5),
-                    Expanded(
-                      child: Text(
-                        request['package_description'] as String? ?? '',
-                        style: GoogleFonts.outfit(
-                          fontSize: 12,
-                          color: AppTheme.textSecondary,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                        maxLines: 2,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 6),
-                Row(
-                  children: [
-                    const Icon(
-                      Icons.person_outline_rounded,
-                      size: 13,
-                      color: AppTheme.muted,
-                    ),
-                    const SizedBox(width: 5),
-                    Flexible(
-                      child: Text(
-                        requesterName,
-                        style: GoogleFonts.outfit(
-                          fontSize: 12,
-                          color: AppTheme.muted,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                ),
-                if (request['notes'] != null &&
-                    (request['notes'] as String).isNotEmpty) ...[
-                  const SizedBox(height: 6),
+                if (desc.isNotEmpty) ...[
+                  const SizedBox(height: 10),
                   Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Icon(
-                        Icons.info_outline_rounded,
-                        size: 13,
-                        color: AppTheme.muted,
-                      ),
+                      const Icon(Icons.inventory_2_outlined,
+                          size: 13, color: AppTheme.muted),
                       const SizedBox(width: 5),
                       Expanded(
                         child: Text(
-                          request['notes'] as String,
+                          desc,
                           style: GoogleFonts.outfit(
-                            fontSize: 12,
-                            color: AppTheme.muted,
-                          ),
+                              fontSize: 12, color: AppTheme.textSecondary),
                           overflow: TextOverflow.ellipsis,
                           maxLines: 2,
                         ),
@@ -2471,53 +2474,177 @@ class _DeliveryRequestCard extends StatelessWidget {
                     ],
                   ),
                 ],
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    const Icon(Icons.person_outline_rounded,
+                        size: 13, color: AppTheme.muted),
+                    const SizedBox(width: 5),
+                    Flexible(
+                      child: Text(
+                        requesterPhone != null && requesterPhone.isNotEmpty
+                            ? '$requesterName · $requesterPhone'
+                            : requesterName,
+                        style: GoogleFonts.outfit(
+                            fontSize: 12, color: AppTheme.muted),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+                if (notes != null && notes.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Icon(Icons.info_outline_rounded,
+                          size: 13, color: AppTheme.muted),
+                      const SizedBox(width: 5),
+                      Expanded(
+                        child: Text(
+                          notes,
+                          style: GoogleFonts.outfit(
+                              fontSize: 12, color: AppTheme.muted),
+                          overflow: TextOverflow.ellipsis,
+                          maxLines: 2,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+                if (busy)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 8),
+                    child: LinearProgressIndicator(color: AppTheme.primary),
+                  ),
               ],
             ),
           ),
-          if (showAcceptButton)
-            Container(
-              decoration: const BoxDecoration(
-                border: Border(
-                  top: BorderSide(color: AppTheme.outlineVariant, width: 1),
-                ),
-              ),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: TextButton(
-                      onPressed: () {},
-                      child: Text(
-                        'Détails',
-                        style: GoogleFonts.outfit(
-                          fontSize: 13,
-                          color: AppTheme.muted,
-                        ),
-                      ),
-                    ),
-                  ),
-                  Container(
-                    width: 1,
-                    height: 36,
-                    color: AppTheme.outlineVariant,
-                  ),
-                  Expanded(
-                    child: TextButton(
-                      onPressed: onAccept,
-                      child: Text(
-                        'Accepter la course',
-                        style: GoogleFonts.outfit(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                          color: AppTheme.primary,
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
+          if (isAvailableList)
+            _actionRow([
+              _action('Proposer un prix', AppTheme.muted, busy ? null : onCounter),
+              _action('Accepter ${formatFcfa(price)}', AppTheme.primary,
+                  busy ? null : onAccept,
+                  bold: true),
+            ])
+          else if (status == 'accepté')
+            _actionRow([
+              _action('Colis récupéré', AppTheme.primary, busy ? null : onPickedUp,
+                  bold: true),
+              _action('Marquer livré', AppTheme.success, busy ? null : onDelivered,
+                  bold: true),
+            ])
+          else if (status == 'en cours de livraison')
+            _actionRow([
+              _action('Marquer livré', AppTheme.success, busy ? null : onDelivered,
+                  bold: true),
+            ]),
         ],
       ),
+    );
+  }
+
+  Widget _action(String label, Color color, VoidCallback? onTap,
+      {bool bold = false}) {
+    return Expanded(
+      child: TextButton(
+        onPressed: onTap,
+        child: Text(
+          label,
+          textAlign: TextAlign.center,
+          style: GoogleFonts.outfit(
+            fontSize: 13,
+            fontWeight: bold ? FontWeight.w600 : FontWeight.w400,
+            color: color,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _actionRow(List<Widget> children) {
+    final items = <Widget>[];
+    for (var i = 0; i < children.length; i++) {
+      if (i > 0) {
+        items.add(Container(
+            width: 1, height: 36, color: AppTheme.outlineVariant));
+      }
+      items.add(children[i]);
+    }
+    return Container(
+      decoration: const BoxDecoration(
+        border: Border(top: BorderSide(color: AppTheme.outlineVariant, width: 1)),
+      ),
+      child: Row(children: items),
+    );
+  }
+}
+
+
+/// Saisie de la contre-proposition du livreur (gère son propre contrôleur).
+class _CounterPriceDialog extends StatefulWidget {
+  final String clientPrice;
+  const _CounterPriceDialog({required this.clientPrice});
+
+  @override
+  State<_CounterPriceDialog> createState() => _CounterPriceDialogState();
+}
+
+class _CounterPriceDialogState extends State<_CounterPriceDialog> {
+  final _ctrl = TextEditingController();
+  String? _error;
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final v = int.tryParse(_ctrl.text.trim());
+    if (v == null || v < 500 || v > 500000) {
+      setState(() => _error = 'Entrez un prix entre 500 et 500 000 FCFA');
+      return;
+    }
+    Navigator.pop(context, v);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text('Proposer un autre prix', style: GoogleFonts.outfit()),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Le client propose ${widget.clientPrice}. '
+            'Vous ne pouvez faire qu\'UNE proposition.',
+            style: GoogleFonts.outfit(fontSize: 13),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _ctrl,
+            autofocus: true,
+            keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            decoration: InputDecoration(
+              labelText: 'Votre prix',
+              suffixText: 'FCFA',
+              errorText: _error,
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Annuler', style: GoogleFonts.outfit())),
+        TextButton(
+            onPressed: _submit,
+            child: Text('Envoyer', style: GoogleFonts.outfit())),
+      ],
     );
   }
 }

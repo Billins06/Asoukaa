@@ -58,6 +58,8 @@ class _HomeScreenState extends State<HomeScreen>
   // n'apparait pas (ni repli, ni message d'erreur).
   List<Map<String, dynamic>> _bestShops = [];
   int _shopsGen = 0;
+  // Incrémenté à chaque rechargement de l'accueil : relit les bannières.
+  int _bannerRefresh = 0;
 
   // « Tous les produits » : défilement infini de GET /products?page=N.
   static const int _productsPageSize = 20;
@@ -127,6 +129,7 @@ class _HomeScreenState extends State<HomeScreen>
       _bestShops = [];
       _shopsGen++;
       _productsGen++;
+      _bannerRefresh++;
       _allProducts.clear();
       _allProductIds.clear();
       _productsPage = 0;
@@ -383,9 +386,9 @@ class _HomeScreenState extends State<HomeScreen>
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const SizedBox(height: 8),
-            const HomeBannerWidget(),
-            const SizedBox(height: 16),
+            // L'espacement autour des bannières est porté par le widget
+            // lui-même : aucune marge quand il n'y a aucune bannière.
+            HomeBannerWidget(refreshToken: _bannerRefresh),
             _buildDeliveryRequestBanner(),
             const SizedBox(height: 20),
             const HomeCategoriesWidget(),

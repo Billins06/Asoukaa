@@ -1,3 +1,4 @@
+import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -69,6 +70,7 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
           _isLoading = false;
         });
         _checkWishlistStatus();
+        _checkOwnership();
         _loadSellerPresence((_product['shopId'] ?? '').toString());
       } else {
         if (mounted) setState(() => _isLoading = false);
@@ -76,6 +78,33 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
     } catch (_) {
       if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  // Livre numérique déjà acheté ? (GET /library/ids) → bouton « Ma Bibliothèque »
+  // au lieu de « Panier ». Sans effet pour un produit physique ou si non connecté.
+  Future<void> _checkOwnership() async {
+    if (_product['isDigital'] != true) return;
+    final productId = (_product['id'] ?? '').toString();
+    if (productId.isEmpty) return;
+    try {
+      final loggedIn = await NestAuthService.instance.isLoggedIn();
+      if (!loggedIn || !mounted) return;
+      final res = await ApiService.instance.client.get('/api/v1/library/ids');
+      final data = res.data;
+      final ids = (data is Map && data['productIds'] is List)
+          ? (data['productIds'] as List).map((e) => e.toString()).toSet()
+          : <String>{};
+      if (!mounted) return;
+      if ((_product['id'] ?? '').toString() != productId) return;
+      setState(() => _product = {..._product, 'owned': ids.contains(productId)});
+    } catch (_) {}
+  }
+
+  Future<void> _openLibrary() async {
+    final loggedIn = await NestAuthService.instance.isLoggedIn()
+        .timeout(const Duration(seconds: 3), onTimeout: () => false);
+    if (!mounted) return;
+    Navigator.pushNamed(context, loggedIn ? AppRoutes.library : AppRoutes.signUpLogin);
   }
 
   // Présence du vendeur (« En ligne » / « Vu … ») : GET /products/:id (public)
@@ -193,6 +222,29 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
       }
     }
 
+    // Livre numérique : la fiche affiche auteur, pages, langue, format et taille.
+    final isDigital = p['isDigital'] == true;
+    if (isDigital) {
+      final author = (p['author'] ?? '').toString().trim();
+      final pages = lireInt(p['pageCount']);
+      final language = (p['language'] ?? '').toString().trim();
+      final sizeBytes = lireInt(p['fileSizeBytes']);
+      specList = [
+        if (author.isNotEmpty) {'key': 'Auteur', 'value': author},
+        if (pages > 0) {'key': 'Pages', 'value': '$pages'},
+        if (language.isNotEmpty) {'key': 'Langue', 'value': language},
+        {'key': 'Format', 'value': 'PDF'},
+        if (sizeBytes > 0)
+          {
+            'key': 'Taille',
+            'value': sizeBytes >= 1024 * 1024
+                ? '${(sizeBytes / (1024 * 1024)).toStringAsFixed(1)} Mo'
+                : '${(sizeBytes / 1024).ceil()} Ko',
+          },
+        ...specList,
+      ];
+    }
+
     // Prix dégressifs : GET /products/:id les renvoie sous `tierPrices`
     // [{minQuantity, maxQuantity, price: "1500.00"}] (décimal en chaîne).
     // ⚠️ Avant, seules les clés price_tiers/priceTiers étaient lues : la
@@ -274,6 +326,8 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
 
     return {
       'id': p['id'] ?? '',
+      'isDigital': isDigital,
+      'owned': _product['owned'] == true,
       'variantId': p['variantId'],
       'name': p['name'] ?? '',
       'shop': shopName,
@@ -370,6 +424,10 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
       Navigator.pushNamed(context, AppRoutes.signUpLogin);
       return;
     }
+    if (_product['owned'] == true) {
+      await _openLibrary();
+      return;
+    }
     final variantId = _product['variantId'];
     if (variantId == null || variantId.toString().isEmpty) {
       ScaffoldMessenger.of(context).clearSnackBars();
@@ -416,13 +474,21 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
       Future.delayed(const Duration(seconds: 2), () {
         if (mounted) ScaffoldMessenger.of(context).hideCurrentSnackBar();
       });
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
+      // Message du serveur (ex. « Ce livre est déjà dans votre panier ») s'il existe.
+      var msg = 'Erreur lors de l\'ajout au panier';
+      if (e is DioException) {
+        final data = e.response?.data;
+        final m = data is Map ? data['message'] : null;
+        if (m is String && m.isNotEmpty) msg = m;
+        if (m is List && m.isNotEmpty) msg = m.first.toString();
+      }
       ScaffoldMessenger.of(context).clearSnackBars();
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Erreur lors de l\'ajout au panier'),
-          backgroundColor: Color(0xFFDC2626),
+        SnackBar(
+          content: Text(msg),
+          backgroundColor: const Color(0xFFDC2626),
           behavior: SnackBarBehavior.floating,
         ),
       );
@@ -441,7 +507,15 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
         },
       );
       return true;
-    } catch (_) {
+    } catch (e) {
+      // Livre déjà dans le panier : on peut quand même passer au panier / paiement.
+      if (_product['isDigital'] == true && e is DioException) {
+        final data = e.response?.data;
+        final m = data is Map ? data['message']?.toString() ?? '' : '';
+        if (e.response?.statusCode == 400 && m.contains('déjà dans votre panier')) {
+          return true;
+        }
+      }
       return false;
     }
   }
@@ -600,16 +674,18 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
                     const SizedBox(height: 4),
                     ProductInfoWidget(product: _pricedProduct),
                     const SizedBox(height: 8),
-                    ProductPriceTiersWidget(
-                      priceTiers:
-                          (_product['priceTiers'] as List<dynamic>?)
-                              ?.cast<Map<String, dynamic>>() ??
-                          [],
-                      basePrice: _toInt(_product['price']),
-                      currentQty: _quantity,
-                      onQtyChanged: (q) => setState(() => _quantity = q),
-                    ),
-                    const SizedBox(height: 8),
+                    if (_product['isDigital'] != true) ...[
+                      ProductPriceTiersWidget(
+                        priceTiers:
+                            (_product['priceTiers'] as List<dynamic>?)
+                                ?.cast<Map<String, dynamic>>() ??
+                            [],
+                        basePrice: _toInt(_product['price']),
+                        currentQty: _quantity,
+                        onQtyChanged: (q) => setState(() => _quantity = q),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
                     ProductSellerCardWidget(product: _product),
                     const SizedBox(height: 8),
                     ProductTabsWidget(product: _product),
@@ -635,6 +711,7 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
                   setState(() => _cartCount++);
                   _addToCart();
                 },
+                onOpenLibrary: _openLibrary,
                 onBuyNow: () async {
                   final added = await _ensureInCart();
                   if (!mounted) return;
@@ -768,16 +845,18 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
                         children: [
                           ProductInfoWidget(product: _pricedProduct),
                           const SizedBox(height: 12),
-                          ProductPriceTiersWidget(
-                            priceTiers:
-                                (_product['priceTiers'] as List<dynamic>?)
-                                    ?.cast<Map<String, dynamic>>() ??
-                                [],
-                            basePrice: _toInt(_product['price']),
-                            currentQty: _quantity,
-                            onQtyChanged: (q) => setState(() => _quantity = q),
-                          ),
-                          const SizedBox(height: 12),
+                          if (_product['isDigital'] != true) ...[
+                            ProductPriceTiersWidget(
+                              priceTiers:
+                                  (_product['priceTiers'] as List<dynamic>?)
+                                      ?.cast<Map<String, dynamic>>() ??
+                                  [],
+                              basePrice: _toInt(_product['price']),
+                              currentQty: _quantity,
+                              onQtyChanged: (q) => setState(() => _quantity = q),
+                            ),
+                            const SizedBox(height: 12),
+                          ],
                           ProductSellerCardWidget(product: _product),
                           const SizedBox(height: 12),
                           ProductActionBarWidget(
@@ -787,6 +866,7 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
                               setState(() => _cartCount++);
                               _addToCart();
                             },
+                            onOpenLibrary: _openLibrary,
                             onBuyNow: () async {
                               final added = await _ensureInCart();
                               if (!mounted) return;

@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:image_picker/image_picker.dart';
+import '../../services/photo_picker_service.dart';
 
 import 'package:dio/dio.dart';
 
@@ -105,6 +107,22 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
   bool _isSubmitting = false;
   bool _isSuccess = false;
 
+  // ── Livre numérique (PDF) ──
+  bool _isDigital = false;
+  final _auteurController = TextEditingController();
+  final _pagesController = TextEditingController();
+  final List<String> _languesLivre = [
+    'Français', 'Anglais', 'Fon', 'Yoruba', 'Autre',
+  ];
+  String _langueLivre = 'Français';
+  // Chemin renvoyé par le serveur après l'envoi du PDF (null = pas de nouveau fichier).
+  String? _ebookPath;
+  String? _ebookName;
+  int? _ebookSize;
+  bool _ebookUploading = false;
+  double _ebookProgress = 0;
+  static const int _ebookMaxBytes = 50 * 1024 * 1024;
+
   @override
   void initState() {
     super.initState();
@@ -154,8 +172,10 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
   }
 
   // Categories de niveau 1 (parentId null) : premier menu.
+  // Livre numérique : seulement les catégories de livres ; produit physique : les autres.
   List<Map<String, dynamic>> get _parentCategoryOptions => _categoryOptions
       .where((c) => c['parentId'] == null || c['parentId'].toString().isEmpty)
+      .where((c) => (c['isDigital'] == true) == _isDigital)
       .toList();
 
   // Sous-categories directes d'une categorie parente donnee : second menu,
@@ -175,6 +195,8 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
   // categorie, le stock et les images ; moins pour marque/lieu.
   void _prefillFromProduct(Map<String, dynamic> p) {
     _editingProductId = (p['id'] ?? '').toString();
+    // Nature du produit d'abord : la validation du prix (0 permis pour un livre) en dépend.
+    _isDigital = p['isDigital'] == true;
     _nomController.text = p['prod_name'] as String? ?? '';
     _descriptionController.text = p['description'] as String? ?? '';
     final basePrice = p['basePrice'];
@@ -220,6 +242,24 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
     }
 
     _prefillTiers(p['tierPrices']);
+
+    // Livre numérique : on reprend les champs du livre (le PDF actuel est conservé
+    // tant que le vendeur n'en choisit pas un nouveau).
+    _isDigital = p['isDigital'] == true;
+    if (_isDigital) {
+      _auteurController.text = p['author'] as String? ?? '';
+      final pages = p['pageCount'];
+      _pagesController.text = pages == null ? '' : pages.toString();
+      final lang = (p['language'] as String?)?.trim();
+      if (lang != null && lang.isNotEmpty) {
+        // Langue hors liste (saisie autrement) : on l'ajoute pour ne pas l'écraser.
+        if (!_languesLivre.contains(lang)) _languesLivre.add(lang);
+        _langueLivre = lang;
+      }
+      _ebookName = 'PDF actuel conservé';
+      final size = p['fileSizeBytes'];
+      _ebookSize = size is num ? size.toInt() : int.tryParse('$size');
+    }
 
     final tags = (p['tags'] as List?)
             ?.whereType<Map>()
@@ -351,9 +391,10 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
       });
     } else {
       final price = int.tryParse(v);
-      if (price == null || price <= 0) {
+      // Un livre numérique peut être gratuit (0 F) ; un produit physique non.
+      if (price == null || price < 0 || (price == 0 && !_isDigital)) {
         setState(() {
-          _prixError = 'Prix invalide (doit être > 0)';
+          _prixError = _isDigital ? 'Prix invalide (0 = gratuit)' : 'Prix invalide (doit être > 0)';
           _prixValid = false;
         });
       } else if (price > 100000000) {
@@ -452,6 +493,8 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
     _qteMinController.dispose();
     _lieuController.dispose();
     _marqueController.dispose();
+    _auteurController.dispose();
+    _pagesController.dispose();
     for (final t in _tiers) {
       t['qte']!.dispose();
       t['prix']!.dispose();
@@ -536,7 +579,8 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
                 _pickAndUploadImage(index, source: ImageSource.gallery);
               },
             ),
-            ListTile(
+            if (PhotoPickerService.cameraAvailable)
+              ListTile(
               leading: const Icon(Icons.camera_alt_outlined),
               title: Text('Appareil photo', style: GoogleFonts.outfit()),
               onTap: () {
@@ -662,7 +706,8 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
                 _pickAndUploadVideo(index, source: ImageSource.gallery);
               },
             ),
-            ListTile(
+            if (PhotoPickerService.cameraAvailable)
+              ListTile(
               leading: const Icon(Icons.videocam_outlined),
               title: Text('Caméra', style: GoogleFonts.outfit()),
               onTap: () {
@@ -680,8 +725,10 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
   void _submitForm() async {
     _validateNom();
     _validatePrix();
-    _validateStock();
-    _validateLieu();
+    if (!_isDigital) {
+      _validateStock();
+      _validateLieu();
+    }
 
     if (!_formKey.currentState!.validate()) return;
 
@@ -697,7 +744,18 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
       return;
     }
 
-    final tierError = _validateTiers();
+    if (_isDigital) {
+      if (_ebookUploading) {
+        AppToast.show(context, message: "Patientez : le PDF est en cours d'envoi.", type: ToastType.error);
+        return;
+      }
+      if (!_isEditMode && _ebookPath == null) {
+        AppToast.show(context, message: 'Ajoutez le fichier PDF du livre.', type: ToastType.error);
+        return;
+      }
+    }
+
+    final tierError = _isDigital ? null : _validateTiers();
     if (tierError != null) {
       AppToast.show(
         context,
@@ -716,7 +774,7 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
 
       // Contrat reel attendu par le backend (CreateProductDto / UpdateProductDto) :
       // prod_name, description, basePrice, categoryIds (UUIDs), tags, status.
-      final productPayload = {
+      final productPayload = <String, dynamic>{
         'prod_name': _nomController.text.trim(),
         'description': _descriptionController.text.trim(),
         'basePrice': priceValue,
@@ -727,6 +785,14 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
           if (_lieuController.text.trim().isNotEmpty) _lieuController.text.trim(),
         ],
       };
+      if (_isDigital) {
+        productPayload['isDigital'] = true;
+        productPayload['author'] = _auteurController.text.trim();
+        productPayload['pageCount'] = int.tryParse(_pagesController.text.trim()) ?? 0;
+        productPayload['language'] = _langueLivre;
+        // Nouveau PDF seulement : en modification, sans PDF choisi, l'ancien est conservé.
+        if (_ebookPath != null) productPayload['filePath'] = _ebookPath;
+      }
 
       String productId;
       if (_isEditMode && _editingProductId != null && _editingProductId!.isNotEmpty) {
@@ -748,6 +814,8 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
       }
 
       // Le stock/prix vivent sur la variante, pas sur le produit lui-même.
+      // (Livre numérique : le serveur crée lui-même sa variante technique.)
+      if (!_isDigital) {
       final variantPayload = <String, dynamic>{
         'color': _selectedColor,
         'size': _selectedSize,
@@ -768,6 +836,7 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
             ...variantPayload,
           },
         );
+      }
       }
 
       // Images : on ajoute les nouvelles, on retire celles retirées de la fiche.
@@ -874,7 +943,7 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
           )
           .toList();
       String? tierSaveError;
-      if (priceTiers.isNotEmpty || (_isEditMode && _hadExistingTiers)) {
+      if (!_isDigital && (priceTiers.isNotEmpty || (_isEditMode && _hadExistingTiers))) {
         try {
           await ApiService.instance.client.put(
             '/api/v1/products/$productId/tier-prices',
@@ -966,19 +1035,30 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
         child: ListView(
           padding: const EdgeInsets.all(16),
           children: [
+            if (!_isEditMode) ...[
+              _buildNatureSelector(),
+              const SizedBox(height: 20),
+            ],
             _buildMediaSection(),
             const SizedBox(height: 20),
             _buildInfoSection(),
             const SizedBox(height: 20),
-            _buildSpecificationsSection(),
-            const SizedBox(height: 20),
+            if (_isDigital) ...[
+              _buildBookSection(),
+              const SizedBox(height: 20),
+            ] else ...[
+              _buildSpecificationsSection(),
+              const SizedBox(height: 20),
+            ],
             _buildPricingSection(),
             const SizedBox(height: 20),
-            _buildTieredPricingSection(),
-            const SizedBox(height: 20),
-            _buildStockSection(),
-            const SizedBox(height: 20),
-            _buildLocationSection(),
+            if (!_isDigital) ...[
+              _buildTieredPricingSection(),
+              const SizedBox(height: 20),
+              _buildStockSection(),
+              const SizedBox(height: 20),
+              _buildLocationSection(),
+            ],
             const SizedBox(height: 28),
             _buildSubmitButton(),
             const SizedBox(height: 32),
@@ -1211,8 +1291,10 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _buildSectionHeader(
-            'Photos & Vidéos',
-            'Jusqu\'à 8 photos et 2 vidéos',
+            _isDigital ? 'Couverture du livre' : 'Photos & Vidéos',
+            _isDigital
+                ? 'Jusqu\'à 8 images ; la première est la couverture'
+                : 'Jusqu\'à 8 photos et 2 vidéos',
           ),
           const SizedBox(height: 14),
           Text(
@@ -1233,23 +1315,25 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
               itemBuilder: (context, i) => _buildImageSlot(i),
             ),
           ),
-          const SizedBox(height: 16),
-          Text(
-            'Vidéos (${_videoSlots.where((s) => s != null).length}/2)',
-            style: GoogleFonts.outfit(
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-              color: AppTheme.textSecondary,
+          if (!_isDigital) ...[
+            const SizedBox(height: 16),
+            Text(
+              'Vidéos (${_videoSlots.where((s) => s != null).length}/2)',
+              style: GoogleFonts.outfit(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: AppTheme.textSecondary,
+              ),
             ),
-          ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              _buildVideoSlot(0),
-              const SizedBox(width: 10),
-              _buildVideoSlot(1),
-            ],
-          ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                _buildVideoSlot(0),
+                const SizedBox(width: 10),
+                _buildVideoSlot(1),
+              ],
+            ),
+          ],
         ],
       ),
     );
@@ -1478,8 +1562,8 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
           const SizedBox(height: 16),
           _buildValidatedFormField(
             controller: _nomController,
-            label: 'Nom du produit *',
-            hintText: 'Ex: Tissu Wax Ankara 6 yards',
+            label: _isDigital ? 'Titre du livre *' : 'Nom du produit *',
+            hintText: _isDigital ? 'Ex: Le roi de Dahomey' : 'Ex: Tissu Wax Ankara 6 yards',
             prefixIcon: Icons.inventory_2_outlined,
             errorText: _nomError,
             isValid: _nomValid,
@@ -1499,7 +1583,9 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
             controller: _descriptionController,
             decoration: InputDecoration(
               labelText: 'Description',
-              hintText: 'Décrivez votre produit en détail...',
+              hintText: _isDigital
+                  ? 'Résumé du livre : les clients ne peuvent pas le feuilleter avant achat...'
+                  : 'Décrivez votre produit en détail...',
               prefixIcon: const Icon(Icons.description_outlined, size: 20),
               alignLabelWithHint: true,
               labelStyle: GoogleFonts.outfit(
@@ -1668,6 +1754,277 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
     );
   }
 
+  // ── LIVRE NUMÉRIQUE ────────────────────────────────────────────────────────
+
+  Widget _buildNatureSelector() {
+    Widget chip(String label, IconData icon, bool digital) {
+      final selected = _isDigital == digital;
+      return Expanded(
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: _isSubmitting
+              ? null
+              : () {
+                  if (_isDigital == digital) return;
+                  setState(() {
+                    _isDigital = digital;
+                    // Les catégories diffèrent selon la nature : on repart de zéro.
+                    _selectedParentCategoryId = null;
+                    _selectedCategory = null;
+                    _categoryValid = false;
+                  });
+                  _validatePrix();
+                },
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            decoration: BoxDecoration(
+              color: selected ? AppTheme.primary.withAlpha(25) : AppTheme.surface,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: selected ? AppTheme.primary : AppTheme.outline,
+                width: selected ? 2 : 1,
+              ),
+            ),
+            child: Column(
+              children: [
+                Icon(icon, color: selected ? AppTheme.primary : AppTheme.muted),
+                const SizedBox(height: 6),
+                Text(
+                  label,
+                  style: GoogleFonts.outfit(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: selected ? AppTheme.primary : AppTheme.textSecondary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    return _buildCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _buildSectionHeader('Type de produit', 'Que souhaitez-vous publier ?'),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              chip('Produit physique', Icons.inventory_2_outlined, false),
+              const SizedBox(width: 12),
+              chip('Livre numérique (PDF)', Icons.menu_book_outlined, true),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _pickEbook() async {
+    if (_ebookUploading) return;
+    try {
+      final res = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: const ['pdf'],
+        withData: true,
+      );
+      if (res == null || res.files.isEmpty) return;
+      final f = res.files.first;
+      if (f.size > _ebookMaxBytes) {
+        if (mounted) {
+          AppToast.show(context, message: 'Le PDF dépasse 50 Mo.', type: ToastType.error);
+        }
+        return;
+      }
+      final bytes = f.bytes;
+      if (bytes == null) {
+        if (mounted) {
+          AppToast.show(context, message: 'Impossible de lire ce fichier.', type: ToastType.error);
+        }
+        return;
+      }
+      if (bytes.length > _ebookMaxBytes) {
+        if (mounted) {
+          AppToast.show(context, message: 'Le PDF dépasse 50 Mo.', type: ToastType.error);
+        }
+        return;
+      }
+      setState(() {
+        _ebookUploading = true;
+        _ebookProgress = 0;
+      });
+      final r = await UploadService.instance.uploadEbook(
+        bytes,
+        f.name,
+        onProgress: (p) {
+          if (mounted) setState(() => _ebookProgress = p);
+        },
+      );
+      if (!mounted) return;
+      setState(() {
+        _ebookPath = r.path;
+        _ebookName = f.name;
+        _ebookSize = r.size;
+      });
+    } catch (e) {
+      if (mounted) {
+        AppToast.show(
+          context,
+          message: "Échec de l'envoi du PDF : ${_describeError(e)}",
+          type: ToastType.error,
+          duration: const Duration(seconds: 6),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _ebookUploading = false);
+    }
+  }
+
+  String _formatSize(int bytes) {
+    if (bytes >= 1024 * 1024) return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} Mo';
+    return '${(bytes / 1024).ceil()} Ko';
+  }
+
+  Widget _buildBookSection() {
+    final noCategory = !_loadingCategories && _parentCategoryOptions.isEmpty;
+    return _buildCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _buildSectionHeader('Fiche du livre', 'Auteur, pages, langue et fichier PDF'),
+          const SizedBox(height: 16),
+          if (noCategory) ...[
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFEF3C7),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Text(
+                "Aucune catégorie de livres numériques n'est disponible pour le moment. Réessayez plus tard.",
+                style: GoogleFonts.outfit(fontSize: 12.5, color: const Color(0xFF92400E)),
+              ),
+            ),
+            const SizedBox(height: 14),
+          ],
+          _buildValidatedFormField(
+            controller: _auteurController,
+            label: 'Auteur *',
+            hintText: "Ex: Amadou Diallo",
+            prefixIcon: Icons.person_outline,
+            textCapitalization: TextCapitalization.words,
+            validator: (v) {
+              if (v == null || v.trim().isEmpty) return 'Auteur requis';
+              if (v.trim().length > 200) return 'Trop long (max. 200 caractères)';
+              return null;
+            },
+          ),
+          const SizedBox(height: 14),
+          _buildValidatedFormField(
+            controller: _pagesController,
+            label: 'Nombre de pages *',
+            hintText: 'Ex: 220',
+            prefixIcon: Icons.auto_stories_outlined,
+            keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            validator: (v) {
+              final n = int.tryParse((v ?? '').trim());
+              if (n == null || n < 1) return 'Nombre de pages requis';
+              if (n > 20000) return 'Nombre de pages invalide';
+              return null;
+            },
+          ),
+          const SizedBox(height: 14),
+          DropdownButtonFormField<String>(
+            initialValue: _langueLivre,
+            decoration: _categoryFieldDecoration(label: 'Langue *', hasError: false),
+            items: _languesLivre
+                .map((l) => DropdownMenuItem(
+                      value: l,
+                      child: Text(l, style: GoogleFonts.outfit(fontSize: 14)),
+                    ))
+                .toList(),
+            onChanged: (v) {
+              if (v != null) setState(() => _langueLivre = v);
+            },
+          ),
+          const SizedBox(height: 16),
+          Text(
+            'Fichier du livre (PDF, 50 Mo max) *',
+            style: GoogleFonts.outfit(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: AppTheme.textSecondary,
+            ),
+          ),
+          const SizedBox(height: 8),
+          InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: (_ebookUploading || _isSubmitting) ? null : _pickEbook,
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: AppTheme.surface,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: _ebookName != null ? const Color(0xFF16A34A) : AppTheme.outline,
+                ),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    _ebookName != null ? Icons.picture_as_pdf_rounded : Icons.upload_file_rounded,
+                    color: _ebookName != null ? const Color(0xFFDC2626) : AppTheme.muted,
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _ebookUploading
+                              ? 'Envoi en cours… ${(_ebookProgress * 100).toInt()} %'
+                              : (_ebookName ?? 'Choisir le fichier PDF'),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: GoogleFonts.outfit(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                            color: AppTheme.textPrimary,
+                          ),
+                        ),
+                        if (_ebookUploading) ...[
+                          const SizedBox(height: 8),
+                          LinearProgressIndicator(value: _ebookProgress > 0 ? _ebookProgress : null),
+                        ] else if (_ebookName != null) ...[
+                          Text(
+                            [
+                              if (_ebookSize != null && _ebookSize! > 0) _formatSize(_ebookSize!),
+                              'Touchez pour remplacer',
+                            ].join(' · '),
+                            style: GoogleFonts.outfit(fontSize: 12, color: AppTheme.muted),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            "Le fichier reste privé : seuls les clients qui ont acheté le livre peuvent le télécharger.",
+            style: GoogleFonts.outfit(fontSize: 12, color: AppTheme.muted),
+          ),
+        ],
+      ),
+    );
+  }
+
   // ── SPECIFICATIONS SECTION ─────────────────────────────────────────────────
 
   Widget _buildSpecificationsSection() {
@@ -1819,7 +2176,10 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _buildSectionHeader('Prix', 'Prix unitaire en FCFA'),
+          _buildSectionHeader(
+            _isDigital ? 'Prix du livre' : 'Prix',
+            _isDigital ? 'En FCFA (0 = livre gratuit)' : 'Prix unitaire en FCFA',
+          ),
           const SizedBox(height: 16),
           _buildValidatedFormField(
             controller: _prixController,
@@ -1834,11 +2194,14 @@ class _PublierProduitScreenState extends State<PublierProduitScreen> {
             validator: (v) {
               if (v == null || v.isEmpty) return 'Prix requis';
               final price = int.tryParse(v);
-              if (price == null || price <= 0) return 'Prix invalide';
+              if (price == null || price < 0 || (price == 0 && !_isDigital)) {
+                return 'Prix invalide';
+              }
               return null;
             },
           ),
-          const SizedBox(height: 14),
+          if (!_isDigital) const SizedBox(height: 14),
+          if (!_isDigital)
           _buildValidatedFormField(
             controller: _qteMinController,
             label: 'Quantité minimum de commande',

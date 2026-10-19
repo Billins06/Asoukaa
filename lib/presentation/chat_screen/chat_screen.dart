@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:dio/dio.dart';
 import 'package:image_picker/image_picker.dart';
+import '../../services/photo_picker_service.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/empty_state_widget.dart';
 import '../../widgets/loading_skeleton_widget.dart';
@@ -754,7 +755,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
               title: Text('Galerie', style: GoogleFonts.outfit()),
               onTap: () => Navigator.pop(ctx, ImageSource.gallery),
             ),
-            ListTile(
+            if (PhotoPickerService.cameraAvailable)
+              ListTile(
               leading: const Icon(Icons.camera_alt_outlined),
               title: Text('Appareil photo', style: GoogleFonts.outfit()),
               onTap: () => Navigator.pop(ctx, ImageSource.camera),

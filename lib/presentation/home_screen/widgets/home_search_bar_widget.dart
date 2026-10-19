@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
+import '../../../services/photo_picker_service.dart';
 
 import 'dart:async';
 import 'dart:typed_data';
@@ -214,7 +215,8 @@ class _HomeSearchBarWidgetState extends State<HomeSearchBarWidget>
               ),
             ),
             const SizedBox(height: 20),
-            ListTile(
+            if (PhotoPickerService.cameraAvailable)
+              ListTile(
               contentPadding: EdgeInsets.zero,
               leading: Container(
                 width: 44,

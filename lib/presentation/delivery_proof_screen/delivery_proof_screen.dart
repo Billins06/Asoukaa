@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
+import '../../services/photo_picker_service.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:pretty_qr_code/pretty_qr_code.dart';
 import 'package:sizer/sizer.dart';
@@ -270,7 +271,8 @@ class _DeliveryProofScreenState extends State<DeliveryProofScreen>
               ),
             ),
             const SizedBox(height: 16),
-            ListTile(
+            if (PhotoPickerService.cameraAvailable)
+              ListTile(
               leading: const Icon(Icons.camera_alt_outlined),
               title: Text('Appareil photo', style: GoogleFonts.outfit()),
               onTap: () {

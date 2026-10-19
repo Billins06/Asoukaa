@@ -43,9 +43,11 @@ class ProductService {
     int limit = 20,
     int page = 1,
     bool isFeatured = false,
+    bool onlyDigital = false,
   }) async {
     try {
       final params = <String, dynamic>{'limit': limit, 'page': page};
+      if (onlyDigital) params['isDigital'] = 'true';
       if (categoryId != null && categoryId.isNotEmpty) {
         params['categoryId'] = categoryId;
       }
@@ -231,8 +233,12 @@ class ProductService {
       'sold_count': raw['totalVentes'] ?? raw['sold_count'] ?? 0,
       'rating': double.tryParse(raw['noteMoyenne']?.toString() ?? '0') ?? 0,
       'reviews_count': raw['nbreAvis'] ?? raw['reviews_count'] ?? 0,
+      // Livre numérique (PDF) : pas de stock, pas de livraison.
+      'isDigital': raw['isDigital'] == true,
       'variantId': firstVariant?['id'],
-      'stock': firstVariant?['stockQuantity'] ?? raw['stock'] ?? 0,
+      'stock': raw['isDigital'] == true
+          ? 1
+          : (firstVariant?['stockQuantity'] ?? raw['stock'] ?? 0),
     };
   }
 

@@ -79,6 +79,7 @@ class NotificationService {
   ///                / livreur selon le rôle actif (le suivi `orders/me/:id`
   ///                n'est accessible qu'au client propriétaire) ;
   ///  - delivery, independent_delivery : tableau de bord livreur ;
+  ///  - independent_delivery_client : « Mes courses express » (client) ;
   ///  - conversation : la discussion ; support_ticket : le ticket.
   Future<void> ouvrirDepuisReference(String? type, String? id) async {
     if (type == null || type.isEmpty) return;
@@ -103,6 +104,9 @@ class NotificationService {
       case 'delivery':
       case 'independent_delivery':
         route = AppRoutes.delivererDashboard;
+        break;
+      case 'independent_delivery_client':
+        route = AppRoutes.myExpressDeliveries;
         break;
       case 'conversation':
         if (id == null || id.isEmpty) return;

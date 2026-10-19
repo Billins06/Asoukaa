@@ -166,7 +166,10 @@ class ProductInfoWidget extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
               Text(
-                '${_formatPrice((product['price'] as num?)?.toInt() ?? 0)} FCFA',
+                (product['isDigital'] == true &&
+                        ((product['price'] as num?)?.toInt() ?? 0) <= 0)
+                    ? 'Gratuit'
+                    : '${_formatPrice((product['price'] as num?)?.toInt() ?? 0)} FCFA',
                 style: GoogleFonts.outfit(
                   fontSize: 26,
                   fontWeight: FontWeight.w800,

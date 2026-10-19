@@ -160,6 +160,7 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
       'tierPrices': tierPrices,
       'image': imageUrl,
       'stock': stock,
+      'isDigital': p['isDigital'] == true,
       // Compteur de vues réel : colonne products."nombreVues", incrémentée
       // à chaque ouverture d'une fiche produit (GET /products/:id).
       'views': (p['nombreVues'] as num?)?.toInt() ?? 0,
@@ -1039,7 +1040,9 @@ class _ProductCard extends StatelessWidget {
                     children: [
                       _MiniStat(
                         icon: Icons.inventory_2_outlined,
-                        value: '${product['stock']} en stock',
+                        value: product['isDigital'] == true
+                            ? 'Livre numérique'
+                            : '${product['stock']} en stock',
                         color: isOutOfStock
                             ? AppTheme.error
                             : AppTheme.textSecondary,
@@ -4209,6 +4212,8 @@ class _StockTabState extends State<_StockTab> {
       final items = <Map<String, dynamic>>[];
       for (final p in list.whereType<Map>()) {
         final product = Map<String, dynamic>.from(p);
+        // Un livre numérique n'a pas de stock à gérer.
+        if (product['isDigital'] == true) continue;
         final images = (product['images'] as List?)?.whereType<Map>().toList() ?? [];
         final imageUrl = images.isNotEmpty ? (images.first['url'] as String? ?? '') : '';
         final variants = (product['variants'] as List?)?.whereType<Map>().toList() ?? [];
@@ -4579,6 +4584,8 @@ class _RetraitTabState extends State<_RetraitTab> {
   bool _isLoading = true;
   bool _hasError = false;
   num _soldeDisponible = 0;
+  // Ventes de livres numériques < 24 h : pas encore disponibles.
+  num _gainsEnRetenue = 0;
   num _totalRetire = 0;
   List<Map<String, dynamic>> _history = [];
 
@@ -4608,6 +4615,8 @@ class _RetraitTabState extends State<_RetraitTab> {
               (double.tryParse(data['soldeDisponible']?.toString() ?? '') ?? 0);
           _totalRetire =
               (double.tryParse(data['totalRetire']?.toString() ?? '') ?? 0);
+          _gainsEnRetenue =
+              (double.tryParse(data['gainsEnRetenue']?.toString() ?? '') ?? 0);
           _history = historique;
           _isLoading = false;
         });
@@ -4727,6 +4736,16 @@ class _RetraitTabState extends State<_RetraitTab> {
               color: Colors.white,
             ),
           ),
+          if (_gainsEnRetenue > 0) ...[
+            const SizedBox(height: 10),
+            Text(
+              '+ ${_formatAmount(_gainsEnRetenue)} de ventes de livres numériques, disponibles sous 24 h',
+              style: GoogleFonts.outfit(
+                fontSize: 12,
+                color: Colors.white.withAlpha(200),
+              ),
+            ),
+          ],
           const SizedBox(height: 16),
           Row(
             children: [

@@ -22,11 +22,12 @@ enum _SortMode { pertinence, nouveau, prixCroissant, prixDecroissant, ventes }
 /// Vitrine.
 ///
 /// Arguments (route AppRoutes.categoryProducts) :
-/// `{ 'mode': 'category' | 'rayon', 'id': String, 'title': String,
+/// `{ 'mode': 'category' | 'rayon' | 'digital', 'id': String, 'title': String,
 ///    'parentTitle': String? }`
 /// - mode 'category' → ProductService.getProducts(categoryId: id) (le
 ///   serveur inclut les sous-catégories descendantes) ;
-/// - mode 'rayon'    → VitrineService.getRayonProducts(id).
+/// - mode 'rayon'    → VitrineService.getRayonProducts(id) ;
+/// - mode 'digital'  → tous les livres numériques (id = 'digital').
 class CategoryProductsScreen extends StatefulWidget {
   final Map<String, dynamic> args;
 
@@ -70,6 +71,9 @@ class _CategoryProductsScreenState extends State<CategoryProductsScreen> {
 
   bool get _isRayon => widget.args['mode']?.toString() == 'rayon';
 
+  /// Mode « digital » : tous les livres numériques (entrée fixe de la page Catégories).
+  bool get _isDigital => widget.args['mode']?.toString() == 'digital';
+
   String get _id => (widget.args['id'] ?? '').toString().trim();
 
   String get _title {
@@ -108,7 +112,8 @@ class _CategoryProductsScreenState extends State<CategoryProductsScreen> {
       );
     }
     return ProductService.instance.getProducts(
-      categoryId: _id,
+      categoryId: _isDigital ? null : _id,
+      onlyDigital: _isDigital,
       page: page,
       limit: _pageSize,
     );
@@ -346,7 +351,7 @@ class _CategoryProductsScreenState extends State<CategoryProductsScreen> {
     Navigator.pushNamed(
       context,
       AppRoutes.searchResults,
-      arguments: _title,
+      arguments: _isDigital ? '' : _title,
     ).then((_) => _loadCartCount());
   }
 
@@ -606,7 +611,7 @@ class _CategoryProductsScreenState extends State<CategoryProductsScreen> {
     // Un rayon de la Vitrine n'est pas une catégorie : il n'existe pas de
     // « boutiques du rayon ». L'onglet Boutiques n'est donc proposé qu'en
     // mode catégorie (sinon il afficherait toutes les boutiques, hors sujet).
-    final showShopsTab = !_isRayon;
+    final showShopsTab = !_isRayon && !_isDigital;
 
     return Scaffold(
       backgroundColor: Colors.white,

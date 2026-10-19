@@ -106,12 +106,33 @@ class _CartScreenState extends State<CartScreen> {
       } else {
         rawList = [];
       }
+      var items = rawList
+          .whereType<Map>()
+          .map((e) => _normalizeCartItem(Map<String, dynamic>.from(e)))
+          .toList();
+      // Livres déjà possédés (achetés ailleurs ou gratuits déjà validés) : on les
+      // retire du panier, le serveur refuserait la commande sinon.
+      if (items.any((i) => i['isDigital'] == true)) {
+        try {
+          final lib = await ApiService.instance.client.get('/api/v1/library/ids');
+          final d = lib.data;
+          final owned = (d is Map && d['productIds'] is List)
+              ? (d['productIds'] as List).map((e) => e.toString()).toSet()
+              : <String>{};
+          final toRemove = items
+              .where((i) => i['isDigital'] == true && owned.contains('${i['product_id']}'))
+              .toList();
+          for (final it in toRemove) {
+            try {
+              await ApiService.instance.client.delete('/api/v1/cart/items/${it['id']}');
+            } catch (_) {}
+          }
+          items = items.where((i) => !toRemove.contains(i)).toList();
+        } catch (_) {}
+      }
       if (mounted) {
         setState(() {
-          _cartItems = rawList
-              .whereType<Map>()
-              .map((e) => _normalizeCartItem(Map<String, dynamic>.from(e)))
-              .toList();
+          _cartItems = items;
           _isLoading = false;
         });
       }
@@ -199,6 +220,8 @@ class _CartScreenState extends State<CartScreen> {
       'semanticLabel': 'Produit $name dans le panier Asoukaa',
       'inStock': stockQty > 0,
       'stockQty': stockQty,
+      // Livre numérique : ni livraison ni quantité (1 exemplaire).
+      'isDigital': product?['isDigital'] == true,
     };
   }
 
@@ -234,7 +257,13 @@ class _CartScreenState extends State<CartScreen> {
   // chaque lettre tapée par l'utilisateur (voir ValueKey plus bas).
   int _deliverySelectorSeed = 0;
 
-  double get _total => _subtotal - _promoDiscount + _deliveryFee;
+  // Y a-t-il au moins un article physique ? Sinon (livres seulement) : pas de
+  // livraison, pas de frais, pas d'adresse.
+  // (Le serveur exige l'adresse dès qu'un article physique est dans le panier,
+  // même en rupture : on compte donc tous les articles non numériques.)
+  bool get _hasPhysical => _cartItems.any((i) => i['isDigital'] != true);
+  double get _effectiveFee => _hasPhysical ? _deliveryFee : 0;
+  double get _total => _subtotal - _promoDiscount + _effectiveFee;
 
   Future<void> _incrementQty(int index) async {
     final item = _cartItems[index];
@@ -461,7 +490,7 @@ class _CartScreenState extends State<CartScreen> {
       return;
     }
 
-    if (!_deliverySelectionComplete) {
+    if (_hasPhysical && !_deliverySelectionComplete) {
       AppToast.show(
         context,
         message: _selectedCity.trim().isEmpty
@@ -488,8 +517,10 @@ class _CartScreenState extends State<CartScreen> {
         'promoDiscount': _promoDiscount,
         // Code promo validé : transmis à la création de la commande.
         'couponCode': (_promoApplied && _promoCode.isNotEmpty) ? _promoCode : null,
-        'deliveryFee': _deliveryFee,
+        'deliveryFee': _effectiveFee,
         'total': _total,
+        // false = panier de livres numériques seulement (aucune adresse requise).
+        'hasPhysical': _hasPhysical,
         'deliveryMode': _deliveryMode,
         'city': _selectedCity,
         'transportMode': _transportMode,
@@ -925,11 +956,12 @@ class _CartScreenState extends State<CartScreen> {
                                   ),
                                 ),
                               ),
-                              _qtyButton(
-                                icon: Icons.add_rounded,
-                                color: AppTheme.primary,
-                                onTap: () => _incrementQty(index),
-                              ),
+                              if (item['isDigital'] != true)
+                                _qtyButton(
+                                  icon: Icons.add_rounded,
+                                  color: AppTheme.primary,
+                                  onTap: () => _incrementQty(index),
+                                ),
                             ],
                           ),
                         ),
@@ -1108,6 +1140,33 @@ class _CartScreenState extends State<CartScreen> {
   }
 
   Widget _buildDeliverySection() {
+    // Panier de livres numériques seulement : rien à livrer.
+    if (!_hasPhysical) {
+      return Container(
+        margin: const EdgeInsets.symmetric(horizontal: 16),
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: AppTheme.successContainer,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.menu_book_rounded, size: 18, color: AppTheme.success),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'Livres numériques : aucune livraison. Ils sont disponibles dans votre Bibliothèque dès que le paiement est confirmé.',
+                style: GoogleFonts.outfit(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w500,
+                  color: AppTheme.success,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16),
       padding: const EdgeInsets.all(16),
@@ -1194,8 +1253,10 @@ class _CartScreenState extends State<CartScreen> {
             ),
           _summaryRow(
             'Livraison',
-            _deliveryFee == 0 ? 'Gratuite' : '${_deliveryFee.toInt()} FCFA',
-            valueColor: _deliveryFee == 0 ? AppTheme.success : null,
+            !_hasPhysical
+                ? 'Aucune (livres numériques)'
+                : (_deliveryFee == 0 ? 'Gratuite' : '${_deliveryFee.toInt()} FCFA'),
+            valueColor: (!_hasPhysical || _deliveryFee == 0) ? AppTheme.success : null,
           ),
           const Padding(
             padding: EdgeInsets.symmetric(vertical: 10),

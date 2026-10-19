@@ -27,6 +27,8 @@ class OrderConfirmationScreen extends StatelessWidget {
     final String paymentMethod =
         args?['paymentMethod'] as String? ?? 'Paiement à la livraison';
     final int total = args?['total'] as int? ?? 0;
+    // Livre(s) numérique(s) : pas de livraison, on mène vers la Bibliothèque.
+    final bool isDigital = args?['isDigital'] == true;
 
     final deliveryDate = DateTime.now().add(const Duration(days: 3));
     final deliveryDateStr =
@@ -141,6 +143,7 @@ class OrderConfirmationScreen extends StatelessWidget {
               ),
               SizedBox(height: 1.5.h),
 
+              if (!isDigital) ...[
               // Delivery estimate card
               _InfoCard(
                 child: Row(
@@ -288,6 +291,7 @@ class OrderConfirmationScreen extends StatelessWidget {
                 ),
               ),
               SizedBox(height: 1.5.h),
+              ],
 
               // Payment & total card
               _InfoCard(
@@ -374,6 +378,31 @@ class OrderConfirmationScreen extends StatelessWidget {
                 ),
               ),
               SizedBox(height: 1.2.h),
+              if (isDigital)
+                SizedBox(
+                  width: double.infinity,
+                  height: 52,
+                  child: OutlinedButton.icon(
+                    onPressed: () =>
+                        Navigator.of(context).pushNamed(AppRoutes.library),
+                    icon: const Icon(Icons.menu_book_rounded, size: 20),
+                    label: Text(
+                      'Ouvrir ma Bibliothèque',
+                      style: GoogleFonts.outfit(
+                        fontSize: 14.sp > 16 ? 16 : 14.sp,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: AppTheme.primary,
+                      side: const BorderSide(color: AppTheme.primary, width: 1.5),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14.0),
+                      ),
+                    ),
+                  ),
+                )
+              else
               SizedBox(
                 width: double.infinity,
                 height: 52,

@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:dio/dio.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
+import '../../services/photo_picker_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -18,6 +19,8 @@ import '../../services/delivery_zone_service.dart';
 import '../../services/mode_service.dart';
 import '../../services/upload_service.dart';
 import '../../services/notification_preferences_service.dart';
+import '../../services/payment_prefs_service.dart';
+import '../../utils/telephone.dart';
 
 class BuyerProfileScreen extends StatefulWidget {
   const BuyerProfileScreen({super.key});
@@ -44,7 +47,8 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
 
   UserProfile? _profile;
   List<UserAddress> _addresses = [];
-  final List<Map<String, dynamic>> _paymentMethods = [];
+  // Numéros Mobile Money enregistrés (stockés sur l'appareil, voir PaymentPrefsService).
+  List<SavedPaymentMethod> _paymentMethods = [];
 
   // Demande vendeur/livreur en cours ou refusée pour ce compte.
   //
@@ -107,6 +111,19 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
     }
     _loadPreferences();
     _loadNotificationPreferences();
+    _loadPaymentMethods();
+  }
+
+  Future<void> _loadPaymentMethods() async {
+    final list = await PaymentPrefsService.instance.load();
+    if (mounted) setState(() => _paymentMethods = list);
+  }
+
+  Future<void> _savePaymentMethods(List<SavedPaymentMethod> list) async {
+    setState(() => _paymentMethods = list);
+    await PaymentPrefsService.instance.save(list);
+    // Relit la liste normalisée (un seul numéro par défaut).
+    await _loadPaymentMethods();
   }
 
   Future<void> _loadPreferences() async {
@@ -649,6 +666,8 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
   }
 
   Widget _buildPaymentSection() {
+    Color colorFor(String op) =>
+        op == 'MTN' ? const Color(0xFFE0A100) : const Color(0xFF0066CC);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -659,6 +678,7 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
               ..._paymentMethods.asMap().entries.map((entry) {
                 final index = entry.key;
                 final method = entry.value;
+                final color = colorFor(method.operator);
                 return Column(
                   children: [
                     Padding(
@@ -672,12 +692,12 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
                             width: 36,
                             height: 36,
                             decoration: BoxDecoration(
-                              color: (method['color'] as Color).withAlpha(30),
+                              color: color.withAlpha(30),
                               borderRadius: BorderRadius.circular(10.0),
                             ),
                             child: Icon(
-                              method['icon'] as IconData,
-                              color: method['color'] as Color,
+                              Icons.phone_android_rounded,
+                              color: color,
                               size: 18,
                             ),
                           ),
@@ -687,7 +707,9 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text(
-                                  method['type'] as String,
+                                  method.operator == 'MTN'
+                                      ? 'MTN Mobile Money'
+                                      : 'Moov Money',
                                   style: GoogleFonts.outfit(
                                     fontSize: 13,
                                     fontWeight: FontWeight.w600,
@@ -695,7 +717,7 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
                                   ),
                                 ),
                                 Text(
-                                  method['number'] as String,
+                                  method.number,
                                   style: GoogleFonts.outfit(
                                     fontSize: 12,
                                     color: AppTheme.textSecondary,
@@ -704,7 +726,7 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
                               ],
                             ),
                           ),
-                          if (method['isDefault'] as bool)
+                          if (method.isDefault)
                             Container(
                               padding: const EdgeInsets.symmetric(
                                 horizontal: 6,
@@ -715,7 +737,7 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
                                 borderRadius: BorderRadius.circular(4),
                               ),
                               child: Text(
-                                'Défaut',
+                                'Par défaut',
                                 style: GoogleFonts.outfit(
                                   fontSize: 10,
                                   fontWeight: FontWeight.w600,
@@ -731,24 +753,25 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
                             ),
                             onSelected: (value) {
                               if (value == 'default') {
-                                setState(() {
-                                  for (var m in _paymentMethods) {
-                                    m['isDefault'] = false;
-                                  }
-                                  _paymentMethods[index]['isDefault'] = true;
-                                });
+                                _savePaymentMethods([
+                                  for (var i = 0; i < _paymentMethods.length; i++)
+                                    _paymentMethods[i].copyWith(isDefault: i == index),
+                                ]);
                               } else if (value == 'delete') {
-                                setState(() => _paymentMethods.removeAt(index));
+                                final next = List<SavedPaymentMethod>.from(_paymentMethods)
+                                  ..removeAt(index);
+                                _savePaymentMethods(next);
                               }
                             },
                             itemBuilder: (_) => [
-                              PopupMenuItem(
-                                value: 'default',
-                                child: Text(
-                                  'Définir par défaut',
-                                  style: GoogleFonts.outfit(fontSize: 13),
+                              if (!method.isDefault)
+                                PopupMenuItem(
+                                  value: 'default',
+                                  child: Text(
+                                    'Définir par défaut',
+                                    style: GoogleFonts.outfit(fontSize: 13),
+                                  ),
                                 ),
-                              ),
                               PopupMenuItem(
                                 value: 'delete',
                                 child: Text(
@@ -768,39 +791,50 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
                   ],
                 );
               }),
-              _buildDivider(),
-              InkWell(
-                onTap: _showAddPaymentDialog,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 14,
+              if (_paymentMethods.isNotEmpty) _buildDivider(),
+              if (_paymentMethods.length < PaymentPrefsService.maxMethods)
+                InkWell(
+                  onTap: _showAddPaymentDialog,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 14,
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 36,
+                          height: 36,
+                          decoration: BoxDecoration(
+                            color: AppTheme.surfaceVariant,
+                            borderRadius: BorderRadius.circular(10.0),
+                          ),
+                          child: const Icon(
+                            Icons.add_rounded,
+                            color: AppTheme.primary,
+                            size: 18,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Text(
+                          'Ajouter un numéro de paiement',
+                          style: GoogleFonts.outfit(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500,
+                            color: AppTheme.primary,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                  child: Row(
-                    children: [
-                      Container(
-                        width: 36,
-                        height: 36,
-                        decoration: BoxDecoration(
-                          color: AppTheme.surfaceVariant,
-                          borderRadius: BorderRadius.circular(10.0),
-                        ),
-                        child: const Icon(
-                          Icons.add_rounded,
-                          color: AppTheme.primary,
-                          size: 18,
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Text(
-                        'Ajouter un moyen de paiement',
-                        style: GoogleFonts.outfit(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w500,
-                          color: AppTheme.primary,
-                        ),
-                      ),
-                    ],
+                ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                child: Text(
+                  'Le numéro par défaut est proposé automatiquement quand vous payez une commande ; vous pouvez le changer à ce moment-là.',
+                  style: GoogleFonts.outfit(
+                    fontSize: 11.5,
+                    color: AppTheme.textSecondary,
                   ),
                 ),
               ),
@@ -1597,15 +1631,28 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
             ),
             const SizedBox(height: 16),
             Text(
-              'Ajouter un moyen de paiement',
+              'Ajouter un numéro de paiement',
               style: GoogleFonts.outfit(
                 fontSize: 17,
                 fontWeight: FontWeight.w700,
               ),
             ),
-            const SizedBox(height: 16),
-            ...['Orange Money', 'Wave', 'Moov Money', 'MTN Mobile Money'].map(
-              (method) => ListTile(
+            const SizedBox(height: 4),
+            Text(
+              'Choisissez votre opérateur Mobile Money.',
+              style: GoogleFonts.outfit(fontSize: 12.5, color: AppTheme.textSecondary),
+            ),
+            const SizedBox(height: 12),
+            // (libellé, code serveur, disponible ?) — Orange Money et Wave ne sont
+            // pas encore pris en charge pour le paiement.
+            ...const [
+              ('MTN Mobile Money', 'MTN', true),
+              ('Moov Money', 'Moov', true),
+              ('Orange Money', 'Orange', false),
+              ('Wave', 'Wave', false),
+            ].map(
+              (m) => ListTile(
+                enabled: m.$3,
                 contentPadding: EdgeInsets.zero,
                 leading: Container(
                   width: 40,
@@ -1614,38 +1661,102 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
                     color: AppTheme.surfaceVariant,
                     borderRadius: BorderRadius.circular(10.0),
                   ),
-                  child: const Icon(
+                  child: Icon(
                     Icons.phone_android_rounded,
-                    color: AppTheme.textSecondary,
+                    color: m.$3 ? AppTheme.textSecondary : AppTheme.muted,
                     size: 20,
                   ),
                 ),
                 title: Text(
-                  method,
+                  m.$1,
                   style: GoogleFonts.outfit(
                     fontSize: 14,
                     fontWeight: FontWeight.w500,
                   ),
                 ),
-                trailing: const Icon(
-                  Icons.chevron_right_rounded,
-                  color: AppTheme.muted,
-                ),
-                onTap: () {
-                  Navigator.pop(ctx);
-                  // Aucun endpoint serveur n'enregistre encore les moyens
-                  // de paiement d'un acheteur : on le dit honnetement au
-                  // lieu de refermer la feuille sans rien faire.
-                  AppToast.show(
-                    context,
-                    message: "Enregistrer $method arrive bientôt. En attendant, vous choisissez votre moyen de paiement au moment de régler votre commande.",
-                    type: ToastType.info,
-                    actionLabel: 'OK',
-                  );
-                },
+                subtitle: m.$3
+                    ? null
+                    : Text(
+                        'Bientôt disponible',
+                        style: GoogleFonts.outfit(fontSize: 11.5),
+                      ),
+                trailing: m.$3
+                    ? const Icon(Icons.chevron_right_rounded, color: AppTheme.muted)
+                    : null,
+                onTap: m.$3
+                    ? () {
+                        Navigator.pop(ctx);
+                        _askPaymentNumber(m.$2);
+                      }
+                    : null,
               ),
             ),
             const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Saisie du numéro pour l'opérateur choisi, puis enregistrement.
+  void _askPaymentNumber(String operator) {
+    final ctrl = TextEditingController();
+    String? error;
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+          title: Text(
+            operator == 'MTN' ? 'Numéro MTN Mobile Money' : 'Numéro Moov Money',
+            style: GoogleFonts.outfit(fontSize: 16, fontWeight: FontWeight.w700),
+          ),
+          content: TextField(
+            controller: ctrl,
+            keyboardType: TextInputType.phone,
+            autofocus: true,
+            decoration: InputDecoration(
+              hintText: 'Ex : 0197000000',
+              errorText: error,
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Annuler'),
+            ),
+            TextButton(
+              onPressed: () {
+                final number = normaliserTelephone(ctrl.text);
+                if (!RegExp(r'^\+?[0-9]{8,15}$').hasMatch(number)) {
+                  setLocal(() => error = 'Numéro invalide (8 à 15 chiffres)');
+                  return;
+                }
+                if (_paymentMethods.any(
+                  (m) => m.operator == operator && m.number == number,
+                )) {
+                  setLocal(() => error = 'Ce numéro est déjà enregistré');
+                  return;
+                }
+                Navigator.pop(ctx);
+                _savePaymentMethods([
+                  ..._paymentMethods,
+                  SavedPaymentMethod(
+                    operator: operator,
+                    number: number,
+                    // Le premier numéro enregistré devient le numéro par défaut.
+                    isDefault: _paymentMethods.isEmpty,
+                  ),
+                ]);
+                if (mounted) {
+                  AppToast.show(
+                    context,
+                    message: 'Numéro enregistré',
+                    type: ToastType.success,
+                  );
+                }
+              },
+              child: const Text('Enregistrer'),
+            ),
           ],
         ),
       ),
@@ -1667,6 +1778,12 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
                 label: 'Boutiques suivies',
                 onTap: () =>
                     Navigator.pushNamed(context, AppRoutes.followedShops),
+              ),
+              _buildDivider(),
+              _buildNavRow(
+                icon: Icons.menu_book_rounded,
+                label: 'Ma Bibliothèque (livres numériques)',
+                onTap: () => Navigator.pushNamed(context, AppRoutes.library),
               ),
             ],
           ),
@@ -1949,7 +2066,8 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             const SizedBox(height: 8),
-            ListTile(
+            if (PhotoPickerService.cameraAvailable)
+              ListTile(
               leading: const Icon(Icons.photo_camera_outlined,
                   color: AppTheme.primary),
               title: Text('Prendre une photo', style: GoogleFonts.outfit()),
@@ -2109,7 +2227,7 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
-                  'Vendez sur Asoukaa',
+                  'Travaillez avec Asoukaa',
                   style: GoogleFonts.outfit(
                     fontSize: 16,
                     fontWeight: FontWeight.w700,
@@ -2121,8 +2239,9 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
           ),
           const SizedBox(height: 6),
           Text(
-            'Ouvrez votre boutique avec ce même compte. Votre demande est '
-            'examinée par notre équipe, puis vous êtes prévenu par e-mail.',
+            'Ouvrez votre boutique ou devenez livreur avec ce même compte. '
+            'Votre demande est examinée par notre équipe, puis vous êtes '
+            'prévenu par e-mail.',
             style: GoogleFonts.outfit(
               fontSize: 12.5,
               height: 1.4,
@@ -2130,34 +2249,70 @@ class _BuyerProfileScreenState extends State<BuyerProfileScreen> {
             ),
           ),
           const SizedBox(height: 14),
-          SizedBox(
-            width: double.infinity,
-            height: 46,
-            child: ElevatedButton.icon(
-              icon: const Icon(Icons.add_business_rounded, size: 18),
-              label: Text(
-                'Devenir vendeur',
+          Row(
+            children: [
+              Expanded(
+                child: _becomeButton(
+                  icon: Icons.add_business_rounded,
+                  label: 'Devenir vendeur',
+                  route: AppRoutes.becomeVendor,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _becomeButton(
+                  icon: Icons.moped_rounded,
+                  label: 'Devenir livreur',
+                  route: AppRoutes.becomeAgent,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Bouton blanc « Devenir ... » (deux par ligne dans la carte ci-dessus).
+  Widget _becomeButton({
+    required IconData icon,
+    required String label,
+    required String route,
+  }) {
+    return SizedBox(
+      height: 46,
+      child: ElevatedButton(
+        style: ElevatedButton.styleFrom(
+          backgroundColor: Colors.white,
+          foregroundColor: AppTheme.primary,
+          elevation: 0,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+        ),
+        onPressed: () async {
+          final sent = await Navigator.pushNamed(context, route);
+          if (sent == true && mounted) _loadPreferences();
+        },
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 17),
+              const SizedBox(width: 6),
+              Text(
+                label,
+                maxLines: 1,
                 style: GoogleFonts.outfit(
-                  fontSize: 14,
+                  fontSize: 13.5,
                   fontWeight: FontWeight.w700,
                 ),
               ),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.white,
-                foregroundColor: AppTheme.primary,
-                elevation: 0,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                ),
-              ),
-              onPressed: () async {
-                final sent =
-                    await Navigator.pushNamed(context, AppRoutes.becomeVendor);
-                if (sent == true && mounted) _loadPreferences();
-              },
-            ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }

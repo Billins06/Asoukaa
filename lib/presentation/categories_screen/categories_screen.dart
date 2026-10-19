@@ -242,6 +242,8 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
       if (parent == null) break;
       current = parent;
     }
+    // Les catégories numériques n'ont pas de ligne propre à gauche (entrée fixe).
+    if (current['isDigital'] == true) return null;
     final id = _str(current['id']);
     return id.isEmpty ? null : id;
   }
@@ -357,6 +359,21 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
     setState(() => _selectedId = null);
     _scrollRightToTop();
   }
+
+  /// Entrée fixe « Livres numériques » : ouvre directement tous les livres.
+  void _onDigitalTap() {
+    _openProducts(
+      mode: 'digital',
+      id: 'digital',
+      title: 'Livres numériques',
+      parentTitle: 'Catégories',
+    );
+  }
+
+  /// Catégories racines affichées dans la colonne de gauche : les catégories
+  /// numériques sont regroupées dans l'entrée fixe « Livres numériques ».
+  List<Map<String, dynamic>> get _railRoots =>
+      _roots.where((c) => c['isDigital'] != true).toList();
 
   /// Catégorie avec sous-catégories → affichées à droite.
   /// Catégorie sans sous-catégorie → page G directement (la sélection ne
@@ -534,12 +551,13 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
   // ─── Colonne gauche ──────────────────────────────────────────────────
 
   Widget _buildRail() {
+    final railRoots = _railRoots;
     return ColoredBox(
       color: _railBg,
       child: ListView.builder(
         primary: false,
         padding: const EdgeInsets.only(bottom: 24),
-        itemCount: _roots.length + 1,
+        itemCount: railRoots.length + 2,
         itemBuilder: (context, i) {
           if (i == 0) {
             return _railItem(
@@ -548,7 +566,14 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
               onTap: _selectPourVous,
             );
           }
-          final category = _roots[i - 1];
+          if (i == 1) {
+            return _railItem(
+              label: 'Livres numériques',
+              selected: false,
+              onTap: _onDigitalTap,
+            );
+          }
+          final category = railRoots[i - 2];
           return _railItem(
             label: _nameOf(category),
             selected: _selectedId == _str(category['id']),
@@ -563,6 +588,7 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
     required String label,
     required bool selected,
     required VoidCallback onTap,
+    IconData? icon,
   }) {
     return Material(
       color: selected ? Colors.white : Colors.transparent,
@@ -576,16 +602,27 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
                 alignment: Alignment.centerLeft,
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
-                  child: Text(
-                    label,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: GoogleFonts.outfit(
-                      fontSize: 13,
-                      height: 1.25,
-                      fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-                      color: selected ? AppTheme.textPrimary : _railText,
-                    ),
+                  child: Row(
+                    children: [
+                      if (icon != null) ...[
+                        Icon(icon, size: 15, color: AppTheme.primary),
+                        const SizedBox(width: 4),
+                      ],
+                      Expanded(
+                        child: Text(
+                          label,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: GoogleFonts.outfit(
+                            fontSize: 13,
+                            height: 1.25,
+                            fontWeight:
+                                selected ? FontWeight.w700 : FontWeight.w500,
+                            color: selected ? AppTheme.textPrimary : _railText,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),

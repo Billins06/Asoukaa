@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
+import '../../services/photo_picker_service.dart';
 
 import '../../theme/app_theme.dart';
 import '../../widgets/app_toast.dart';
@@ -48,8 +49,6 @@ class _BecomeVendorScreenState extends State<BecomeVendorScreen> {
   bool _termsAccepted = false;
   bool _fraudAccepted = false;
 
-  final _picker = ImagePicker();
-
   @override
   void dispose() {
     _shopNameController.dispose();
@@ -60,46 +59,14 @@ class _BecomeVendorScreenState extends State<BecomeVendorScreen> {
 
   // ── Choix des photos ──────────────────────────────────────────────────────
 
-  Future<ImageSource?> _choisirSource({bool cameraPossible = true}) async {
-    if (!cameraPossible) return ImageSource.gallery;
-    return showModalBottomSheet<ImageSource>(
-      context: context,
-      backgroundColor: AppTheme.surface,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.photo_camera_outlined,
-                  color: AppTheme.primary),
-              title: Text('Prendre une photo', style: GoogleFonts.outfit()),
-              onTap: () => Navigator.pop(ctx, ImageSource.camera),
-            ),
-            ListTile(
-              leading: const Icon(Icons.photo_library_outlined,
-                  color: AppTheme.primary),
-              title: Text('Choisir dans la galerie', style: GoogleFonts.outfit()),
-              onTap: () => Navigator.pop(ctx, ImageSource.gallery),
-            ),
-          ],
-        ),
-      ),
+  Future<_Photo?> _prendrePhoto({required int quality, bool selfie = false}) async {
+    final file = await PhotoPickerService.pick(
+      context,
+      imageQuality: quality,
+      frontCamera: selfie,
     );
-  }
-
-  Future<_Photo?> _prendrePhoto({required int quality}) async {
-    final source = await _choisirSource();
-    if (source == null) return null;
+    if (file == null) return null;
     try {
-      final file = await _picker.pickImage(
-        source: source,
-        imageQuality: quality,
-        maxWidth: 1600,
-      );
-      if (file == null) return null;
       final bytes = await file.readAsBytes();
       return _Photo(file, bytes);
     } catch (_) {
@@ -120,7 +87,7 @@ class _BecomeVendorScreenState extends State<BecomeVendorScreen> {
   }
 
   Future<void> _pickSelfie() async {
-    final photo = await _prendrePhoto(quality: 90);
+    final photo = await _prendrePhoto(quality: 90, selfie: true);
     if (photo != null && mounted) setState(() => _selfie = photo);
   }
 
@@ -148,6 +115,19 @@ class _BecomeVendorScreenState extends State<BecomeVendorScreen> {
       _sampleProducts.isNotEmpty &&
       _termsAccepted &&
       _fraudAccepted;
+
+  // Ce qui empêche encore l'envoi (affiché sous le formulaire).
+  List<String> get _champsManquants => [
+        if (_shopNameController.text.trim().length < 3) 'nom de la boutique',
+        if (_categoryIds.isEmpty) 'catégorie',
+        if (_shopAddressController.text.trim().length < 5) 'adresse',
+        if (_descriptionController.text.trim().length < 10) 'description',
+        if (_idDocument == null) 'pièce d\'identité',
+        if (_selfie == null) 'selfie',
+        if (_sampleProducts.isEmpty) 'photo d\'un produit',
+        if (!_termsAccepted) 'conditions d\'utilisation',
+        if (!_fraudAccepted) 'politique anti-fraude',
+      ];
 
   String _messageErreur(Object e) {
     if (e is DioException) {
@@ -384,11 +364,23 @@ class _BecomeVendorScreenState extends State<BecomeVendorScreen> {
               onChanged: (v) => setState(() => _fraudAccepted = v),
             ),
             const SizedBox(height: 24),
+            if (!_canSubmit)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: Text(
+                  'Il reste à compléter : ${_champsManquants.join(', ')}.',
+                  style: GoogleFonts.outfit(
+                    fontSize: 12,
+                    height: 1.4,
+                    color: AppTheme.warning,
+                  ),
+                ),
+              ),
             SizedBox(
               width: double.infinity,
               height: 50,
               child: ElevatedButton(
-                onPressed: (_isSubmitting || !_canSubmit) ? null : _handleSubmit,
+                onPressed: _isSubmitting ? null : _handleSubmit,
                 style: ElevatedButton.styleFrom(
                   backgroundColor: AppTheme.primary,
                   foregroundColor: Colors.white,

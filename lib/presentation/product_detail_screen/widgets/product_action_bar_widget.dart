@@ -6,6 +6,8 @@ class ProductActionBarWidget extends StatefulWidget {
   final int quantity;
   final VoidCallback onAddToCart;
   final VoidCallback onBuyNow;
+  // Livre déjà acheté : le bouton ouvre la Bibliothèque.
+  final VoidCallback? onOpenLibrary;
   final bool isInline;
 
   const ProductActionBarWidget({
@@ -14,6 +16,7 @@ class ProductActionBarWidget extends StatefulWidget {
     required this.quantity,
     required this.onAddToCart,
     required this.onBuyNow,
+    this.onOpenLibrary,
     this.isInline = false,
   });
 
@@ -58,6 +61,8 @@ class _ProductActionBarWidgetState extends State<ProductActionBarWidget>
   @override
   Widget build(BuildContext context) {
     final price = widget.product['price'] as int? ?? 0;
+    final isDigital = widget.product['isDigital'] == true;
+    final owned = isDigital && widget.product['owned'] == true;
 
     Widget content = Container(
       padding: EdgeInsets.only(
@@ -84,6 +89,31 @@ class _ProductActionBarWidgetState extends State<ProductActionBarWidget>
         mainAxisSize: MainAxisSize.min,
         children: [
           // Total price display
+          if (isDigital)
+            Row(
+              children: [
+                Text(
+                  owned ? 'Vous possédez ce livre' : 'Livre numérique (PDF) :',
+                  style: GoogleFonts.outfit(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w400,
+                    color: const Color(0xFF9E9E9E),
+                  ),
+                ),
+                if (!owned) ...[
+                  const SizedBox(width: 8),
+                  Text(
+                    price <= 0 ? 'Gratuit' : '${_formatPrice(price)} FCFA',
+                    style: GoogleFonts.outfit(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w800,
+                      color: const Color(0xFFFF6210),
+                    ),
+                  ),
+                ],
+              ],
+            )
+          else
           Row(
             children: [
               Text(
@@ -107,6 +137,36 @@ class _ProductActionBarWidgetState extends State<ProductActionBarWidget>
             ],
           ),
           const SizedBox(height: 12),
+          if (owned)
+            GestureDetector(
+              onTap: widget.onOpenLibrary,
+              child: Container(
+                height: 52,
+                width: double.infinity,
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    colors: [Color(0xFFFF6210), Color(0xFFFF8C42)],
+                  ),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(Icons.menu_book_rounded, size: 18, color: Colors.white),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Ouvrir ma Bibliothèque',
+                      style: GoogleFonts.outfit(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            )
+          else
           Row(
             children: [
               // Add to cart button
@@ -186,7 +246,7 @@ class _ProductActionBarWidgetState extends State<ProductActionBarWidget>
                         ),
                         const SizedBox(width: 6),
                         Text(
-                          'Acheter maintenant',
+                          isDigital && price <= 0 ? 'Obtenir gratuitement' : 'Acheter maintenant',
                           style: GoogleFonts.outfit(
                             fontSize: 15,
                             fontWeight: FontWeight.w700,
