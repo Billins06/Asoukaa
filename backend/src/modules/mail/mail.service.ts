@@ -38,7 +38,14 @@ export class MailService {
   private readonly logger = new Logger(MailService.name);
   private transporter: nodemailer.Transporter;
 
+  // Clé de l'API d'envoi par HTTPS (Resend). Si elle est renseignée, elle est
+  // utilisée à la place du SMTP : certains hébergeurs (Railway sur les petits
+  // plans) bloquent les ports SMTP 25/465/587, ce qui faisait « geler » toute
+  // action qui envoie un e-mail (inscription, code de vérification...).
+  private readonly resendApiKey?: string;
+
   constructor(private readonly config: ConfigService) {
+    this.resendApiKey = this.config.get<string>('RESEND_API_KEY')?.trim() || undefined;
     this.transporter = nodemailer.createTransport({
       host: this.config.get<string>('MAIL_HOST'),
       // Les variables d'env arrivent en chaînes : "false" serait truthy si on
@@ -49,18 +56,41 @@ export class MailService {
         user: this.config.get<string>('MAIL_USER'),
         pass: this.config.get<string>('MAIL_PASSWORD'),
       },
+      // Délais courts : un serveur de mail injoignable doit échouer en
+      // quelques secondes, pas bloquer l'inscription pendant 2 minutes.
+      connectionTimeout: 8000,
+      greetingTimeout: 8000,
+      socketTimeout: 15000,
     });
+  }
+
+  // Envoi réel (API HTTPS Resend si configurée, sinon SMTP). Lève une erreur
+  // en cas d'échec ; l'appelant décide de l'avaler (send) ou de la propager.
+  private async deliver(to: string, subject: string, html: string): Promise<void> {
+    const from = this.config.get<string>('MAIL_FROM');
+    if (this.resendApiKey) {
+      const res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.resendApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ from, to: [to], subject, html }),
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!res.ok) {
+        const detail = (await res.text().catch(() => '')).slice(0, 300);
+        throw new Error(`Resend ${res.status} : ${detail}`);
+      }
+      return;
+    }
+    await this.transporter.sendMail({ from, to, subject, html });
   }
 
   // ─── Méthode privée centrale d'envoi ──────────────────────────────────────
   private async send(to: string, subject: string, html: string): Promise<void> {
     try {
-      await this.transporter.sendMail({
-        from: this.config.get<string>('MAIL_FROM'),
-        to,
-        subject,
-        html,
-      });
+      await this.deliver(to, subject, html);
       this.logger.log(`Mail envoyé → ${to} | ${subject}`);
     } catch (error) {
       // On logue l'erreur mais on ne bloque pas le flux principal
@@ -75,12 +105,7 @@ export class MailService {
   // message qui ne viendra jamais — l'appelant doit pouvoir le lui dire.
   private async sendStrict(to: string, subject: string, html: string): Promise<void> {
     try {
-      await this.transporter.sendMail({
-        from: this.config.get<string>('MAIL_FROM'),
-        to,
-        subject,
-        html,
-      });
+      await this.deliver(to, subject, html);
       this.logger.log(`Mail envoyé → ${to} | ${subject}`);
     } catch (error) {
       this.logger.error(`Échec envoi mail → ${to} | ${subject}`, error?.message);

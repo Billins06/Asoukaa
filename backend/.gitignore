@@ -5,6 +5,7 @@ uploads/
 # Env & secrets
 .env*
 !.env.example
+!.env.railway.example
 *.pem
 *.key
 
